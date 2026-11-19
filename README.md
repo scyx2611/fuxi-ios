@@ -86,7 +86,7 @@
 | Wi-Fi 掃描 | 可掃描，仍偏慢 | 00:31 那趟：2.4 GHz 13 頻道約 **0.94 秒**、5 GHz 27 頻道約 **7.20 秒**、全頻約 **16.11 秒**；結果取回約 1–7 ms。不同掃描範圍分開比較。[E1](docs/status-20261118.zh-TW.md#e1) [E14](docs/status-20261118.zh-TW.md#e14) |
 | Wi-Fi 吞吐量 | 可傳輸，效能未達目標 | 使用者先前實測約 **100 Mbps**，後續確認有提升但未提供新數值，仍未達對照手機約 300 Mbps；AP 選擇器的 648–720 Mbps 是估計值，不能當實際網速。[E14](docs/status-20261118.zh-TW.md#e14) |
 | Wi-Fi 開關／重連 | 可切換，仍有偶發失敗 | 最新回退趟底層關閉 **2 ms**、開啟 **18 ms**；先出現一次 join=80，後續成功加入 5200 MHz。底層耗時不等於 UI 操作延遲。[E2](docs/status-20261118.zh-TW.md#e2) |
-| 藍牙 | 控制器版本查詢通過 | HCI probe **TX 5／RX 21 bytes、valid=1、fault=0**；QCA SoC **0x40170200**。搜尋、配對及音訊尚未驗收。[E8](docs/status-20261118.zh-TW.md#e8) |
+| 藍牙 | 耳機可用；關閉藍牙仍閃退 | 原廠 `bluetoothd` 直接驅動 QCA 控制器（SoC **0x40170200**）。UART 升到 **3.2 Mbaud** 後韌體載入約 **1.4 秒**，Apple 耳機 A2DP（AAC-ELD 48 kHz）播放正常，使用者已確認；耳機出盒會自動回連並完成加密。從設定頁配對 iPhone 不成功：對端沒開個人熱點時沒有可連的傳統藍牙服務（NAP `ServiceAvailability=0`），這是原生行為。在設定裡關閉藍牙時 `bluetoothd` 仍會閃退，修正中。[2026-11-19／20 趟次](records/journal/hw000-runs.zh-TW.md) |
 | 行動網路 | 尚未驗收 | 沒有通話、SMS 或 4G／5G 數據連線通過紀錄。[E15](docs/status-20261118.zh-TW.md#e15) |
 | 個人熱點 | 尚未驗收 | Wi-Fi station 連線成功不代表 AP／網路分享功能可用。[E15](docs/status-20261118.zh-TW.md#e15) |
 
