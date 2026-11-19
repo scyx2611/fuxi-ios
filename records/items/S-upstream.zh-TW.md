@@ -1992,7 +1992,7 @@
 - **做法**：修改 `bsd/kern/sweet_amfi.c` 並新增 `bsd/kern/fuxi_sys.h`（共 2 檔、188 行）。將 HackiOS `kern_minimac.c` 的 `minisandbox_priv_grant` entitlement 對照表與無容器 Sandbox request 4 處理移植為有界輔助標頭，僅檢查呼叫者自身憑證且每項特權開機首次授權記錄一次。
 - **復現**：見 README 共用步驟 1–3；開機參數帶 `fuxiprivs=1` 與／或 `fuxisbpath=1`；console 輸出 `FUXI SYS: privileges by entitlement %s (%u pairs), uncontained container path %s\n` 與 `FUXI SYS: %s privilege %d granted by %s\n`。
 - **主機測試**：無
-- **驗證紀錄**：上游提交未記實機結果
+- **驗證紀錄**：上游提交未記實機結果。000 線 2026-11-19 20:54 首次上機（K-077 趟 18）：bluetoothd、rapportd、identityservicesd 的 Skywalk 特權（12000／12001）及網路特權依 entitlement 放行，藍牙開關與 Windows SDP 無退步；沒有對應 entitlement 的 1002 照舊被拒。
 - **參考來源**：HackiOS（`hackios-xnu-kernel/bsd/kern/kern_minimac.c`，APSL 2.0）、`docs-lanes/sys-port.md`
 - **結論／未完成**：完成可選特權與無容器 Sandbox 路徑相容層，預設皆關閉。
 - **出處**：`ksrc:xnu/patches/0107-fuxi-sys.patch`；上游提交 `7234ecc`

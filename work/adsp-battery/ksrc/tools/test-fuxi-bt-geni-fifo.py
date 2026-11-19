@@ -50,7 +50,7 @@ struct model {
     uint64_t clock;
 };
 
-static struct fuxi_bt_geni_fifo_config config = {1, true, 0x30090000, 7372800};
+static struct fuxi_bt_geni_fifo_config config = {1, true, 0x30090000, 7372800, 0};
 
 static void model_init(struct model *model)
 {
@@ -245,6 +245,7 @@ static void open_ok(struct model *model, struct fuxi_bt_geni_fifo *fifo)
     assert(fuxi_bt_geni_fifo_open(fifo, &io, &config) == FUXI_BT_OK);
     assert(fifo->state == FUXI_BT_FIFO_OPEN && fifo->owns_secondary);
     assert(model->regs[0x48 / 4] == 0x41 && model->regs[0x4c / 4] == 0x41);
+    assert(fifo->baud == FUXI_BT_BOOT_BAUD && fifo->divider == 4);
     assert(model->regs[0x260 / 4] == 0x4380e && model->regs[0x264 / 4] == 0xc3e0e);
     assert(model->regs[0x284 / 4] == 0x4380e && model->regs[0x288 / 4] == 0xc3e0e);
     assert(model->regs[0x25c / 4] == (model->original[0x25c / 4] & ~3u));
@@ -337,6 +338,43 @@ static void test_guards(void)
     assert(fuxi_bt_geni_fifo_open(&fifo, &io, &candidate) == FUXI_BT_OK);
     assert(model.regs[0x48 / 4] == 0x21);
     closed_ok(&model, &fifo);
+
+    /* fuxi,bt-baud：速率表的時脈來源對應的 GENI 除頻（source／(baud×16)） */
+    {
+        static const struct { uint32_t source, baud, reg, divider; } rates[] = {
+            {7372800, 115200, 0x41, 4}, {14745600, 115200, 0x81, 8}, {14745600, 921600, 0x11, 1},
+            {32000000, 2000000, 0x11, 1}, {48000000, 3000000, 0x11, 1}, {51200000, 3200000, 0x11, 1},
+        };
+        static const struct { uint32_t qup, source, baud; } bad[] = {
+            {0x30090000, 7372800, 921600},    /* 7.3728 MHz 不夠 921600×16 */
+            {0x30090000, 51200000, 3000000},  /* 除不盡 */
+            {0x30090000, 102400000, 6400000}, /* 超過 FUXI_BT_MAX_BAUD */
+            {0x20040000, 51200000, 3200000},  /* 舊 QUP 取樣 32：除頻 0.5 */
+        };
+        for (unsigned index = 0; index < sizeof(rates) / sizeof(rates[0]); index++) {
+            model_init(&model);
+            memset(&fifo, 0, sizeof(fifo));
+            candidate = config;
+            candidate.source_hz = rates[index].source;
+            candidate.baud = rates[index].baud;
+            io = model_io(&model);
+            assert(fuxi_bt_geni_fifo_open(&fifo, &io, &candidate) == FUXI_BT_OK);
+            assert(model.regs[0x48 / 4] == rates[index].reg && model.regs[0x4c / 4] == rates[index].reg);
+            assert(fifo.baud == rates[index].baud && fifo.divider == rates[index].divider);
+            closed_ok(&model, &fifo);
+        }
+        for (unsigned index = 0; index < sizeof(bad) / sizeof(bad[0]); index++) {
+            model_init(&model);
+            memset(&fifo, 0, sizeof(fifo));
+            candidate = config;
+            candidate.qup_version = bad[index].qup;
+            candidate.source_hz = bad[index].source;
+            candidate.baud = bad[index].baud;
+            io = model_io(&model);
+            assert(fuxi_bt_geni_fifo_open(&fifo, &io, &candidate) == FUXI_BT_ARGUMENT);
+            assert(!model.calls && !model.writes);
+        }
+    }
 }
 
 static void test_tx(void)
@@ -645,6 +683,18 @@ static void test_cleanup(void)
         size_t accepted;
         assert(fuxi_bt_geni_fifo_write(&fifo, bytes, 8, &accepted) == FUXI_BT_OK);
         while (model.tx_count) model_tx_step(&model);
+        model.advance_at = model.calls + 4;
+        model.advance_us = FUXI_BT_FIFO_TX_TIMEOUT_US;
+        /* 已送完的傳送晚到的輪詢仍算完成（常駐收送的排程延遲） */
+        assert(fuxi_bt_geni_fifo_poll(&fifo) == FUXI_BT_OK && fifo.tx_completed == 8);
+        assert(!fifo.owns_master);
+    }
+    closed_ok(&model, &fifo);
+    model_init(&model);
+    open_ok(&model, &fifo);
+    {
+        size_t accepted;
+        assert(fuxi_bt_geni_fifo_write(&fifo, bytes, 8, &accepted) == FUXI_BT_OK);
         model.advance_at = model.calls + 4;
         model.advance_us = FUXI_BT_FIFO_TX_TIMEOUT_US;
         assert(fuxi_bt_geni_fifo_poll(&fifo) == FUXI_BT_TIMEOUT && !fifo.tx_completed);

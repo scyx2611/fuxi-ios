@@ -3,9 +3,9 @@
  * Ported from UniXNU-sheng package/ShengAudioReach.h (08cde20edc32, BSD-2-Clause-Patent) with fuxi_ names. */
 /* The audio DSP's graph manager (APM) commands for a speaker and a microphone path, as GPR packets. Two graphs per direction:
  * a device graph that owns the hardware endpoint and a stream graph that owns the shared memory endpoint; the stream graph's open
- * carries the connection into the device graph. Instance numbers below are the SHENG board topology, NOT verified for fuxi: fuxi's speaker is a TDM secondary endpoint, so
- * ar_open/config_speaker_device must be replaced once the fuxi ADSP topology is read from its ACDB (docs-lanes/audio.md). (device subgraph 0x4005 for the secondary
- * MI2S speakers, 0x4007 for codec DMA TX3, stream subgraphs 0x4001 playback and 0x4003 capture). Each packet stays within one GLINK
+ * carries the connection into the device graph. Instance ids are chosen by this client. The MI2S and codec DMA builders
+ * retain the Sheng topology. The TDM builders use the configuration from the earlier Fuxi audio driver.
+ * Each packet stays within one GLINK
  * intent (FUXI_GPR_MAX_PACKET). Pure encoding: no I/O, no waits. */
 #ifndef FUXI_AUDIOREACH_H
 #define FUXI_AUDIOREACH_H
@@ -37,6 +37,7 @@ extern "C" {
 #define FUXI_AR_MOD_PCM_ENC 0x07001004u
 #define FUXI_AR_MOD_PCM_DEC 0x07001005u
 #define FUXI_AR_MOD_I2S_SINK 0x0700100Au
+#define FUXI_AR_MOD_TDM_SINK 0x0700100Eu
 #define FUXI_AR_MOD_CODEC_DMA_SOURCE 0x07001024u
 
 #define FUXI_AR_SG_PLAY 0x4001u
@@ -47,6 +48,7 @@ extern "C" {
 #define FUXI_AR_IID_PLAY_DEC 0x6002u
 #define FUXI_AR_IID_PLAY_CNV 0x6003u
 #define FUXI_AR_IID_SPEAKER_I2S 0x6051u
+#define FUXI_AR_IID_SPEAKER_TDM 0x6052u
 #define FUXI_AR_IID_MIC_DMA 0x6070u
 #define FUXI_AR_IID_CAP_CNV 0x6022u
 #define FUXI_AR_IID_CAP_ENC 0x6023u
@@ -54,8 +56,8 @@ extern "C" {
 
 typedef struct {
     uint32_t rate;           /* Hz */
-    uint16_t bits;           /* 16 */
-    uint16_t channels;       /* 1 or 2 */
+    uint16_t bits;           /* PCM bits per sample */
+    uint16_t channels;
 } FuxiArFormat;
 
 /* Each builder writes one complete GPR packet into out (capacity bytes) and returns its size, or 0 when it does not fit.
@@ -63,6 +65,9 @@ typedef struct {
 uint32_t fuxi_ar_open_speaker_device(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token);
 uint32_t fuxi_ar_config_speaker_device(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, const FuxiArFormat *f);
 uint32_t fuxi_ar_open_playback_stream(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token);
+uint32_t fuxi_ar_open_speaker_tdm(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token);
+uint32_t fuxi_ar_config_speaker_tdm(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, const FuxiArFormat *f);
+uint32_t fuxi_ar_open_playback_stream_tdm(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token);
 uint32_t fuxi_ar_config_playback_stream(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, const FuxiArFormat *f);
 uint32_t fuxi_ar_config_playback_shmem(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, const FuxiArFormat *f);
 uint32_t fuxi_ar_open_mic_device(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token);

@@ -230,6 +230,22 @@ def app_description(directory):
     return text, tar, directory / 'files.sha256'
 
 
+def audio_hal_plan(action, bundle, checksum):
+    names = ('FuxiAudio', 'Info.plist')
+    if not bundle.is_dir() or sorted(path.name for path in bundle.iterdir()) != list(names):
+        raise ValueError('Expected the verified FuxiAudio.driver bundle')
+    if any((bundle / name).is_symlink() or not (bundle / name).is_file() for name in names):
+        raise ValueError('Audio trial requires regular bundle files')
+    verified = json.loads(run([sys.executable, '-X', 'utf8', ROOT / 'work/localbuild/verify-sb-shape.py',
+                               '--audio-bundle', bundle]))
+    if verified['sha256'] != checksum:
+        raise ValueError('FuxiAudio hash differs from the verified build')
+    editor = ROOT / 'work/adsp-battery/ksrc/tools/fuxi-sys-root.py'
+    plan = {'action': action, 'files': dict(zip(names, (verified['sha256'], verified['info_sha256']))),
+            'editor_sha256': hashlib.sha256(editor.read_bytes()).hexdigest()}
+    return editor, json.dumps(plan, indent=2) + '\n'
+
+
 def stage(arguments):
     output = Path(arguments.output).resolve()
     if output.parent != Path(__file__).resolve().parent:
@@ -242,6 +258,7 @@ def stage(arguments):
     wifi_logging = arguments.wifi_logging
     apps = arguments.install_staged_apps
     app_dir = Path(arguments.install_app).resolve() if arguments.install_app else None
+    audio_hal = arguments.audio_hal
     # 32 個 App 目錄改名＋placeholder 停放會改到分散的 catalog 節點，上限放寬到 256 區塊（1 GiB）；
     # 第三方 App 約 140 MiB 資料＋catalog／extents／bitmap，同樣用 256。
     limit = 256 if apps or app_dir else 64
@@ -258,7 +275,14 @@ def stage(arguments):
         raise ValueError('--turnip-hybrid is a separate library staging run')
     if zone is not None and job is not None:
         raise ValueError('--timezone and --disable-job are separate runs')
-    if app_dir:
+    if audio_hal:
+        if any((zone, job, turnip, wifi_logging, apps, app_dir, arguments.dylib)):
+            raise ValueError('--audio-hal is a separate staging run')
+        bundle = Path(arguments.audio_bundle).resolve(strict=True)
+        editor, audio_plan = audio_hal_plan(audio_hal, bundle, arguments.sha256)
+        guest = Path(__file__).resolve().parent / 'stage-audio-hal-guest.py'
+        script, token = 'stage-audio-hal.sh', 'AUDIO_HAL_STAGE_SUCCESS'
+    elif app_dir:
         script, token = 'stage-install-app.sh', 'INSTALL_APP_STAGE_SUCCESS'
         tweaks_sha = hashlib.sha256(TWEAKS.read_bytes()).hexdigest()
         app_text, app_tar, app_files = app_description(app_dir)
@@ -312,7 +336,14 @@ def stage(arguments):
                 guest_log = (output / 'guest.log').read_text(encoding='utf-8')
                 if token not in guest_log or 'FAST_STAGE_SUCCESS' not in guest_log or 'GUEST_OK' not in guest_log:
                     raise RuntimeError('The staged guest did not finish')
-                if apps or app_dir:
+                if audio_hal:
+                    if ((share / 'audio-hal.json').read_text(encoding='ascii') != audio_plan or
+                            (share / 'stage-audio-hal-guest.py').read_bytes() != guest.read_bytes() or
+                            (share / 'fuxi-sys-root.py').read_bytes() != editor.read_bytes() or
+                            any((share / 'FuxiAudio.driver' / name).read_bytes() != (bundle / name).read_bytes()
+                                for name in ('FuxiAudio', 'Info.plist'))):
+                        raise ValueError('The staged audio trial differs')
+                elif apps or app_dir:
                     if hashlib.sha256((share / 'sweet-root-tweaks.py').read_bytes()).hexdigest() != tweaks_sha:
                         raise ValueError('The staged root tweak script differs')
                     if app_dir and ((share / 'app.txt').read_text(encoding='ascii') != app_text or
@@ -330,7 +361,7 @@ def stage(arguments):
                         raise ValueError('The staged launchd job differs')
                 elif hashlib.sha256((share / 'libfuxi-sb.dylib').read_bytes()).hexdigest() != arguments.sha256:
                     raise ValueError('The staged dylib differs')
-                if zone is None and job is None and wifi_logging is None and not apps and not app_dir:
+                if zone is None and job is None and wifi_logging is None and not apps and not app_dir and not audio_hal:
                     kind_path = share / 'library-kind.txt'
                     staged_kind = kind_path.read_text(encoding='ascii').strip() if kind_path.exists() else 'shape'
                     if staged_kind != ('turnip-hybrid' if turnip else 'shape'):
@@ -341,7 +372,12 @@ def stage(arguments):
                 share.mkdir()
                 for name in (script, 'stage-share/hfs-journal-block-probe.py'):
                     shutil.copy2(Path(__file__).resolve().parent / name, share)
-                if apps or app_dir:
+                if audio_hal:
+                    shutil.copytree(bundle, share / 'FuxiAudio.driver')
+                    shutil.copy2(editor, share)
+                    shutil.copy2(guest, share)
+                    (share / 'audio-hal.json').write_text(audio_plan, encoding='ascii', newline='\n')
+                elif apps or app_dir:
                     shutil.copy2(TWEAKS, share / 'sweet-root-tweaks.py')
                     (share / 'tweaks-sha256.txt').write_text(
                         f'{tweaks_sha}  sweet-root-tweaks.py\n', encoding='ascii', newline='\n')
@@ -442,13 +478,18 @@ if __name__ == '__main__':
                         help='Move the 32 staged stock apps into /Applications (sweet-root-tweaks.py) and reset LaunchServices')
     parser.add_argument('--install-app', metavar='DIR',
                         help='Install a resign-app-adhoc.py output (app.tar) into /Applications and reset LaunchServices')
+    parser.add_argument('--audio-hal', choices=('enable', 'disable'),
+                        help='Install or back out the FuxiAudio HAL trial and VirtualAudio move')
+    parser.add_argument('--audio-bundle', metavar='DIR')
     parser.add_argument('--serial', default=os.environ.get('FUXI_ANDROID_SERIAL', ''))
     arguments = parser.parse_args()
     if arguments.self_test:
         self_test()
     else:
+        if bool(arguments.audio_hal) != bool(arguments.audio_bundle) or (arguments.audio_hal and not arguments.sha256):
+            parser.error('--audio-hal needs --audio-bundle and the verified binary --sha256')
         if not arguments.output or not (arguments.timezone or arguments.disable_job or arguments.wifi_logging or
-                                        arguments.install_staged_apps or arguments.install_app or
+                                        arguments.install_staged_apps or arguments.install_app or arguments.audio_hal or
                                         ((arguments.dylib or arguments.turnip_hybrid) and arguments.sha256)):
             parser.error('--output plus a configuration action or a library and --sha256 are required')
         stage(arguments)

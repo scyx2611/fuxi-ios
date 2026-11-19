@@ -7,6 +7,10 @@ param(
     [Parameter(ParameterSetName = 'Boot')][int]$Reset = 6,
     [Parameter(ParameterSetName = 'Boot')][int]$FramebufferHeight = 2400,
     [Parameter(ParameterSetName = 'Boot')][switch]$FinalFramebuffer,
+    [Parameter(ParameterSetName = 'Boot')][string]$PeerTestPython,
+    [Parameter(ParameterSetName = 'Boot')][switch]$PeerAfterPowerCycle,
+    [Parameter(ParameterSetName = 'Boot')][switch]$PeerAudioSource,
+    [Parameter(ParameterSetName = 'Boot')][ValidateCount(2,2)][ValidatePattern('^[a-z0-9-]+$')][string[]]$PeerIdentityRuns,
     [Parameter(ParameterSetName = 'Boot')][string]$Dylib,
     [Parameter(ParameterSetName = 'Boot')][ValidatePattern('^[a-f0-9]{64}$')][string]$DylibSha,
     [Parameter(ParameterSetName = 'Boot')][string]$TurnipHybrid,
@@ -15,7 +19,15 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'WifiLogging')][ValidateSet('enable', 'disable')][string]$WifiLogging,
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectWifiLog')][switch]$InspectWifiLog,
     [Parameter(Mandatory = $true, ParameterSetName = 'CalibrateRtc')][switch]$CalibrateRtc,
+    [Parameter(Mandatory = $true, ParameterSetName = 'PullConsole')][switch]$PullConsole,
+    [Parameter(Mandatory = $true, ParameterSetName = 'CaptureAudioFirmware')][switch]$CaptureAudioFirmware,
+    [Parameter(Mandatory = $true, ParameterSetName = 'CaptureAudioCalibration')][switch]$CaptureAudioCalibration,
+    [Parameter(Mandatory = $true, ParameterSetName = 'InspectHaptic')][switch]$InspectHaptic,
+    [Parameter(ParameterSetName = 'InspectHaptic')][switch]$TraceEffects,
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectCrash')][switch]$InspectCrash,
+    [Parameter(Mandatory = $true, ParameterSetName = 'AudioHal')][ValidateSet('enable', 'disable')][string]$AudioHal,
+    [Parameter(Mandatory = $true, ParameterSetName = 'AudioHal')][string]$AudioBundle,
+    [Parameter(Mandatory = $true, ParameterSetName = 'AudioHal')][ValidatePattern('^[a-f0-9]{64}$')][string]$AudioSha,
     [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][ValidateSet('backup', 'rootbackup', 'prepare', 'survey', 'android', 'recovery', 'ios', 'inspectreturn', 'timing', 'stocktiming', 'removeksu')][string]$DualBootCheck,
     [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][string]$RestorePoint,
     [Parameter(ParameterSetName = 'DualBoot')][string]$Candidate,
@@ -44,6 +56,8 @@ $gitBash = 'C:\Program Files\Git\bin\bash.exe'
 $serial = $env:FUXI_ANDROID_SERIAL; if (-not $serial) { throw 'Set FUXI_ANDROID_SERIAL to the phone serial shown by adb devices' }
 $token = "000 loader check $Out pid=$PID $(Get-Date -Format o)"
 $ownedLocks = @()
+$peerJob = $null
+$peerState = $null
 # Windows PowerShell 5.1：Stop 模式下原生程式寫到 stderr 的字（即使 2>$null，或呼叫端用 *> 轉向）會變成致命錯誤。
 # 手機還沒回 Android 時 adb 會寫「device not found」，曾讓本腳本跳過 reset-soon 與等待回程（2026-11-17 02:41）。
 # 原生程式一律在 Continue 下執行，成敗只看結束碼。
@@ -56,6 +70,22 @@ function Test-AndroidBooted {
     "$(Invoke-Native { & adb -s $serial shell getprop sys.boot_completed 2>$null })" -match '^1'
 }
 Set-Location $workspace
+if ([bool]$PeerTestPython -ne [bool]$PeerIdentityRuns) { throw 'Provide both the peer-test Python and two reference runs' }
+if ($PeerAfterPowerCycle -and -not $PeerTestPython) { throw 'A power-cycle check requires the Windows peer test' }
+if ($PeerAudioSource -and -not $PeerTestPython) { throw 'An audio service check requires the Windows peer test' }
+if ($PeerTestPython) {
+    if ($Out -cnotmatch '^[a-z0-9-]+$') { throw 'Invalid peer-test run name' }
+    $peerRun = Join-Path $storage $Out
+    if (Test-Path -LiteralPath $peerRun) { throw 'Peer test needs a new run directory' }
+    $peerScript = Join-Path $workspace 'work\statusbar-fix\windows-bluetooth-peer.py'
+    $peerArgs = @('-X', 'utf8', '-B', $peerScript, '--reference')
+    foreach ($name in $PeerIdentityRuns) { $peerArgs += (Join-Path $storage "$name\boot.log") }
+    $peerArgs += @('--run', $peerRun, '--marker-timeout', "$Seconds")
+    if ($PeerAfterPowerCycle) { $peerArgs += '--require-cycle' }
+    if ($PeerAudioSource) { $peerArgs += '--audio-source' }
+    & $PeerTestPython @peerArgs --preflight
+    if ($LASTEXITCODE -ne 0) { throw 'Windows radio or phone identity preflight failed' }
+}
 if ([bool]$Dylib -ne [bool]$DylibSha) { throw 'Dylib and its verified SHA256 must be provided together' }
 if ($Dylib -and (Get-FileHash -LiteralPath $Dylib -Algorithm SHA256).Hash.ToLowerInvariant() -ne $DylibSha) {
     throw 'Dylib hash differs from the verified build'
@@ -78,6 +108,23 @@ if ($CalibrateRtc) {
     $calibration = Join-Path $workspace "work\adsp-battery\rtc-calibration-$Out.json"
     Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\adsp-battery\rtc-calibration.py') capture $calibration }
     if ($LASTEXITCODE -ne 0) { throw 'Read-only RTC calibration failed' }
+    return
+}
+if ($InspectHaptic) {
+    if ($Out -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') { throw 'Invalid haptic report name' }
+    $hapticArgs = @('--serial', $serial, '--out', $Out)
+    if ($TraceEffects) { $hapticArgs += '--trace' }
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\inspect-android-haptic.py') @hapticArgs }
+    if ($LASTEXITCODE -ne 0) { throw 'Android haptic inspection failed' }
+    return
+}
+if ($CaptureAudioFirmware -or $CaptureAudioCalibration) {
+    if ($Out -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') { throw 'Invalid audio firmware capture name' }
+    $capture = Join-Path $workspace "work\adsp-battery\$Out"
+    $audioKind = if ($CaptureAudioCalibration) { '--calibration' } else { '--cs35l41' }
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\fetch-android-audio-config.py') `
+        $audioKind --output $capture --serial $serial }
+    if ($LASTEXITCODE -ne 0) { throw 'Read-only Android audio firmware capture failed' }
     return
 }
 if ($InstallPersistent -or $ValidatePersistent -or $UpgradePersistent) {
@@ -117,6 +164,7 @@ if ($DualBootCheck) {
 }
 Invoke-Native { & $gitBash 'work/adsp-battery/hw000/fuxi-log.sh' pull }
 if ($LASTEXITCODE -ne 0) { throw 'Persistent log pull failed; next boot stopped' }
+if ($PullConsole) { return }
 if ($DeployChain) {
     # Reuse the existing writer and verified recovery flow. It acquires both
     # locks itself, verifies the 12GB SKU and old boot/module, reads back every
@@ -154,6 +202,13 @@ if ($InspectCrash) {
     if ($LASTEXITCODE -ne 0) { throw 'Read-only crash report inspection failed' }
     return
 }
+if ($AudioHal) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --audio-hal $AudioHal --audio-bundle $AudioBundle --sha256 $AudioSha `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'Audio HAL staging failed' }
+    return
+}
 if ($Dylib) {
     $stageOutput = Join-Path $workspace "work\statusbar-fix\run-$Out-stage"
     Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
@@ -179,6 +234,13 @@ try {
     }
     if (Test-Path -LiteralPath $phonePause) { throw 'Phone work was paused' }
     "$(Get-Date -Format HH:mm:ss) PHONE_START $token"
+    if ($PeerTestPython) {
+        $peerJob = Start-Job -ScriptBlock {
+            param($interpreter, $arguments)
+            & $interpreter @arguments
+            if ($LASTEXITCODE -ne 0) { throw 'Windows Bluetooth peer check failed' }
+        } -ArgumentList $PeerTestPython,$peerArgs
+    }
     & (Join-Path $storage 'boot-exp-v.ps1') -Loader $Loader -Out $Out -Kernel $Kernel `
         -Seconds $Seconds -Reset $Reset -Verifier 'verify-loader-safety.py' `
         -TourShots:(-not $FinalFramebuffer) -Framebuffer:$FinalFramebuffer `
@@ -199,6 +261,12 @@ try {
     } while ($true)
     "$(Get-Date -Format HH:mm:ss) LOADER_CHECK_DONE $Out"
 } finally {
+    if ($peerJob) {
+        if ($peerJob.State -eq 'Running') { Stop-Job -Job $peerJob }
+        $peerState = $peerJob.State
+        Receive-Job -Job $peerJob -ErrorAction Continue
+        Remove-Job -Job $peerJob -Force
+    }
     foreach ($path in $ownedLocks) {
         if ((Test-Path -LiteralPath $path) -and
             [System.IO.File]::ReadAllText($path) -eq $token) {
@@ -206,4 +274,7 @@ try {
         }
     }
     "$(Get-Date -Format HH:mm:ss) PHONE_RELEASED $Out"
+}
+if ($peerState -and $peerState -ne 'Completed') {
+    throw "Windows peer test ended with state $peerState"
 }

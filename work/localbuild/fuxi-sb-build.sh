@@ -47,9 +47,13 @@ clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
     "$HARNESS/tools/test-vibe-pattern.c" -o "$BUILD/test-vibe-pattern"
 ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-vibe-pattern" > "$OUT/logs/vibe-pattern.txt" 2>&1
 python3 "$HARNESS/tools/test-vibe-worker.py" > "$OUT/logs/vibe-worker.txt" 2>&1
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
+    "$HARNESS/tools/test-oslog-format.c" -o "$BUILD/test-oslog-format"
+ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-oslog-format" > "$OUT/logs/oslog-format.txt" 2>&1
 (
     OBJECTS=()
-    for unit in FuxiShape FuxiFlashlight FuxiBatteryAudit FuxiVibrate FuxiWifiAudit; do
+    for unit in FuxiShape FuxiFlashlight FuxiBatteryAudit FuxiVibrate FuxiWifiAudit FuxiBluetoothProbe FuxiBlueTool \
+        FuxiBluetoothLog; do
         "$CLANG" -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wall -Wextra -Werror \
             -fstack-protector-strong -c "$SOURCE/$unit.c" -o "$BUILD/$unit.o"
         OBJECTS+=("$BUILD/$unit.o")

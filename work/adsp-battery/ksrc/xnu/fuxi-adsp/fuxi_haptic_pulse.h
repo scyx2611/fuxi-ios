@@ -47,7 +47,7 @@ typedef struct {
 static inline int fuxi_haptic_writable(unsigned address)
 {
     return address == 0xf046 || address == 0xf048 || address == 0xf04b ||
-        address == 0xf04c || address == 0xf04e || address == 0xf063 ||
+        address == 0xf04c || address == 0xf04e || address == 0xf063 || address == 0xf066 ||
         address == 0xf126 || address == 0xf130 || address == 0xf131 ||
         (address >= 0xf134 && address <= 0xf14b);
 }

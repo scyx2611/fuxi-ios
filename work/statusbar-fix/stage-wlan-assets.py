@@ -20,6 +20,14 @@ BLOCK_BYTES = 4194304
 SERIAL = os.environ.get('FUXI_ANDROID_SERIAL', '')
 WLAN_PATH = PurePosixPath('/usr/local/share/fuxi/wlan')
 FIXED_FILES = ('amss.bin', 'amss20.bin', 'regdb_xiaomi.bin', 'm3.bin')
+# 2026-11-18：manifest 帶 "kind": "bt" 時改部署 WCN7850 藍牙韌體（核心 fuxi,bt=4 由這個目錄讀
+# hmtbtfw20.tlv 與 hmtnv20.b<board ID>／.bin）；覆蓋層、fsck、逐塊比對與讀回流程與 WLAN 相同。
+BT_PATH = PurePosixPath('/usr/local/share/fuxi/bt')
+BT_PATCH = 'hmtbtfw20.tlv'
+BT_NAME = re.compile(r'hmtbtfw20\.(?:tlv|ver)|hmtnv20\.(?:b[0-9a-f]{2,4}|bin)')
+BT_MAX_FILES = 64
+BT_MAX_PATCH_BYTES = 1024 * 1024  # 核心 FUXI_BT_PATCH_MAX
+BT_MAX_NVM_BYTES = 65536  # 核心 FUXI_BT_NVM_MAX
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_M3_BYTES = 512 * 1024
@@ -76,13 +84,54 @@ def provenance_has_text(value):
     return False
 
 
+def is_bt(manifest):
+    return manifest.get('kind') == 'bt'
+
+
+def target_path(manifest):
+    return BT_PATH if is_bt(manifest) else WLAN_PATH
+
+
 def asset_names(manifest):
+    if is_bt(manifest):
+        return tuple(manifest['required'])
     return FIXED_FILES + (manifest['bdf_basename'],)
+
+
+def file_limit(manifest, name):
+    if is_bt(manifest):
+        if name == BT_PATCH:
+            return BT_MAX_PATCH_BYTES
+        return BT_MAX_NVM_BYTES if name.startswith('hmtnv') else MAX_TEXT_BYTES
+    return MAX_M3_BYTES if name == 'm3.bin' else MAX_FILE_BYTES
+
+
+def validate_bt_names(manifest):
+    if set(manifest) - {'kind', 'root_path', 'required', 'provenance', 'files'}:
+        raise ValueError('Unexpected Bluetooth manifest fields')
+    required = manifest.get('required')
+    if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
+        raise ValueError('required must list the Bluetooth filenames')
+    if not 2 <= len(required) <= BT_MAX_FILES or len({name.casefold() for name in required}) != len(required):
+        raise ValueError('required must contain 2-64 distinct Bluetooth filenames')
+    if not all(BT_NAME.fullmatch(name) for name in required):
+        raise ValueError('Bluetooth filenames must be WCN7850 rampatch, version or NVM names')
+    if BT_PATCH not in required or not any(name.startswith('hmtnv20.') for name in required):
+        raise ValueError('The Bluetooth set needs the rampatch and at least one NVM')
+    provenance = manifest.get('provenance')
+    if not isinstance(provenance, dict) or not provenance_has_text(provenance):
+        raise ValueError('Bluetooth provenance is required')
+    return tuple(required)
 
 
 def validate_manifest_schema(manifest):
     if not isinstance(manifest, dict) or manifest.get('root_path') != ROOT_PATH:
         raise ValueError('The manifest must name the fixed native root path')
+    if 'kind' in manifest and manifest['kind'] != 'bt':
+        raise ValueError('Unknown asset kind')
+    if is_bt(manifest):
+        names = validate_bt_names(manifest)
+        return validate_file_records(manifest, names)
     basename = manifest.get('bdf_basename')
     if not isinstance(basename, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', basename):
         raise ValueError('bdf_basename must be a safe basename')
@@ -100,6 +149,10 @@ def validate_manifest_schema(manifest):
     m3 = manifest.get('m3_provenance')
     if not isinstance(m3, (dict, str)) or not provenance_has_text(m3):
         raise ValueError('Nonempty m3_provenance is required')
+    return validate_file_records(manifest, names)
+
+
+def validate_file_records(manifest, names):
     files = manifest.get('files')
     if not isinstance(files, dict) or set(files) != set(names):
         raise ValueError('files must contain exactly the five selected filenames')
@@ -112,7 +165,7 @@ def validate_manifest_schema(manifest):
         checksum, length, host_path = (record.get(key) for key in ('sha256', 'bytes', 'host_path'))
         if not isinstance(checksum, str) or not re.fullmatch(r'[a-f0-9]{64}', checksum):
             raise ValueError(f'A SHA-256 is required: {name}')
-        limit = MAX_M3_BYTES if name == 'm3.bin' else MAX_FILE_BYTES
+        limit = file_limit(manifest, name)
         if type(length) is not int or not 1 <= length <= limit:
             raise ValueError(f'File size exceeds its bound: {name}')
         if not isinstance(host_path, str) or not host_path or any(character in host_path for character in '\0\r\n'):
@@ -317,19 +370,19 @@ def is_reparse_point(metadata):
     return bool(getattr(metadata, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0))
 
 
-def checked_directory(root, create=False):
+def checked_directory(root, create=False, path=WLAN_PATH):
     root = Path(root)
     metadata = root.lstat()
     if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
         raise ValueError('The guest root must be a real directory')
     current = root.resolve(strict=True)
-    for component in WLAN_PATH.parts[1:]:
+    for component in path.parts[1:]:
         current = current / component
         try:
             metadata = current.lstat()
         except FileNotFoundError:
             if not create:
-                return root.resolve(strict=True).joinpath(*WLAN_PATH.parts[1:])
+                return root.resolve(strict=True).joinpath(*path.parts[1:])
             current.mkdir(mode=0o755)
             metadata = current.lstat()
         if stat.S_ISLNK(metadata.st_mode) or is_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
@@ -354,18 +407,19 @@ def installed_metadata(path):
 def install_guest_assets(root, share):
     manifest, manifest_sha256 = validate_share(share)
     names = asset_names(manifest)
-    target_directory = checked_directory(root)
+    destination = target_path(manifest)
+    target_directory = checked_directory(root, path=destination)
     for name in names:
         check_target(target_directory / name)
     contents = {}
     for name in names:
         contents[name] = read_verified_file(Path(share) / 'assets' / name, manifest['files'][name])
-    target_directory = checked_directory(root, create=True)
+    target_directory = checked_directory(root, create=True, path=destination)
     records = []
     for name in names:
         record = manifest['files'][name]
         target = target_directory / name
-        checked_directory(root)
+        checked_directory(root, path=destination)
         check_target(target)
         changed = True
         if target.exists() and target.stat().st_size == record['bytes'] and installed_metadata(target):
@@ -380,7 +434,7 @@ def install_guest_assets(root, share):
                     os.fsync(stream.fileno())
                 os.chown(temporary, 0, 0)
                 os.chmod(temporary, 0o644)
-                checked_directory(root)
+                checked_directory(root, path=destination)
                 check_target(target)
                 temporary.replace(target)
             finally:
@@ -389,7 +443,7 @@ def install_guest_assets(root, share):
         read_verified_file(target, record)
         if not installed_metadata(target):
             raise ValueError(f'Installed ownership or permissions differ: {name}')
-        records.append({'runtime_path': str(WLAN_PATH / name), 'sha256': record['sha256'],
+        records.append({'runtime_path': str(destination / name), 'sha256': record['sha256'],
                         'bytes': record['bytes'], 'changed': changed})
     validate_share(share)
     if digest(read_text_bytes(Path(share) / 'input-manifest.json')) != manifest_sha256:
@@ -402,8 +456,8 @@ def validate_output(path, directory=DIRECTORY):
     if path.exists() or path.is_symlink():
         raise ValueError('The output already exists')
     output = path.resolve()
-    if output.parent != Path(directory).resolve() or not re.fullmatch(r'run-wlan-[a-z0-9]+(?:-[a-z0-9]+)*', output.name):
-        raise ValueError('Use a new statusbar-fix/run-wlan-[safe-name] directory')
+    if output.parent != Path(directory).resolve() or not re.fullmatch(r'run-(?:wlan|bt)-[a-z0-9]+(?:-[a-z0-9]+)*', output.name):
+        raise ValueError('Use a new statusbar-fix/run-wlan-[safe-name] or run-bt-[safe-name] directory')
     if len(output.name) > 110:
         raise ValueError('The output name is too long')
     return output
@@ -456,13 +510,13 @@ def guest_records(log, manifest):
     if len(matches) != 1:
         raise ValueError('The guest file report is missing or repeated')
     records = decode_json(matches[0].encode('utf-8'))
-    if not isinstance(records, list) or len(records) != 5:
+    if not isinstance(records, list) or len(records) != len(asset_names(manifest)):
         raise ValueError('Invalid guest file report')
     for name, record in zip(asset_names(manifest), records):
         expected = manifest['files'][name]
         if not isinstance(record, dict) or set(record) != {'runtime_path', 'sha256', 'bytes', 'changed'}:
             raise ValueError('Invalid guest file record')
-        if record['runtime_path'] != str(WLAN_PATH / name) or record['sha256'] != expected['sha256']:
+        if record['runtime_path'] != str(target_path(manifest) / name) or record['sha256'] != expected['sha256']:
             raise ValueError('The guest wrote unexpected file paths or contents')
         if type(record['bytes']) is not int or record['bytes'] != expected['bytes'] or type(record['changed']) is not bool:
             raise ValueError('The guest file size or change flag differs')
@@ -510,6 +564,8 @@ def stage(arguments):
     output = validate_output(arguments.output)
     manifest_path = Path(arguments.manifest).resolve(strict=True)
     manifest, manifest_sha256 = load_manifest(manifest_path)
+    if output.name.startswith('run-bt-') != is_bt(manifest):
+        raise ValueError('Bluetooth manifests use run-bt-*, WLAN manifests use run-wlan-*')
     if arguments.serial != SERIAL or not 1024 <= arguments.port <= 65535:
         raise ValueError('Use the verifier serial and an unprivileged guest port')
     phone = load_phone()

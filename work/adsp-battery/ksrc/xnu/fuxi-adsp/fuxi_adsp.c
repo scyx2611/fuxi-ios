@@ -49,6 +49,7 @@
 #include "QcomSmem.h"
 #include "QcomSmp2p.h"
 #include "ShengAdsp.h"
+#include "fuxi_audio_smmu.h"
 #include "fuxi_rpmh_shared.h"
 
 extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
@@ -73,6 +74,7 @@ extern void fuxi_ramtest_init(void);
 extern void fuxi_bt_init(void);
 extern void fuxi_audio_spf_start(void);
 extern void fuxi_audio_spf_poll(void);
+extern unsigned fuxi_gpu_access(uintptr_t, uint64_t *, unsigned, unsigned);
 extern volatile int32_t native_qrtr_stats[16];
 extern char native_qrtr_text[96];
 void fuxi_adsp_init(void);
@@ -171,7 +173,7 @@ static void wr(const struct fa_window *w, uint64_t at, uint32_t value)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 /* kernel_map VA plus one pmap entry per page; never a partial window. */
-static kern_return_t fa_map(struct fa_window *w, unsigned wimg)
+static kern_return_t fa_map_prot(struct fa_window *w, unsigned wimg, vm_prot_t prot)
 {
     vm_offset_t va = 0;
     if (w->va) return KERN_SUCCESS;
@@ -179,7 +181,7 @@ static kern_return_t fa_map(struct fa_window *w, unsigned wimg)
     kern_return_t kr = kmem_alloc(kernel_map, &va, w->size, KMA_VAONLY | KMA_KOBJECT | KMA_NOPAGEWAIT, VM_KERN_MEMORY_IOKIT);
     if (kr != KERN_SUCCESS) return kr;
     for (vm_size_t off = 0; off < w->size; off += PAGE_SIZE) {
-        kr = pmap_enter_options_addr(kernel_pmap, va + off, w->pa + off, VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, wimg, TRUE,
+        kr = pmap_enter_options_addr(kernel_pmap, va + off, w->pa + off, prot, VM_PROT_NONE, wimg, TRUE,
             PMAP_OPTIONS_NOWAIT, NULL);
         if (kr != KERN_SUCCESS) {
             pmap_remove(kernel_pmap, va, va + w->size);
@@ -190,6 +192,115 @@ static kern_return_t fa_map(struct fa_window *w, unsigned wimg)
     w->va = va;
     return KERN_SUCCESS;
 }
+
+static kern_return_t fa_map(struct fa_window *w, unsigned wimg)
+{
+    return fa_map_prot(w, wimg, VM_PROT_READ | VM_PROT_WRITE);
+}
+
+static bool audio_smmu_read(void *context, uint32_t offset, uint32_t *value)
+{
+    const struct fa_window *window = context;
+    uint64_t data = 0;
+    if (offset & 3u || offset >= window->size ||
+        fuxi_gpu_access(window->va + offset, &data, 0, 0) || (uint32_t)data == UINT32_MAX) {
+        return false;
+    }
+    *value = (uint32_t)data;
+    return true;
+}
+
+static struct fa_window gAudioDma;
+
+bool fuxi_audio_dma_open(uint64_t *address);
+void fuxi_audio_dma_close(void);
+
+bool fuxi_audio_dma_open(uint64_t *address)
+{
+    DTEntry chosen;
+    const void *property;
+    unsigned bytes;
+    struct fuxi_audio_dma_handoff handoff;
+    if (gAudioDma.va || SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
+        SecureDTGetProperty(chosen, "fuxi,audio-dma", &property, &bytes) != kSuccess ||
+        bytes != sizeof(handoff)) {
+        return false;
+    }
+    memcpy(&handoff, property, sizeof(handoff));
+    if (!fuxi_audio_dma_handoff_valid(&handoff)) {
+        return false;
+    }
+
+    struct fa_window smmu = {FUXI_APPS_SMMU_BASE, FUXI_APPS_SMMU_BYTES, 0};
+    if (fa_map_prot(&smmu, VM_WIMG_IO, VM_PROT_READ) != KERN_SUCCESS) {
+        return false;
+    }
+    struct fuxi_audio_smmu_state state;
+    const bool usable = fuxi_audio_smmu_read_state(audio_smmu_read, &smmu, &state) == FUXI_AUDIO_SMMU_OK &&
+        fuxi_audio_smmu_routes_ready(&state) && fuxi_audio_smmu_bypass_ready(audio_smmu_read, &smmu, &state);
+    pmap_remove(kernel_pmap, smmu.va, smmu.va + smmu.size);
+    kmem_free(kernel_map, smmu.va, smmu.size);
+    if (!usable) {
+        return false;
+    }
+
+    gAudioDma = (struct fa_window){handoff.pa, handoff.bytes, 0};
+    if (fa_map(&gAudioDma, VM_WIMG_WCOMB) != KERN_SUCCESS) {
+        return false;
+    }
+    bzero((void *)gAudioDma.va, gAudioDma.size);
+    __asm__ volatile("dsb sy" ::: "memory");
+    *address = (uint64_t)FUXI_AUDIO_DMA_STREAM << 32 | handoff.pa;
+    printf("FUXI AUDIO PCM: loader DMA region pa=%#x bytes=%#x stream=%u\n",
+        handoff.pa, handoff.bytes, FUXI_AUDIO_DMA_STREAM);
+    return true;
+}
+
+/* 出聲模式寫 PCM 用；fuxi_audio_dma_open 成功前與 close 之後都是 NULL。 */
+void *fuxi_audio_dma_buffer(void);
+void *fuxi_audio_dma_buffer(void)
+{
+    return gAudioDma.va ? (void *)gAudioDma.va : NULL;
+}
+
+void fuxi_audio_dma_close(void)
+{
+    if (gAudioDma.va) {
+        pmap_remove(kernel_pmap, gAudioDma.va, gAudioDma.va + gAudioDma.size);
+        kmem_free(kernel_map, gAudioDma.va, gAudioDma.size);
+        /* The loader still reserves the physical storage for this boot. */
+        gAudioDma = (struct fa_window){0};
+    }
+}
+
+void fuxi_audio_dma_survey(void);
+
+void fuxi_audio_dma_survey(void)
+{
+    struct fa_window window = {FUXI_APPS_SMMU_BASE, FUXI_APPS_SMMU_BYTES, 0};
+    kern_return_t error = fa_map_prot(&window, VM_WIMG_IO, VM_PROT_READ);
+    if (error != KERN_SUCCESS) {
+        printf("FUXI AUDIO DMA: apps_smmu read-only map error=%d\n", error);
+        return;
+    }
+    struct fuxi_audio_smmu_state state;
+    enum fuxi_audio_smmu_result result = fuxi_audio_smmu_read_state(audio_smmu_read, &window, &state);
+    pmap_remove(kernel_pmap, window.va, window.va + window.size);
+    kmem_free(kernel_map, window.va, window.size);
+    printf("FUXI AUDIO DMA: apps_smmu survey=%u sCR0=%#x IDR=%#x/%#x/%#x GFSR=%#x\n",
+        (unsigned)result, state.scr0, state.idr0, state.idr1, state.idr2, state.gfsr);
+    if (result != FUXI_AUDIO_SMMU_OK) {
+        return;
+    }
+    printf("FUXI AUDIO DMA: SMRs=%u banks=%u blank=%u first=%d/%d inactive-unreferenced=%u first-bank=%d WLAN-slot=%d S2CR=%#x\n",
+        state.slots, state.banks, state.blank_slots, state.first_slots[0], state.first_slots[1],
+        state.unused_banks, state.first_bank, state.wlan.slot, state.wlan.s2cr);
+    printf("FUXI AUDIO DMA: SID 0x1001 mask 0x80 matches=%u first=%d SMR=%#x S2CR=%#x\n",
+        state.audio[0].matches, state.audio[0].slot, state.audio[0].smr, state.audio[0].s2cr);
+    printf("FUXI AUDIO DMA: SID 0x1061 matches=%u first=%d SMR=%#x S2CR=%#x\n",
+        state.audio[1].matches, state.audio[1].slot, state.audio[1].smr, state.audio[1].s2cr);
+}
+
 /* Page table entries only: no stale mapping of a carveout the secure world takes over (a Normal-NC mapping may be read
  * speculatively). The VA range stays reserved, as fuxi_adreno.c keeps its windows; kmem_free of a KMA_VAONLY range is used
  * nowhere else in this kernel. At most three windows go this way per boot (cmd-db, adsp_dtb, adsp). */

@@ -39,6 +39,14 @@ SOURCES += ('fuxi_bt_geni_fifo.c', 'fuxi_bt_board.c')
 HEADERS += ('fuxi_bt_geni_fifo.h', 'fuxi_bt_board.h')
 SOURCE_PATHS.update({name: BLUETOOTH_SOURCE / name for name in
                      ('fuxi_bt_geni_fifo.c', 'fuxi_bt_board.c', 'fuxi_bt_geni_fifo.h', 'fuxi_bt_board.h')})
+# WCN7850 控制器初始化：rampatch／NVM 下載與 HCI reset（fuxi,bt=4）
+SOURCES += ('fuxi_bt_setup.c',)
+HEADERS += ('fuxi_bt_setup.h',)
+SOURCE_PATHS.update({name: BLUETOOTH_SOURCE / name for name in ('fuxi_bt_setup.c', 'fuxi_bt_setup.h')})
+SOURCES += ('fuxi_bt_pump.c', 'fuxi_bt_sk.c')
+HEADERS += ('fuxi_bt_pump.h', 'fuxi_bt_sk.h')
+SOURCE_PATHS.update({name: BLUETOOTH_SOURCE / name for name in
+                     ('fuxi_bt_pump.c', 'fuxi_bt_sk.c', 'fuxi_bt_pump.h', 'fuxi_bt_sk.h')})
 SOURCES += ('fuxi_battery_freshness.c',)
 HEADERS += ('fuxi_battery_freshness.h', 'fuxi_battery_poll_pause.h')
 SOURCE_PATHS.update({
@@ -48,14 +56,16 @@ SOURCE_PATHS.update({
 })
 HEADERS += ('fuxi_torch_steady.h',)
 SOURCES += ('fuxi_audio_spf.c', 'fuxi_audio_prep_gpr.c')
-HEADERS += ('fuxi_audio_prep_gpr.h',)
+HEADERS += ('fuxi_audio_prep_gpr.h', 'fuxi_audio_smmu.h', 'fuxi_amp_tone.h')
 # HAP525 DIRECT_PLAY runtime (fuxi,haptic=2|3, sysctl kern.fuxivibrate)
-HEADERS += ('fuxi_haptic_runtime.h',)
+HEADERS += ('fuxi_haptic_runtime.h', 'fuxi_haptic_rtp.h')
 SOURCE_PATHS.update({
     'fuxi_audio_prep_gpr.c': ROOT / 'xnu/fuxi-audio-prep/fuxi_audio_prep_gpr.c',
     'fuxi_audio_prep_gpr.h': ROOT / 'xnu/fuxi-audio-prep/fuxi_audio_prep_gpr.h',
 })
 FILES = SOURCES + HEADERS
+# 0113 已安裝這兩個可攜來源，PRM probe 需要將它們連進核心。
+AUDIO_LINK_SOURCES = ('fuxi_gpr.c', 'fuxi_audioreach.c')
 BEFORE = ('bsd/dev/sweet_rpmh.c\t\t\tstandard', 'bsd/dev/sweet_spmi.c\t\t\tstandard', 'bsd/dev/sweet_usb.c\t\t\tstandard')
 AFTER = ('bsd/dev/mem.c\t\t\t\tstandard', 'bsd/dev/munge.c \t\t\toptional config_requires_u32_munging',
          'bsd/dev/unix_startup.c\t\t\tstandard')
@@ -69,7 +79,7 @@ def entry(name):
 
 
 def build_list_hunk():
-    added = [entry(name) for name in SOURCES]
+    added = [entry(name) for name in SOURCES + AUDIO_LINK_SOURCES]
     lines = [' ' + x for x in BEFORE] + ['+' + x for x in added] + [' ' + x for x in AFTER]
     head = f'@@ -{LINE},{len(BEFORE) + len(AFTER)} +{LINE},{len(BEFORE) + len(AFTER) + len(added)} @@\n'
     return '--- a/bsd/conf/files\n+++ b/bsd/conf/files\n' + head + ''.join(x + '\n' for x in lines)
@@ -153,6 +163,8 @@ def main():
         text = prior.read_text(errors='surrogateescape')
         for name in FILES:
             assert not re.search(r'^\+\+\+ b/bsd/dev/' + re.escape(name) + '$', text, re.M), prior.name + ' already creates ' + name
+    audio_patch = (PATCH.parent / '0113-fuxi-audio.patch').read_text(errors='surrogateescape')
+    assert all(f'+++ b/bsd/dev/{name}\n' in audio_patch for name in AUDIO_LINK_SOURCES), '0113 audio source missing'
     shipped = re.search(r'^\+\+\+ b/bsd/dev/' + re.escape(LICENSE) + r'\n@@[^\n]*\n((?:\+[^\n]*\n)+)',
                         (PATCH.parent / '0098-fuxi-native-adreno-abi.patch').read_text(errors='surrogateescape'), re.M)
     assert shipped and ''.join(x[1:] + '\n' for x in shipped[1].splitlines()) == (SRC / LICENSE).read_text(), \
@@ -164,7 +176,8 @@ def main():
         assert PATCH.read_text(encoding='utf-8') == patch, 'fuxi-adsp sources differ; run tools/sync-fuxi-adsp.py'
     else:
         PATCH.write_text(patch, encoding='utf-8', newline='\n')
-    print(f'PASS: fuxi-adsp canonical sources match 0117 ({len(SOURCES)} sources in the build list, {len(HEADERS)} other files)')
+    print(f'PASS: fuxi-adsp canonical sources match 0117 '
+          f'({len(SOURCES) + len(AUDIO_LINK_SOURCES)} sources in the build list, {len(HEADERS)} other files)')
 
 
 if __name__ == '__main__':

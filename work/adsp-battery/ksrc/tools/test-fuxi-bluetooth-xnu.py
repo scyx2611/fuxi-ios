@@ -16,7 +16,11 @@ SOURCE = ROOT / "xnu" / "fuxi-bluetooth"
 STUBS = r'''
 #include <stdlib.h>
 #include <stdarg.h>
+#include <errno.h>
 #include "fuxi_bt_board.h"
+#include "fuxi_bt_pump.h"
+#include "fuxi_bt_setup.h"
+#include "fuxi_bt_sk.h"
 #ifdef _MSC_VER
 #include <intrin.h>
 #define __ATOMIC_ACQUIRE 0
@@ -47,6 +51,7 @@ typedef size_t vm_size_t;
 typedef int vm_prot_t;
 typedef int boolean_t;
 typedef int wait_result_t;
+typedef void *event_t;
 typedef void *thread_t;
 typedef void (*thread_continue_t)(void *, wait_result_t);
 #define KERN_SUCCESS 0
@@ -55,6 +60,8 @@ typedef void (*thread_continue_t)(void *, wait_result_t);
 #define KMA_VAONLY 1u
 #define KMA_KOBJECT 2u
 #define KMA_NOPAGEWAIT 4u
+#define KMA_DATA 8u
+#define KMA_ZERO 16u
 #define VM_KERN_MEMORY_IOKIT 1u
 #define VM_PROT_READ 1u
 #define VM_PROT_WRITE 2u
@@ -101,6 +108,38 @@ static uint32_t test_adt_value;
 static unsigned test_adt_size;
 static unsigned test_adt_lookups;
 
+#define THREAD_UNINT 0
+#define THREAD_WAITING 1
+#define THREAD_CONTINUE_NULL NULL
+#define NSEC_PER_USEC 1000
+static int test_sk_boot;
+static void thread_wakeup(event_t event) { assert(event); }
+static int assert_wait_timeout(event_t event, int interruptible, unsigned timeout, unsigned scale)
+{
+    assert(event && interruptible == THREAD_UNINT && scale == NSEC_PER_USEC);
+    test_clock_us += timeout;
+    return THREAD_WAITING;
+}
+wait_result_t thread_block(thread_continue_t continuation)
+{
+    assert(!continuation);
+    return 0;
+}
+void fuxi_bt_sk_start(void (*wake)(void), bool probe)
+{
+    assert(wake && !probe);
+    test_sk_boot = EINPROGRESS;
+}
+int fuxi_bt_sk_boot_result(int error, const char *firmware)
+{
+    assert(error || firmware);
+    return test_sk_boot = error;
+}
+size_t fuxi_bt_sk_receive(const uint8_t *data, size_t size, bool start) { (void)start; assert(data); return size; }
+size_t fuxi_bt_sk_tx_take(uint8_t *data, size_t size) { assert(data && size); return 0; }
+void fuxi_bt_sk_get_stats(struct fuxi_bt_sk_stats *stats) { memset(stats, 0, sizeof(*stats)); }
+uint32_t fuxi_bt_sk_connects(void) { return 0; }
+
 typedef const void *DTEntry;
 #define kSuccess 0
 static int SecureDTLookupEntry(const void *root, const char *path, DTEntry *entry)
@@ -113,7 +152,11 @@ static int SecureDTLookupEntry(const void *root, const char *path, DTEntry *entr
 
 static int SecureDTGetProperty(DTEntry entry, const char *name, const void **value, unsigned int *size)
 {
-    assert(entry == &test_adt_value && !strcmp(name, "fuxi,bt"));
+    assert(entry == &test_adt_value);
+    if (!strcmp(name, "fuxi,bt-probe")) {
+        return 1;
+    }
+    assert(!strcmp(name, "fuxi,bt"));
     if (!test_adt_present) {
         return 1;
     }
@@ -173,7 +216,8 @@ static kern_return_t kmem_alloc(vm_map_t map, vm_offset_t *address,
     vm_size_t size, unsigned flags, unsigned tag)
 {
     (void)map;
-    assert(flags == 7 && tag == VM_KERN_MEMORY_IOKIT);
+    /* 7：MMIO 視窗（VA only）；28：fuxi,bt=4 韌體檔資料 */
+    assert((flags == 7 || flags == (KMA_DATA | KMA_ZERO | KMA_NOPAGEWAIT)) && tag == VM_KERN_MEMORY_IOKIT);
     test_allocations++;
     if (test_alloc_failure == test_allocations) {
         return 1;
@@ -320,6 +364,87 @@ static kern_return_t thread_terminate(thread_t thread)
     test_terminations++;
     return 0;
 }
+
+/* fuxi,bt=4 讀韌體檔：假 vnode。 */
+typedef char *caddr_t;
+struct test_vnode { int unused; };
+typedef struct test_vnode *vnode_t;
+typedef void *vfs_context_t;
+struct vnode_attr { uint64_t va_data_size; unsigned wanted; unsigned supported; };
+#define VATTR_INIT(a) memset((a), 0, sizeof(*(a)))
+#define VATTR_WANTED(a, field) ((a)->wanted = 1u)
+#define VATTR_IS_SUPPORTED(a, field) ((a)->supported)
+#define VREG 1
+#define FREAD 1
+#define O_NOFOLLOW 0x100
+#define O_NONBLOCK 4
+#define UIO_READ 0
+#define UIO_SYSSPACE 1
+#define round_page(x) (((x) + (vm_size_t)PAGE_MASK) & ~(vm_size_t)PAGE_MASK)
+struct test_file {
+    const char *path;
+    const uint8_t *data;
+    uint64_t size;
+    int open_error, type, read_error, residual, close_error;
+};
+static struct test_file test_files[4];
+static struct test_vnode test_vnodes[4];
+static unsigned test_file_count, test_opens, test_closes;
+static int test_vfs_context;
+
+static vfs_context_t vfs_context_kernel(void) { return &test_vfs_context; }
+static void *vfs_context_ucred(vfs_context_t context) { assert(context == &test_vfs_context); return NULL; }
+static void *vfs_context_proc(vfs_context_t context) { assert(context == &test_vfs_context); return NULL; }
+
+static int vnode_open(const char *path, int flags, int mode, int ioflags, vnode_t *vnode, vfs_context_t context)
+{
+    assert(flags == (FREAD | O_NOFOLLOW | O_NONBLOCK) && !mode && !ioflags && context == &test_vfs_context);
+    for (unsigned index = 0; index < test_file_count; index++) {
+        if (!strcmp(path, test_files[index].path)) {
+            if (test_files[index].open_error) {
+                return test_files[index].open_error;
+            }
+            test_opens++;
+            *vnode = &test_vnodes[index];
+            return 0;
+        }
+    }
+    return ENOENT;
+}
+
+static int vnode_getattr(vnode_t vnode, struct vnode_attr *attributes, vfs_context_t context)
+{
+    assert(context == &test_vfs_context && attributes->wanted);
+    attributes->va_data_size = test_files[vnode - test_vnodes].size;
+    attributes->supported = 1;
+    return 0;
+}
+
+static int vnode_vtype(vnode_t vnode)
+{
+    return test_files[vnode - test_vnodes].type;
+}
+
+static int vn_rdwr(int direction, vnode_t vnode, caddr_t base, int length, long long offset, int segment,
+    int ioflags, void *credential, int *residual, void *process)
+{
+    const struct test_file *file = &test_files[vnode - test_vnodes];
+    assert(direction == UIO_READ && segment == UIO_SYSSPACE && !offset && !ioflags && !credential && !process);
+    assert(length >= 0 && (uint64_t)length == file->size);
+    if (file->read_error) {
+        return file->read_error;
+    }
+    memcpy(base, file->data, (size_t)(length - file->residual));
+    *residual = file->residual;
+    return 0;
+}
+
+static int vnode_close(vnode_t vnode, int flags, vfs_context_t context)
+{
+    assert(flags == FREAD && context == &test_vfs_context);
+    test_closes++;
+    return test_files[vnode - test_vnodes].close_error;
+}
 '''
 
 TESTS = r'''
@@ -339,6 +464,7 @@ static void test_entry_reset(int mode)
     test_clock_us = 0;
     test_gpll0_ok = test_adt_present = false;
     test_adt_value = test_adt_size = 0;
+    test_file_count = test_opens = test_closes = 0;
 }
 
 static uint32_t test_written_value(uint64_t pa)
@@ -383,7 +509,23 @@ static void test_board_mode(void)
     test_adt_value = 4;
     test_adt_size = 4;
     fuxi_bt_init();
-    assert(!test_threads && strstr(test_log, "mode 4 rejected"));
+    assert(test_threads == 1 && fuxi_bt_mode == 4);
+    test_entry_reset(0);
+    test_arg_present = false;
+    test_adt_present = true;
+    test_adt_value = 5;
+    test_adt_size = 4;
+    fuxi_bt_init();
+    assert(test_threads == 1 && fuxi_bt_mode == 5);
+    fuxi_bt_worker(NULL, 0);
+    assert(test_sk_boot == ETIMEDOUT && !test_writes);
+    test_entry_reset(0);
+    test_arg_present = false;
+    test_adt_present = true;
+    test_adt_value = 6;
+    test_adt_size = 4;
+    fuxi_bt_init();
+    assert(!test_threads && strstr(test_log, "mode 6 rejected"));
     test_entry_reset(0);
     test_adt_present = true;
     test_adt_value = 3;
@@ -435,15 +577,110 @@ static void test_board_mode(void)
         assert(test_written_value(FUXI_BT_GCC_BASE + restored[index]) == 0);
     }
     assert(!strstr(test_log, "probe status="));
+
+    /* fuxi,bt=4：同一條上電路徑；wrapper 讀不到時不跑 setup、照樣還原。 */
+    test_entry_reset(4);
+    test_wlan = 1;
+    test_gpll0_ok = true;
+    fuxi_bt_init();
+    fuxi_bt_worker(NULL, 0);
+    assert(fuxi_bt_mode == 4 && strstr(test_log, "board power status=no-uart stage=wrapper value=0 "));
+    assert(strstr(test_log, "board restore status=ok") && !strstr(test_log, "setup status="));
+    assert(test_writes == 12 && test_allocations == test_frees && !test_opens);
+}
+
+static void test_setup_files(void)
+{
+    static const uint8_t bytes[] = {1, 2, 3, 4, 5};
+    static struct fuxi_bt_setup_result setup;
+    struct fuxi_bt_blob blob = {(uint8_t *)bytes, 9};
+    char expected[64];
+    test_entry_reset(0);
+    /* 不存在：OFF，不配置；不合法名稱：不開檔 */
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_OFF && !blob.data && !blob.size);
+    assert(!test_allocations && !test_opens && !test_log_size);
+    assert(fuxi_bt_file_load(NULL, "../x", 100, &blob) == FUXI_BT_ARGUMENT && !test_opens);
+    test_files[0] = (struct test_file){"/usr/local/share/fuxi/bt/hmtbtfw20.tlv", bytes, sizeof(bytes), 0, VREG, 0, 0, 0};
+    test_file_count = 1;
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_OK);
+    assert(blob.size == sizeof(bytes) && !memcmp(blob.data, bytes, sizeof(bytes)));
+    assert(test_allocations == 1 && test_opens == 1 && test_closes == 1);
+    assert(strstr(test_log, "setup file /usr/local/share/fuxi/bt/hmtbtfw20.tlv bytes=5"));
+    fuxi_bt_file_release(NULL, &blob);
+    assert(!blob.data && !blob.size && test_frees == 1);
+    fuxi_bt_file_release(NULL, &blob);
+    assert(test_frees == 1);
+    /* 超過上限、空檔、不是一般檔：不配置 */
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 4, &blob) == FUXI_BT_IO && !blob.data && test_allocations == 1);
+    assert(strstr(test_log, "size=5 limit=4 rejected"));
+    test_files[0].size = 0;
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_IO && test_allocations == 1);
+    test_files[0].size = sizeof(bytes);
+    test_files[0].type = 2;
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_IO && test_allocations == 1);
+    test_files[0].type = VREG;
+    /* 讀錯、短讀、關檔錯：配置的記憶體都還回去 */
+    test_files[0].read_error = 5;
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_IO && !blob.data);
+    assert(test_allocations == 2 && test_frees == 2 && strstr(test_log, "read errno=5 residual=0"));
+    test_files[0].read_error = 0;
+    test_files[0].residual = 1;
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_IO && test_frees == 3);
+    test_files[0].residual = 0;
+    test_files[0].close_error = 1;
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_IO && test_frees == 4);
+    test_files[0].close_error = 0;
+    /* 開檔權限錯：IO（不是 OFF，免得換下一個檔名蓋過問題） */
+    test_files[0].open_error = EACCES;
+    snprintf(expected, sizeof(expected), "open errno=%d", EACCES);
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_IO && strstr(test_log, expected));
+    test_files[0].open_error = 0;
+    /* 配置失敗 */
+    test_alloc_failure = test_allocations + 1;
+    assert(fuxi_bt_file_load(NULL, "hmtbtfw20.tlv", 100, &blob) == FUXI_BT_IO && !blob.data);
+    assert(test_opens == test_closes && test_frees + 1 == test_allocations);
+
+    /* 結果輸出：BD 位址不寫進紀錄 */
+    test_entry_reset(0);
+    memset(&setup, 0, sizeof(setup));
+    setup.stage = FUXI_BT_SETUP_DONE;
+    setup.version.soc = 0x40170200;
+    setup.rom_ver = 0x20;
+    setup.patch.file_bytes = 5;
+    setup.patch.segments = 1;
+    strcpy(setup.patch_name, "hmtbtfw20.tlv");
+    setup.nvm.file_bytes = 3;
+    setup.nvm.hci_tag = true;
+    setup.nvm.hci_before[0] = 0x8e;
+    setup.nvm.hci_after[0] = 0x0e;
+    strcpy(setup.nvm_name, "hmtnv20.bin");
+    strcpy(setup.build_info, "BTFM");
+    setup.local_version_valid = true;
+    setup.manufacturer = 0x1d;
+    setup.bdaddr_valid = true;
+    memset(setup.bdaddr, 0x5a, sizeof(setup.bdaddr));
+    setup.last_event_size = sizeof(setup.last_event);
+    memset(setup.last_event, 0xab, sizeof(setup.last_event));
+    fuxi_bt_print_setup(FUXI_BT_OK, &setup);
+    assert(strstr(test_log, "setup status=ok stage=done cleanup=ok"));
+    assert(strstr(test_log, "soc=0x40170200 rom=0 patch=0 rom_ver=0x20"));
+    assert(strstr(test_log, "setup rampatch hmtbtfw20.tlv file=5"));
+    assert(strstr(test_log, "setup nvm hmtnv20.bin file=3"));
+    assert(strstr(test_log, "hci_tag=1 8e0000->0e0000"));
+    assert(strstr(test_log, "build_info status=ok \"BTFM\""));
+    assert(strstr(test_log, "manufacturer=0x1d"));
+    assert(strstr(test_log, "bdaddr valid (not logged)") && !strstr(test_log, "5a5a"));
+    assert(strstr(test_log, "last_event abababababababababababababababababababababababab\n"));
+    assert(!strstr(test_log, "last_vendor"));
 }
 
 static void test_entry(void)
 {
     struct fake_uart uart;
-    for (int mode = -1; mode <= 3; mode++) {
+    for (int mode = -1; mode <= 6; mode++) {
         test_entry_reset(mode);
         fuxi_bt_init();
-        if (mode < 1 || mode > 3) {
+        if (mode < 1 || mode > 5) {
             assert(!test_threads && !test_allocations && !test_mmio);
         } else {
             assert(test_threads == 1 && test_thread_refs == 1);
@@ -515,8 +752,9 @@ static void test_entry(void)
         assert(strstr(test_log, "read fault pa="));
     }
     test_board_mode();
+    test_setup_files();
     test_entry_reset(0);
-    puts("PASS XNU host model: default-off/invalid args, ADT fuxi,bt fallback, one-shot startup, registration, survey gates, QCA worker, board mode WLAN_EN gate/GPLL0 refusal/write+restore, 6 allocation/7 pmap/35 MMIO failure cleanup paths");
+    puts("PASS XNU host model: default-off/invalid args, ADT fuxi,bt fallback, one-shot startup, registration, survey gates, QCA worker, board mode WLAN_EN gate/GPLL0 refusal/write+restore, mode 4 firmware files (missing/limit/type/read/close/alloc) and result log, 6 allocation/7 pmap/35 MMIO failure cleanup paths");
 }
 
 int main(void)
@@ -558,14 +796,16 @@ def main():
             command = compiler + [
                 "/nologo", "/std:c11", "/W4", "/WX", "/Od", "/D_CRT_SECURE_NO_WARNINGS",
                 f"/I{SOURCE}", str(SOURCE / "fuxi_bt.c"), str(SOURCE / "fuxi_bt_geni_fifo.c"),
-                str(SOURCE / "fuxi_bt_board.c"), str(generated),
+                str(SOURCE / "fuxi_bt_board.c"), str(SOURCE / "fuxi_bt_setup.c"),
+                str(SOURCE / "fuxi_bt_pump.c"), str(generated),
                 f"/Fe{executable}"
             ]
         else:
             command = compiler + [
                 "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                 "-I", str(SOURCE), str(SOURCE / "fuxi_bt.c"), str(SOURCE / "fuxi_bt_geni_fifo.c"),
-                str(SOURCE / "fuxi_bt_board.c"), str(generated),
+                str(SOURCE / "fuxi_bt_board.c"), str(SOURCE / "fuxi_bt_setup.c"),
+                str(SOURCE / "fuxi_bt_pump.c"), str(generated),
                 "-o", str(executable)
             ]
             if args.sanitize:

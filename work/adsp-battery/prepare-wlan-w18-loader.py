@@ -22,6 +22,12 @@ ARTIFACT = 'kernel-adsp-iter2-ram9g-artifact'
 ROOT_PATH = '/data/gsi/codexnative1108b/codexnative_root_1108b.img.0000'
 ROOT_BYTES = 20 * 1024**3
 RAM_BASE, RAM_SIZE, GPU_BASE, GPU_SIZE = 0x8c0000000, 0x23e000000, 0xafe000000, 0x2000000
+# Must match struct fuxi_audio_dma_handoff. The loader fills in the last two words.
+AUDIO_DMA_BYTES = 0x10000
+AUDIO_DMA_ALIGNMENT = 0x4000
+AUDIO_DMA_HANDOFF = struct.pack('<4I', 0x31445541, AUDIO_DMA_BYTES, 0, 0)
+AUDIO_DMA_HEADER = TOOLS.parent / 'xnu/fuxi-adsp/fuxi_audio_smmu.h'
+AUDIO_DMA_LOADER = Path(__file__).with_name('loader-audio-dma.c')
 WLAN_ARGS = ('fuxiadsp=0', 'fuxiwlan=1', 'fuxiwlanclk=1', 'fuxiwlanprobe=civac',
              'fuxiwlanseq=cycle,parf,dbi,eq,hostirq,msi,por,prefix',
              'fuxiwlanqrtr=5', 'fuxiwlanw18=1')
@@ -132,14 +138,68 @@ def wifi_args_value(text, kernel):
     return value
 
 
-def audio_spf_choice(enabled, with_adsp, kernel, wire_format='apm'):
+def audio_spf_choice(enabled, with_adsp, kernel, wire_format='apm', *, prm=False, tdm_graph=False, tdm_pcm=False):
     require(type(enabled) is bool and type(with_adsp) is bool, 'invalid audio SPF selector')
     require(wire_format in ('apm', 'bare') and (enabled or wire_format == 'apm'),
             'invalid audio SPF format selector')
     require(not enabled or with_adsp, 'audio SPF query needs the ADSP owner')
     require(not enabled or (b'FUXI AUDIO SPF: state query queued bytes' in kernel and
                            b'fuxi,audio-spf' in kernel), 'artifact lacks the query-only audio SPF client')
+    require(sum((prm, tdm_graph, tdm_pcm)) <= 1, 'select one PRM, TDM graph or TDM PCM probe')
+    if prm:
+        require(enabled and wire_format == 'apm', '--audio-prm needs --audio-spf and APM wire format')
+        require(b'FUXI AUDIO PRM: LPASS macro request status=' in kernel, 'artifact lacks the audio PRM probe')
+        return 3
+    if tdm_graph:
+        require(enabled and wire_format == 'apm', '--audio-tdm-graph needs --audio-spf and APM wire format')
+        require(b'FUXI AUDIO TDM: probe complete result=' in kernel, 'artifact lacks the audio TDM graph probe')
+        return 4
+    if tdm_pcm:
+        require(enabled and wire_format == 'apm', '--audio-tdm-pcm needs --audio-spf and APM wire format')
+        require(b'FUXI AUDIO PCM: probe complete result=' in kernel and b'fuxi,audio-dma' in kernel,
+                'artifact lacks the audio PCM probe')
+        return 5
     return (2 if wire_format == 'bare' else 1) if enabled else 0
+
+
+def audio_dma_handoff_offset(payload, adt_offset, adt_bytes):
+    device_tree = payload[adt_offset:adt_offset + adt_bytes]
+    require(device_tree.count(AUDIO_DMA_HANDOFF) == 1, 'need a unique audio DMA handoff in the payload ADT')
+    offset = adt_offset + device_tree.index(AUDIO_DMA_HANDOFF)
+    require(offset % 4 == 0, 'audio DMA handoff must be 32-bit aligned')
+    return offset
+
+
+def audio_dma_loader_layout(compiler, elf, image):
+    output = subprocess.check_output([str(compiler / 'llvm-readelf.exe'), '-sW', str(elf)], text=True)
+    symbols = {}
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) == 8 and fields[-1] in ('_bss_start', '_bss_end', '_payload_start', 'audio_dma'):
+            symbols[fields[-1]] = (int(fields[1], 16), int(fields[2]))
+    require(len(symbols) == 4, 'loader lacks the audio DMA BSS symbols')
+    buffer, size = symbols['audio_dma']
+    require(size == AUDIO_DMA_BYTES and buffer % AUDIO_DMA_ALIGNMENT == 0 and
+            symbols['_bss_start'][0] <= buffer < buffer + size <= symbols['_bss_end'][0] <= symbols['_payload_start'][0],
+            'audio DMA buffer must fit the loader BSS before its payload')
+    require(image[buffer:buffer + size] == bytes(size), 'audio DMA storage was not reserved in the Image')
+    return buffer
+
+
+def native_bluetooth_arguments(line):
+    tokens = line.split()
+    for index, token in enumerate(tokens):
+        if not token.startswith('sweetnoexec='):
+            continue
+        targets = token.partition('=')[2].split(',')
+        require(targets.count('bluetoothd') == 1, 'source must block bluetoothd exactly once')
+        targets.remove('bluetoothd')
+        if targets:
+            tokens[index] = 'sweetnoexec=' + ','.join(targets)
+        else:
+            del tokens[index]
+        return ' '.join(tokens), token
+    raise ValueError('source lacks the bluetoothd boot block')
 
 
 def parse_tree(data):
@@ -438,6 +498,20 @@ def inspect(args):
                       args.wifi_trace, args.scan_batch, args.stderr_log, args.privs,
                       daily_tuning=args.daily_tuning, wifi_args_adt=args.wifi_args_adt)
     line, removed = built[:2]
+    if args.bt_native:
+        require(args.bt == 5 and not args.bt_probe, '--bt-native needs --bt 5 without the SpringBoard probe')
+        line, replaced = native_bluetooth_arguments(line)
+        removed.append(replaced)
+    require(not any(arg.startswith('fuxihalhaptic=') for arg in line.split()),
+            'inherited fuxihalhaptic is not allowed')
+    if args.hal_haptics:
+        require(args.haptic and args.product_haptics, '--hal-haptics needs --haptic and --product-haptics')
+        line += f' fuxihalhaptic={3 if args.haptic_pcm else 2 if args.haptic == 5 else 1}'
+        require(len(line.encode('ascii')) < 608, 'HAL haptics command line exceeds 607 bytes')
+    if args.bt_exit_trace:
+        require(args.bt_native, '--bt-exit-trace requires --bt-native')
+        line += ' fuxibtexittrace=1'
+        require(len(line.encode('ascii')) < 608, 'Bluetooth exit trace command line exceeds 607 bytes')
     adt_args = built[2] if args.wifi_args_adt else None
     shim_reference = STORAGE / args.shim_reference if args.shim_reference else source
     shim_pins = sums(shim_reference / 'sha256.txt')
@@ -548,6 +622,7 @@ def inspect(args):
               'sample': args.sample,
               'crash_strings': args.crash_strings,
               'stderr_log': args.stderr_log,
+              'bt_native': args.bt_native,
               'privs': args.privs,
               'daily_tuning': list(DAILY_TUNING) if args.daily_tuning else None,
               'adt_wifi_args': adt_args,
@@ -599,7 +674,9 @@ def build(args, report, tree, source_inputs):
     chosen = chosen_node(tree)
     original = {name: (flags, value) for name, flags, value in chosen.props}
     controlled = set(OFF_PROPS) | {'fuxi,tapcmd', 'fuxi,rtc-offset', 'fuxi,haptic-ui', 'fuxi,haptic-env',
-                                   'fuxi,wifi-sb', 'fuxi,wifi-rssi', 'fuxi,haptic-amp', 'fuxi,wifi-ux', 'fuxi,args'}
+                                   'fuxi,wifi-sb', 'fuxi,wifi-rssi', 'fuxi,haptic-amp', 'fuxi,wifi-ux', 'fuxi,args',
+                                   'fuxi,audio-dma', 'fuxi,haptic-rtp', 'fuxi,haptic-rtp-vmax',
+                                   'fuxi,cs35l41-prot'}
     chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name not in controlled]
     chosen.props.extend((name, 0, struct.pack('<I', 0)) for name in OFF_PROPS)
     require({name: (flags, value) for name, flags, value in chosen.props if name not in controlled} ==
@@ -623,6 +700,9 @@ def build(args, report, tree, source_inputs):
         chosen.props.append(('fuxi,sbshape', 0, struct.pack('<I', shape // 1000 * 1000 + args.statusbar_height)))
         report['statusbar_shape'] = shape // 1000 * 1000 + args.statusbar_height
     kernel = STORAGE / args.artifact / 'kernel.development.fuxi'
+    if args.bt_exit_trace:
+        require(b'fuxibtexittrace' in kernel.read_bytes(), 'artifact lacks the Bluetooth exit trace')
+        report['bt_exit_trace'] = True
     if args.with_adsp:
         # 聯合驗收：電量（ADSP 3）與手電筒（PMIC 3）跟 WLAN 同開；命令列的 fuxiadsp= 會蓋過 ADT，所以不得存在。
         kernel_bytes = kernel.read_bytes()
@@ -636,24 +716,97 @@ def build(args, report, tree, source_inputs):
         report['adsp_with_wlan'] = joint
         report['adt_off'] = [name for name in OFF_PROPS if name not in joint]
         report['adsp_gate'] = 'opted in: adt fuxi,adsp=3 fuxi,pmic=3 fuxi,adsp-wlan=1'
-    audio_mode = audio_spf_choice(args.audio_spf, args.with_adsp, kernel.read_bytes(), args.audio_spf_format)
+    audio_mode = audio_spf_choice(args.audio_spf, args.with_adsp, kernel.read_bytes(), args.audio_spf_format,
+                                  prm=args.audio_prm, tdm_graph=args.audio_tdm_graph, tdm_pcm=args.audio_tdm_pcm)
     report['audio_spf'] = bool(audio_mode)
     report['audio_spf_format'] = args.audio_spf_format if audio_mode else None
+    report['audio_prm'] = args.audio_prm
+    report['audio_tdm_graph'] = args.audio_tdm_graph
+    report['audio_tdm_pcm'] = args.audio_tdm_pcm
     if args.audio_spf:
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,audio-spf']
         chosen.props.append(('fuxi,audio-spf', 0, struct.pack('<I', audio_mode)))
         report['adt_off'] = [name for name in report['adt_off'] if name != 'fuxi,audio-spf']
+    if args.audio_tdm_pcm:
+        chosen.props.append(('fuxi,audio-dma', 0, AUDIO_DMA_HANDOFF))
+    require(not args.audio_bottom_full or args.audio_bottom_fw, '--audio-bottom-full needs --audio-bottom-fw')
+    require(not args.audio_bottom_cal or args.audio_bottom_full, '--audio-bottom-cal needs --audio-bottom-full')
+    require(not args.audio_bottom_run or args.audio_bottom_cal, '--audio-bottom-run needs --audio-bottom-cal')
+    require(not args.audio_bottom_tone or (args.audio_bottom_run and args.audio_tdm_pcm),
+            '--audio-bottom-tone needs --audio-bottom-run and --audio-tdm-pcm')
+    if args.audio_bottom_fw:
+        require(args.with_adsp and b'fuxi,cs35l41-prot' in kernel.read_bytes(),
+                'muted firmware probe needs the CS35L41-capable kernel and ADSP init')
+        spec = importlib.util.spec_from_file_location('cs35l41_halo', Path(__file__).with_name('inspect-cs35l41-halo.py'))
+        halo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(halo)
+        packed = halo.pack_stock_protection(args.audio_bottom_fw, full=args.audio_bottom_full)
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,amp']
+        # 6: 靜音試跑保護韌體；7: 保護與校正核對通過後，下方喇叭播 1 秒 2 kHz（-20 dBFS、數位音量 -30 dB）（K-078）。
+        amp_mode = (7 if args.audio_bottom_tone else 6 if args.audio_bottom_run else
+                    5 if args.audio_bottom_cal else 4 if args.audio_bottom_full else 3)
+        chosen.props.append(('fuxi,amp', 0, struct.pack('<I', amp_mode)))
+        if args.audio_bottom_full:
+            require(b'full muted HALO verified' in kernel.read_bytes(), 'kernel lacks full muted verification')
+            require(not any(child.name == 'fuxi-speaker' for child in chosen.children), 'speaker node already present')
+            speaker = adt.Node()
+            speaker.props = [('name', 0, b'fuxi-speaker\0'), ('fuxi,cs35l41-prot', 0, packed)]
+            if args.audio_bottom_cal:
+                require(b'fuxi,cs35l41-cal' in kernel.read_bytes(), 'kernel lacks muted bottom tuning')
+                if args.audio_bottom_run:
+                    require(b'protection running confirmed' in kernel.read_bytes(), 'kernel lacks the muted protection run')
+                if args.audio_bottom_tone:
+                    kernel_bytes = kernel.read_bytes()
+                    require(b'FUXI AUDIO TONE' in kernel_bytes and b'tone on -30 dB' in kernel_bytes,
+                            'kernel lacks the mode 7 bottom-speaker -30 dB tone stage')
+                speaker.props.append(('fuxi,cs35l41-cal', 0,
+                                      halo.pack_bottom_controls(args.audio_bottom_fw, args.audio_bottom_cal)))
+            chosen.children.append(speaker)
+        else:
+            chosen.props.append(('fuxi,cs35l41-prot', 0, packed))
+        report['adt_off'] = [name for name in report['adt_off'] if name != 'fuxi,amp']
+        report['audio_bottom_fw'] = hashlib.sha256(packed).hexdigest()
+        report['audio_bottom_full'] = args.audio_bottom_full
+        report['audio_bottom_amp_mode'] = amp_mode
     if args.haptic:
         # 震動：ADT fuxi,haptic=2（DIRECT_PLAY 執行期，sysctl kern.fuxivibrate）或 3（另加開機自測三下 30/100/300 ms）。
         kernel_bytes = kernel.read_bytes()
         require(b'vibrate runtime ready; DIRECT_PLAY' in kernel_bytes and b'fuxivibrate' in kernel_bytes,
                 'artifact lacks the HAP525 direct-play runtime')
+        if args.haptic == 4:
+            require(b'haptic transient attack-us=' in kernel_bytes, 'artifact lacks the HAP525 transient mode')
+        if args.haptic == 5:
+            require(args.haptic_rtp is not None and b'haptic RTP FIFO' in kernel_bytes,
+                    'mode 5 needs the HAP525 FIFO kernel and the measured Android click')
+            require(not args.hal_haptics or b'haptic RTP FIFO UI click' in kernel_bytes,
+                    'normal UI haptics need the kernel with the RTP request handler')
+            wave = args.haptic_rtp.read_bytes()
+            wave_digest = hashlib.sha256(wave).hexdigest()
+            require(wave_digest == '43f3146f2f4abe53f92fe21ddea006742385110ce015c1fb045d622615bc34b5',
+                    'waveform differs from the click captured at the Android FIFO')
+            chosen.props.append(('fuxi,haptic-rtp', 0, wave))
+            report['haptic_rtp_sha256'] = wave_digest
         require(not any(token.startswith('fuxihaptic=') for token in report['command_line'].split()),
                 'command line pins fuxihaptic, which would override the ADT')
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,haptic']
         chosen.props.append(('fuxi,haptic', 0, struct.pack('<I', args.haptic)))
         report['haptic'] = args.haptic
         report['adt_off'] = [name for name in report['adt_off'] if name != 'fuxi,haptic']
+    if args.haptic_rtp_vmax is not None:
+        require(args.haptic == 5 and 0x1c <= args.haptic_rtp_vmax <= 0x38,
+                '--haptic-rtp-vmax needs mode 5 and a code from 0x1c to 0x38')
+        require(b'fuxi,haptic-rtp-vmax' in kernel.read_bytes(), 'artifact lacks the RTP voltage option')
+        chosen.props.append(('fuxi,haptic-rtp-vmax', 0, struct.pack('<I', args.haptic_rtp_vmax)))
+        report['haptic_rtp_vmax'] = args.haptic_rtp_vmax
+    if args.haptic_pcm:
+        require(args.haptic == 5 and args.hal_haptics and b'fuxihapticpcm' in kernel.read_bytes(),
+                '--haptic-pcm requires the mode 5 kernel and Actuator PCM HAL')
+        report['haptic_pcm'] = True
+    if args.haptic_fast_apid:
+        require(args.haptic_pcm and b'fuxi,haptic-fast-apid' in kernel_bytes,
+                '--haptic-fast-apid requires the PCM HAL and haptic APID cache kernel')
+        chosen.props.append(('fuxi,haptic-fast-apid', 0, struct.pack('<I', 1)))
+        report['haptic_fast_apid'] = True
     if args.bt:
         # 藍牙：ADT fuxi,bt=1 只讀調查；3 等 WLAN_EN 穩定 15 秒後開 SE6 時脈／腳位／BT_EN，送 QCA 版本查詢，結束全部還原。
         kernel_bytes = kernel.read_bytes()
@@ -661,11 +814,139 @@ def build(args, report, tree, source_inputs):
                 'artifact lacks the ADT fuxi,bt board probe')
         require(not any(token.startswith('fuxibt=') for token in report['command_line'].split()),
                 'command line pins fuxibt, which would override the ADT')
-        require(args.bt == 1 or args.native_ath12k, '--bt 3 waits for WLAN_EN, which only native ath12k drives')
+        require(args.bt == 1 or args.native_ath12k, '--bt 3/4/5 waits for WLAN_EN, which native ath12k drives')
+        if args.bt >= 4:
+            # 4：同 3 的板級上電，再下載 rampatch／NVM、HCI reset（核心讀 /usr/local/share/fuxi/bt，先用
+            # stage-wlan-assets.py kind=bt 部署）；全程 115200 baud，結束一樣還原。
+            require(b'FUXI BT: setup status=' in kernel_bytes and b'/usr/local/share/fuxi/bt/' in kernel_bytes,
+                    'artifact lacks the fuxi,bt=4 controller setup')
+        if args.bt == 5:
+            require(b'FUXI BT: resident ready' in kernel_bytes and b'com.apple.uart.sk.bluetooth' in kernel_bytes,
+                    'artifact lacks the fuxi,bt=5 UART.SK transport')
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt']
         chosen.props.append(('fuxi,bt', 0, struct.pack('<I', args.bt)))
         report['bt'] = args.bt
         report['adt_off'] = [name for name in report['adt_off'] if name != 'fuxi,bt']
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-probe']
+    if args.bt_probe:
+        require(args.bt == 5, '--bt-probe needs --bt 5')
+        require(b'fuxi,bt-probe' in kernel_bytes, 'artifact lacks the Bluetooth probe gate')
+        chosen.props.append(('fuxi,bt-probe', 0, struct.pack('<I', 1)))
+        report['bt_probe'] = True
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-ibs']
+    if args.bt_ibs:
+        # 常駐泵回應 QCA 軟體 IBS：控制器 0xfd WAKE_IND 回 0xfc WAKE_ACK，主機第一次送前先 WAKE_IND
+        # （Linux hci_qca.c）。第四趟 bluetoothd 送 HCI Reset 後收端每 10 ms 一個非 H4 byte、沒有 Command Complete。
+        require(args.bt == 5, '--bt-ibs needs --bt 5')
+        require(b'fuxi,bt-ibs' in kernel_bytes, 'artifact lacks the Bluetooth IBS responder')
+        chosen.props.append(('fuxi,bt-ibs', 0, struct.pack('<I', 1)))
+        report['bt_ibs'] = True
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-optional']
+    if args.bt_optional:
+        # 第五趟：WCN7850 對 0x0c5b（Write Default Erroneous Data Reporting）回 Unknown HCI Command，
+        # bluetoothd 收到就重啟。常駐泵把清單內命令的 Command Complete 失敗改成 0 再交上去
+        # （QcaBluetooth native-ios27.md 也把這個命令當可選）。只放回傳只有 status 的寫入命令。
+        require(args.bt == 5, '--bt-optional needs --bt 5')
+        require(b'fuxi,bt-optional' in kernel_bytes, 'artifact lacks the Bluetooth optional-command gate')
+        opcodes = []
+        for item in args.bt_optional.split(','):
+            value = int(item.strip(), 0)
+            require(0 < value <= 0xffff, f'bad HCI opcode {item!r}')
+            # 0xfc00＝所有 vendor 命令（第六趟：Apple／Broadcom VSC 0xfce2、0xfce9、0xfd3c、0xfd47、0xfd48
+            # 都回 status 1，最後一個之後 bluetoothd 停住約 10 秒再重啟）
+            require(value != 0xfc00 or b'optional_vendor=' in kernel_bytes,
+                    'artifact lacks the vendor wildcard (0xfc00) of fuxi,bt-optional')
+            require(value not in opcodes, f'duplicate HCI opcode {item!r}')
+            opcodes.append(value)
+        require(1 <= len(opcodes) <= 8, '--bt-optional takes 1 to 8 opcodes')
+        chosen.props.append(('fuxi,bt-optional', 0, b''.join(struct.pack('<I', v) for v in opcodes)))
+        report['bt_optional'] = [f'{v:#06x}' for v in opcodes]
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-pad']
+    if args.bt_pad:
+        # os_log 趟 2：BD_VSC_OLYMPIC_ANTENNA_PREF_B（0xfce2 子命令 0x15）的 Command Complete 只有 status，
+        # bluetoothd 的 ByteStream 解析器印「Invalid data size 0」後不呼叫完成回呼，15 秒後 VSC stall 重啟。
+        # 常駐泵對清單內 opcode 補「子命令回聲＋0」兩個 byte（事件長度 4 → 6）。
+        require(args.bt == 5, '--bt-pad needs --bt 5')
+        require(b'fuxi,bt-pad' in kernel_bytes, 'artifact lacks the Bluetooth reply padding (fuxi,bt-pad)')
+        opcodes = []
+        for item in args.bt_pad.split(','):
+            value = int(item.strip(), 0)
+            require(0 < value <= 0xffff, f'bad HCI opcode {item!r}')
+            require(value not in opcodes, f'duplicate HCI opcode {item!r}')
+            opcodes.append(value)
+        require(1 <= len(opcodes) <= 8, '--bt-pad takes 1 to 8 opcodes')
+        chosen.props.append(('fuxi,bt-pad', 0, b''.join(struct.pack('<I', v) for v in opcodes)))
+        report['bt_pad'] = [f'{v:#06x}' for v in opcodes]
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-mask']
+    if args.bt_mask:
+        # os_log 趟 3：bluetoothd 依 LE 功能位元 13（Periodic Advertising）送 0x204a（LE Read Periodic
+        # Advertiser List Size）。QCA 控制器收過延伸廣播命令後，舊式 0x2007／0x200b 一律回 Command
+        # Disallowed，掃描起不來、reason 712 重啟。常駐泵在 Command Complete 回傳參數清位元：
+        # 0x2003:2:0x30 = LE Read Local Supported Features 的功能 byte 1 清 bit 4／5（功能位元 12／13）。
+        require(args.bt == 5, '--bt-mask needs --bt 5')
+        require(b'fuxi,bt-mask' in kernel_bytes, 'artifact lacks the Bluetooth reply bit mask (fuxi,bt-mask)')
+        rules = []
+        for item in args.bt_mask.split(','):
+            fields = item.strip().split(':')
+            require(len(fields) == 3, f'bad --bt-mask rule {item!r} (want OPCODE:OFFSET:CLEAR)')
+            opcode, offset, clear = (int(field, 0) for field in fields)
+            require(0 < opcode <= 0xffff, f'bad HCI opcode in {item!r}')
+            require(1 <= offset <= 0xff, f'offset in {item!r} must be 1..255 (0 is the status byte)')
+            require(0 < clear <= 0xff, f'clear bits in {item!r} must be 1..0xff')
+            rule = opcode << 16 | offset << 8 | clear
+            require(rule not in rules, f'duplicate --bt-mask rule {item!r}')
+            rules.append(rule)
+        require(1 <= len(rules) <= 8, '--bt-mask takes 1 to 8 rules')
+        chosen.props.append(('fuxi,bt-mask', 0, b''.join(struct.pack('<I', v) for v in rules)))
+        report['bt_mask'] = [f'{v >> 16:#06x}:{(v >> 8) & 0xff}:{v & 0xff:#04x}' for v in rules]
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-txmask']
+    if args.bt_txmask:
+        # os_log 趟 4：bluetoothd 的 LE 掃描用隨機自身位址（0x200b 參數 5＝1），卻沒送過 0x2005；
+        # QCA 對 0x200c 回 0x12，reason 718 重啟。常駐泵在送出的命令參數清位元（offset 從第一個參數 0 起算）：
+        # 0x200b:5:1、0x200d:12:1、0x2006:5:1、0x2041:0:1、0x2043:1:1 = 掃描／連線／廣播改用公開位址。
+        require(args.bt == 5, '--bt-txmask needs --bt 5')
+        require(b'fuxi,bt-txmask' in kernel_bytes, 'artifact lacks the Bluetooth command bit mask (fuxi,bt-txmask)')
+        rules = []
+        for item in args.bt_txmask.split(','):
+            fields = item.strip().split(':')
+            require(len(fields) == 3, f'bad --bt-txmask rule {item!r} (want OPCODE:OFFSET:CLEAR)')
+            opcode, offset, clear = (int(field, 0) for field in fields)
+            require(0 < opcode <= 0xffff, f'bad HCI opcode in {item!r}')
+            require(0 <= offset <= 0xff, f'offset in {item!r} must be 0..255 (first parameter byte = 0)')
+            require(0 < clear <= 0xff, f'clear bits in {item!r} must be 1..0xff')
+            rule = opcode << 16 | offset << 8 | clear
+            require(rule not in rules, f'duplicate --bt-txmask rule {item!r}')
+            rules.append(rule)
+        require(1 <= len(rules) <= 8, '--bt-txmask takes 1 to 8 rules')
+        chosen.props.append(('fuxi,bt-txmask', 0, b''.join(struct.pack('<I', v) for v in rules)))
+        report['bt_txmask'] = [f'{v >> 16:#06x}:{(v >> 8) & 0xff}:{v & 0xff:#04x}' for v in rules]
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props
+                    if name not in ('fuxi,bt-baud', 'fuxi,bt-nolog')]
+    if args.bt_baud:
+        # 趟19：A2DP 有聲但斷續，115200 約 92 kbps 不夠 SBC 約 258 kbps。setup 照 Linux qca_setup 以 115200
+        # 查版本後送 0xfc48 換速、重查版本確認，確認不到就退回 115200；常駐泵沿用實際速率。
+        require(args.bt == 5, '--bt-baud needs --bt 5')
+        require(b'fuxi,bt-baud' in kernel_bytes, 'artifact lacks the Bluetooth UART baud switch (fuxi,bt-baud)')
+        chosen.props.append(('fuxi,bt-baud', 0, struct.pack('<I', args.bt_baud)))
+        report['bt_baud'] = args.bt_baud
+    chosen.props = [p for p in chosen.props if p[0] != 'fuxi,bt-link-log']
+    if args.bt_link_log:
+        require(args.bt == 5 and b'fuxi,bt-link-log' in kernel.read_bytes(),
+                '--bt-link-log needs Bluetooth mode 5 and an artifact with link diagnostics')
+        chosen.props.append(('fuxi,bt-link-log', 0, struct.pack('<I', 1)))
+        report['bt_link_log'] = True
+    chosen.props = [p for p in chosen.props if p[0] != 'fuxi,media-exit-trace']
+    if args.media_exit_trace:
+        require(b'fuxi,media-exit-trace' in kernel.read_bytes(),
+                '--media-exit-trace needs an artifact with fuxi,media-exit-trace support')
+        chosen.props.append(('fuxi,media-exit-trace', 0, struct.pack('<I', 1)))
+        report['media_exit_trace'] = True
+    if args.bt_nolog:
+        # Linux qca_disable_soc_logging（WCN7850）：NVM 後送 0xfc17 {0x14, 0x00}，失敗只記錄。
+        require(args.bt == 5, '--bt-nolog needs --bt 5')
+        require(b'fuxi,bt-nolog' in kernel_bytes, 'artifact lacks the Bluetooth SoC logging switch (fuxi,bt-nolog)')
+        chosen.props.append(('fuxi,bt-nolog', 0, struct.pack('<I', 1)))
+        report['bt_nolog'] = True
     if args.inject_media:
         # mediaserverd 也注入 libfuxi-sb.dylib（fxinj bit 2）；SpringBoard 的 bit 1 保留。
         kernel_bytes = kernel.read_bytes()
@@ -697,6 +978,74 @@ def build(args, report, tree, source_inputs):
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
         chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
         report['inject'] = mode
+    if args.bt_native:
+        # BlueTool 替身（fxinj bit 32，xnu 0118）：核心把 libfuxi-sb.dylib 注入 /usr/sbin/BlueTool，建構子接手
+        # com.apple.BlueTool，對 bluetoothd 的 RunBuiltinScript 回報 fuxi,bt=5 的上電結果；原廠 Broadcom 流程不執行。
+        kernel_bytes = kernel.read_bytes()
+        require(b'BlueTool gets' in kernel_bytes, '--bt-native needs a kernel with opt-in BlueTool injection')
+        require(not any(token.startswith('fxinj=') for token in report['command_line'].split()),
+                'command line pins fxinj, which would override the ADT')
+        current = chosen.prop('fuxi,inject')
+        require(current is not None and len(current) == 4, 'source lacks ADT fuxi,inject')
+        mode = struct.unpack('<I', current)[0]
+        require(mode & 2 and not mode & ~31, 'unexpected injection mode before the BlueTool adapter')
+        mode |= 32
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
+        chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
+        report['inject'] = mode
+        report['bt_tool'] = True
+        # 20H392 bluetoothd 0x1000266bc：BT_DEVICE_ADDRESS 環境變數 → IOServiceNameMatching("marconi-bt"/"bluetooth")
+        # 的 local-mac-address（0x100027920）→ boot-args；MAC 全 0，或沒有 /dev/{cu,uart}.bluetooth 也沒有同名服務，
+        # 就 errx("No bluetooth on this device")。比照 wlan 在根層加 bluetooth 節點（平台替根層節點建 nub），
+        # 位址用既有 iOS 身分 /chosen mac-address-bluetooth0；參考 Sheng BluetoothProbe.cpp 的 bluetooth 服務。
+        require(not any(child.name == 'bluetooth' for child in tree.children), 'source already contains a bluetooth node')
+        address = chosen.prop('mac-address-bluetooth0')
+        require(address is not None and len(address) == 6 and any(address) and not address[0] & 1,
+                'native Bluetooth needs the existing valid iOS identity MAC')
+        if args.bt_controller_identity:
+            # Use two independent Read BD_ADDR captures. The iOS registry uses display order,
+            # while HCI carries this number little-endian. Do not put it in the JSON report.
+            sys.path.insert(0, str(WORKSPACE / 'work/statusbar-fix'))
+            from bt_controller_identity import controller_from_console
+            first, second = args.bt_controller_identity
+            require(first != second and all(re.fullmatch(r'native-[a-z0-9-]+', n) for n in (first, second)),
+                    'two different native boot capture names are required')
+            paths = [STORAGE / n / 'boot.log' for n in (first, second)]
+            require(digest(paths[0]) != digest(paths[1]), 'identity references contain the same capture')
+            identities = {controller_from_console(p) for p in paths}
+            require(len(identities) == 1, 'reference captures disagree on controller identity')
+            address = identities.pop().to_bytes(6, 'big')
+            report['bt_controller_identity'] = True
+        bluetooth = adt.Node()
+        # transport-encoding：bluetoothd 0x1000e7684 讀 4 bytes，缺少時預設 3（H4BC，Broadcom 專用）；
+        # 0x100156160 的對照 0 USB、1 H4、2 H4DS、3 H4BC、4 H5、6 APPLEBT、7 PCIe。QcaBluetooth 板級設 1。
+        # transport-speed：0x1000e74e4 讀 4 bytes，低於約 115200 就改用預設 2400000；只設定 UART.SK 的虛擬 termios，
+        # 實體 UART 仍由核心以已驗證的 115200 驅動，所以填實際速率。
+        bluetooth.props = [('name', 0, b'bluetooth\0'), ('compatible', 0, b'fuxi,wcn7850-bt\0'),
+                           ('device_type', 0, b'bluetooth\0'), ('local-mac-address', 0, address),
+                           ('transport-encoding', 0, struct.pack('<I', 1)),
+                           ('transport-speed', 0, struct.pack('<I', 115200))]
+        tree.children.append(bluetooth)
+        report['bt_node'] = True
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-oslog']
+    if args.bt_oslog:
+        # 第九趟：bluetoothd 自願重啟（0x100090734／0x100090778）先以 os_log 寫
+        # 「Bluetooth error - restarting { reason=…, context=… }」再 _exit(1)，console 看不到原因。
+        # 注入位元 64 讓 libfuxi-sb.dylib 進 bluetoothd，FuxiBluetoothLog.c 依 fuxi,bt-oslog 把 os_log 轉到 stderr；
+        # sweetnull（--stderr-log）含 bluetoothd 才會出現在 console。
+        require(args.bt_native, '--bt-oslog needs --bt-native')
+        require(1 <= args.bt_oslog <= 7, '--bt-oslog takes 1..7 (1 default/error/fault, 2 info, 4 debug)')
+        kernel_bytes = kernel.read_bytes()
+        require(b' bluetoothd gets ' in kernel_bytes, '--bt-oslog needs a kernel with opt-in bluetoothd injection')
+        require('bluetoothd' in (args.stderr_log or '').split(','), '--bt-oslog needs --stderr-log with bluetoothd')
+        current = chosen.prop('fuxi,inject')
+        require(current is not None and len(current) == 4, 'source lacks ADT fuxi,inject')
+        mode = struct.unpack('<I', current)[0] | 64
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
+        chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
+        chosen.props.append(('fuxi,bt-oslog', 0, struct.pack('<I', args.bt_oslog)))
+        report['inject'] = mode
+        report['bt_oslog'] = args.bt_oslog
     if args.product_haptics:
         # /product/haptics closed-loop=1：MobileGestalt 的 DeviceSupportsClosedLoopHaptics 才會成立，
         # MediaExperience 才建立震動器（走 VibeSynthEngine → AVHapticServer playVibePattern，由注入的 hook 轉核心）。
@@ -762,6 +1111,16 @@ def build(args, report, tree, source_inputs):
                                                      for token in report['command_line'].split()),
                 'ADT Wi-Fi arguments must not also stay on the command line')
         chosen.props.append(('fuxi,args', 0, wifi_args_value(report['adt_wifi_args'], kernel.read_bytes())))
+    # Follow mkadt-fuxi.py set_display_options: display properties belong on /arm-io/disp0.
+    displays = [node for bus in tree.children if bus.name == 'arm-io'
+                for node in bus.children if node.name == 'disp0']
+    for display in displays:
+        display.props = [prop for prop in display.props if prop[0] != 'fuxi,mfb-align']
+    if args.mfb_align:
+        require(len(displays) == 1, '--mfb-align needs one /arm-io/disp0 node')
+        require(b'fuxi,mfb-align' in kernel.read_bytes(), 'artifact lacks the fuxi,mfb-align switch')
+        displays[0].props.append(('fuxi,mfb-align', 0, struct.pack('<I', 1)))
+        report['mfb_align'] = True
     if args.display_gamut:
         # 廣色域：ADT 原為 D22AP 的 P3 → MobileGestalt 回報 deep colour（Aixt/MEN2O2B7f+8m4TxUA），WebKit 改用 b3a8/w30r、
         # MaterialKit 快照用 b3a8，Fuxi GPU 路徑收不下（Safari 黑屏、OutOfMemory(Device) 後 backboardd 改 CPU）。
@@ -794,7 +1153,8 @@ def build(args, report, tree, source_inputs):
         private.write_bytes(adt.serialize(tree))
         payload = stage / 'payload.bin'
         subprocess.run([sys.executable, str(TOOLS / 'mkpayload.py'), str(kernel), str(private), str(payload),
-                        '--cmdline', report['command_line']], check=True, stdout=subprocess.DEVNULL)
+                        '--cmdline', report['command_line'], *(['--extended-v1-adt'] if args.audio_bottom_full else [])],
+                       check=True, stdout=subprocess.DEVNULL)
         packed = payload.read_bytes()
         require(struct.unpack_from('<2Q', packed, 56) == (RAM_BASE, RAM_SIZE) and
                 packed[72:680] == report['command_line'].encode('ascii').ljust(608, b'\0'), 'packed RAM/arguments differ')
@@ -811,8 +1171,29 @@ def build(args, report, tree, source_inputs):
         flags = ['--target=aarch64-none-elf', '-O2', '-ffreestanding', '-fno-builtin', '-nostdlib', '-fno-pic',
                  '-fno-stack-protector', '-mgeneral-regs-only', '-mstrict-align', '-Wall', '-Wextra', '-Werror',
                  '-DFUXI=1', '-DFUXI_XNU_LOADER=1', '-DFUXI_RAM_9G=1', '-I' + str(shim)]
-        sources = [shim / 'fuxi-loader/start.S', shim / 'fuxi-loader/loader.c', shim / 'console.c',
+        loader_source = shim / 'fuxi-loader/loader.c'
+        if args.audio_bottom_full:
+            # Retain the pinned source for existing profiles. This experimental
+            # binary uses the loader's four-page bound with the 608-byte ABI.
+            original = loader_source.read_bytes()
+            old = b'const uint64_t adt_max = p->version == 1 ? PAGE_16K : ADT_MAX_V2;'
+            require(original.count(old) == 1, 'unexpected v1 device-tree size selection')
+            loader_source = stage / 'loader-speaker.c'
+            loader_source.write_bytes(original.replace(old, b'const uint64_t adt_max = ADT_MAX_V2;'))
+            flags.append('-I' + str(shim / 'fuxi-loader'))
+            report['speaker_loader_sha256'] = digest(loader_source)
+            require(0x4000 < size <= 0x10000, 'full stock firmware needs the extended device tree')
+        sources = [shim / 'fuxi-loader/start.S', loader_source, shim / 'console.c',
                    shim / 'fuxi-probe/probe.c', stage / 'gpu-fw.S', stage / 'payload.S']
+        link_flags = ['--build-id=none']
+        if args.audio_tdm_pcm:
+            handoff = audio_dma_handoff_offset(packed, offset, size)
+            report['audio_dma'] = {'bytes': AUDIO_DMA_BYTES, 'payload_handoff_offset': handoff,
+                                   'loader_source_sha256': digest(AUDIO_DMA_LOADER),
+                                   'header_sha256': digest(AUDIO_DMA_HEADER)}
+            flags.extend(('-I' + str(AUDIO_DMA_HEADER.parent), f'-DFUXI_AUDIO_HANDOFF_OFFSET={handoff}u'))
+            sources.append(AUDIO_DMA_LOADER)
+            link_flags.append('--wrap=probe_main')
         objects = []
         for source in sources:
             target = stage / (source.stem + '.o')
@@ -822,12 +1203,18 @@ def build(args, report, tree, source_inputs):
                 require('R_AARCH64_ABS' not in relocations, 'absolute C relocation in ' + str(source))
             objects.append(target)
         subprocess.run([str(args.compiler_dir / 'ld.lld.exe'), '-T', str(shim / 'fuxi-loader/loader.ld'),
-                        '--build-id=none', *map(str, objects), '-o', str(stage / 'loader.elf')], check=True)
+                        *link_flags, *map(str, objects), '-o', str(stage / 'loader.elf')], check=True)
         subprocess.run([str(args.compiler_dir / 'llvm-objcopy.exe'), '-O', 'binary', str(stage / 'loader.elf'),
                         str(stage / 'Image')], check=True)
         image = (stage / 'Image').read_bytes()
         require(struct.unpack_from('<Q', image, 16)[0] == len(image) and image[56:60] == b'ARM\x64' and
                 image.count(packed) == 1, 'loader Image header/payload differs')
+        if args.audio_tdm_pcm:
+            report['audio_dma']['image_buffer_offset'] = audio_dma_loader_layout(
+                args.compiler_dir, stage / 'loader.elf', image)
+            require(digest(AUDIO_DMA_LOADER) == report['audio_dma']['loader_source_sha256'] and
+                    digest(AUDIO_DMA_HEADER) == report['audio_dma']['header_sha256'],
+                    'audio DMA sources changed during the loader build')
         for _, name, _ in GPU_INPUTS:
             require(image.count((WORKSPACE / name).read_bytes()) == 1, 'loader GPU asset embedding differs')
         subprocess.run([sys.executable, str(WORKSPACE / 'uefi-fuxi/Resources/Scripts/mkbootimg.py'),
@@ -926,6 +1313,42 @@ def self_test():
         except ValueError:
             continue
         raise ValueError('invalid audio SPF gate accepted')
+    prm_marker = marker + b'\0FUXI AUDIO PRM: LPASS macro request status='
+    graph_marker = marker + b'\0FUXI AUDIO TDM: probe complete result='
+    pcm_marker = marker + b'\0FUXI AUDIO PCM: probe complete result=\0fuxi,audio-dma'
+    require(audio_spf_choice(True, True, prm_marker, prm=True) == 3 and
+            audio_spf_choice(True, True, graph_marker, tdm_graph=True) == 4 and
+            audio_spf_choice(True, True, pcm_marker, tdm_pcm=True) == 5, 'audio probe gate differs')
+    for enabled, data, wire_format, prm, graph in (
+            (False, graph_marker, 'apm', False, True),
+            (True, graph_marker, 'bare', False, True),
+            (True, prm_marker, 'apm', False, True),
+            (True, graph_marker + prm_marker, 'apm', True, True)):
+        try:
+            audio_spf_choice(enabled, True, data, wire_format, prm=prm, tdm_graph=graph)
+        except ValueError:
+            continue
+        raise ValueError('invalid audio probe combination accepted')
+    for enabled, data, wire, graph in ((False, pcm_marker, 'apm', False), (True, graph_marker, 'apm', False),
+                                      (True, pcm_marker, 'bare', False), (True, pcm_marker, 'apm', True)):
+        try:
+            audio_spf_choice(enabled, True, data, wire, tdm_graph=graph, tdm_pcm=True)
+        except ValueError:
+            continue
+        raise ValueError('invalid audio PCM probe gate accepted')
+    require(audio_dma_handoff_offset(b'\0' * 20 + AUDIO_DMA_HANDOFF, 16, 20) == 20,
+            'audio DMA handoff offset differs')
+    require(native_bluetooth_arguments('a sweetnoexec=bluetoothd,fairplayd.H2,vmd b') ==
+            ('a sweetnoexec=fairplayd.H2,vmd b', 'sweetnoexec=bluetoothd,fairplayd.H2,vmd'),
+            'native Bluetooth must preserve the other disabled daemons')
+    require(native_bluetooth_arguments('a sweetnoexec=bluetoothd b')[0] == 'a b',
+            'native Bluetooth left an empty boot argument')
+    for invalid in ('a b', 'a sweetnoexec=vmd b', 'a sweetnoexec=bluetoothd,bluetoothd b'):
+        try:
+            native_bluetooth_arguments(invalid)
+        except ValueError:
+            continue
+        raise ValueError('unexpected Bluetooth baseline accepted')
     payload = (STORAGE / SOURCE / 'payload.bin').read_bytes()
     original = payload[72:680].split(b'\0', 1)[0].decode('ascii')
     line, removed = arguments(original, 'fixture.elf')
@@ -1352,11 +1775,78 @@ def main():
                         help='Query DSP SPF state once through adsp_apps; requires --with-adsp')
     parser.add_argument('--audio-spf-format', choices=('apm', 'bare'), default='apm',
                         help='Select the 40-byte APM or isolated 24-byte bare state query')
-    parser.add_argument('--haptic', type=int, choices=(2, 3),
-                        help='HAP525 vibration: ADT fuxi,haptic=2 runtime (sysctl kern.fuxivibrate) or 3 with a boot self-test')
-    parser.add_argument('--bt', type=int, choices=(1, 3),
-                        help='WCN7850 Bluetooth: ADT fuxi,bt=1 read-only survey, or 3 board power-up and QCA version '
-                             'probe once WLAN_EN has been steady for 15 s (needs --native-ath12k); everything is restored')
+    parser.add_argument('--audio-prm', action='store_true',
+                        help='After SPF state=1, request and release one LPASS macro vote. Requires --audio-spf (apm).')
+    parser.add_argument('--audio-tdm-graph', action='store_true',
+                        help='Open, configure and close the speaker and stream graphs. Requires --audio-spf (apm).')
+    parser.add_argument('--audio-tdm-pcm', action='store_true',
+                        help='Send 80 ms of silent PCM over the secondary TDM graph. Requires --audio-spf (apm).')
+    parser.add_argument('--haptic-rtp', type=Path, help='Stock Fuxi 376-byte click measured in Android')
+    parser.add_argument('--audio-bottom-full', action='store_true', help='Verify all stock HALO regions under mute')
+    parser.add_argument('--audio-bottom-cal', type=Path, help='Captured calibration directory for muted bottom speaker tuning')
+    parser.add_argument('--audio-bottom-run', action='store_true',
+                        help='After the muted tuning, apply B2 errata/OTP and run the protection firmware with output off '
+                             '(fuxi,amp=6). Requires --audio-bottom-cal.')
+    parser.add_argument('--audio-bottom-tone', action='store_true',
+                        help='After the mode 6 protection/calibration gate passes, play 1 s 2 kHz -20 dBFS at -30 dB on '
+                             'the bottom speaker only (fuxi,amp=7). Requires --audio-bottom-run and --audio-tdm-pcm.')
+    parser.add_argument('--audio-bottom-fw', type=Path,
+                        help='Stock CS35L41 protection firmware for muted lower amplifier RAM verification')
+    parser.add_argument('--haptic-rtp-vmax', type=lambda value: int(value, 0),
+                        help='Experimental UI FIFO voltage code (0x1c to 0x38)')
+    parser.add_argument('--haptic-fast-apid', action='store_true', help='Reuse verified haptic APIDs with live owner checks')
+    parser.add_argument('--haptic-pcm', action='store_true',
+                        help='Send signed Actuator PCM in mode 5 with the matching HAL')
+    parser.add_argument('--haptic', type=int, choices=(2, 3, 4, 5),
+                        help='HAP525 vibration: ADT fuxi,haptic=2 runtime (sysctl kern.fuxivibrate) or 3 with a boot self-test, or 4 with transient attack and stock brake detection')
+    parser.add_argument('--hal-haptics', action='store_true',
+                        help='Enable the Actuator output in FuxiAudio.driver; needs --haptic and --product-haptics')
+    parser.add_argument('--bt', type=int, choices=(1, 3, 4, 5),
+                        help='WCN7850 Bluetooth: ADT fuxi,bt=1 read-only survey, 3 board power-up and QCA version '
+                             'probe once WLAN_EN has been steady for 15 s (needs --native-ath12k), or 4 which also '
+                             'downloads the rampatch/NVM from /usr/local/share/fuxi/bt and resets HCI. '
+                             'Mode 5 keeps the initialized UART running with the UART.SK transport.')
+    parser.add_argument('--bt-probe', action='store_true',
+                        help='Boot self-test using SpringBoard to exchange HCI Read Local Version over UART.SK. Needs --bt 5.')
+    parser.add_argument('--bt-optional', metavar='OPCODES',
+                        help='ADT fuxi,bt-optional: comma-separated HCI opcodes (status-only write commands, '
+                             'at most 8) whose failed Command Complete the resident pump reports as success; '
+                             '0xfc00 stands for every vendor (OGF 0x3f) opcode. Needs --bt 5.')
+    parser.add_argument('--bt-pad', metavar='OPCODES',
+                        help='ADT fuxi,bt-pad: comma-separated HCI opcodes (at most 8, 0xfc00 = every vendor '
+                             'opcode) whose status-only Command Complete the resident pump extends with the '
+                             'command\'s first parameter byte and 0, for bluetoothd byte-stream parsers. Needs --bt 5.')
+    parser.add_argument('--bt-mask', metavar='RULES',
+                        help='ADT fuxi,bt-mask: comma-separated OPCODE:OFFSET:CLEAR rules (at most 8); the resident '
+                             'pump clears CLEAR bits at return-parameter OFFSET (status = 0) of matching Command '
+                             'Complete events. 0x2003:2:0x30 hides LE extended/periodic advertising. Needs --bt 5.')
+    parser.add_argument('--bt-txmask', metavar='RULES',
+                        help='ADT fuxi,bt-txmask: comma-separated OPCODE:OFFSET:CLEAR rules (at most 8); the resident '
+                             'pump clears CLEAR bits at parameter OFFSET (first parameter = 0) of matching HCI '
+                             'commands before they reach the controller. 0x200b:5:1 makes LE scanning use the '
+                             'public address. Needs --bt 5.')
+    parser.add_argument('--bt-baud', type=int, choices=(921600, 2000000, 3000000, 3200000),
+                        help='ADT fuxi,bt-baud: WCN7850 UART rate after the version query (0xfc48, RCG M/N from '
+                             'gcc-sm8550); falls back to 115200 if the controller does not answer. Needs --bt 5.')
+    parser.add_argument('--bt-link-log', action='store_true',
+                        help='Record classic discovery, connection and pairing stages independently of the H4 log quota')
+    parser.add_argument('--bt-controller-identity', nargs=2, metavar=('RUN_A', 'RUN_B'),
+                        help='Set the private Bluetooth service local address from two verified controller captures')
+    parser.add_argument('--bt-nolog', action='store_true',
+                        help='ADT fuxi,bt-nolog=1: send 0xfc17 {0x14, 0x00} after the NVM to disable controller '
+                             'logging (Linux qca_disable_soc_logging). Needs --bt 5.')
+    parser.add_argument('--bt-ibs', action='store_true',
+                        help='ADT fuxi,bt-ibs=1: the resident UART pump answers QCA in-band sleep '
+                             '(WAKE_IND -> WAKE_ACK, WAKE_IND before the first host packet). Needs --bt 5.')
+    parser.add_argument('--bt-exit-trace', action='store_true',
+                        help='Collect up to three bluetoothd exit-code-1 backtraces')
+    parser.add_argument('--bt-native', action='store_true',
+                        help='Allow the installed bluetoothd to start with --bt 5 and inject the BlueTool adapter '
+                             '(ADT fuxi,inject bit 32; kernel and libfuxi-sb.dylib must carry it). Excludes --bt-probe.')
+    parser.add_argument('--bt-oslog', type=int, default=0, metavar='BITS',
+                        help='ADT fuxi,bt-oslog and injection bit 64: libfuxi-sb.dylib copies bluetoothd os_log to '
+                             'stderr (1 default/error/fault, 2 info, 4 debug). Needs --bt-native and '
+                             '--stderr-log with bluetoothd.')
     parser.add_argument('--inject-media', action='store_true',
                         help='ADT fuxi,inject=6: mediaserverd also gets libfuxi-sb.dylib (haptic server hooks)')
     parser.add_argument('--wifi-audit', action='store_true',
@@ -1401,6 +1891,12 @@ def main():
     parser.add_argument('--haptic-amp', type=int, metavar='LEVEL',
                         help='ADT fuxi,haptic-amp: DIRECT_PLAY amplitude ceiling 1..255 (0xf126, scales VMAX); '
                              'Atoms envelopes are stepped under it; needs --haptic')
+    parser.add_argument('--mfb-align', action='store_true',
+                        help='Publish DisplayPipePlaneBaseAlignment as a dictionary for VideoToolbox '
+                             'via /arm-io/disp0 fuxi,mfb-align=1')
+    parser.add_argument('--media-exit-trace', action='store_true',
+                        help='ADT /chosen fuxi,media-exit-trace=1: trace silent exits and signals for '
+                             'mediaserverd, MobileSafari, VTDecoderXPCService, WebKit and bounded lskdd')
     parser.add_argument('--display-gamut', choices=('sRGB',),
                         help='/product artwork-display-gamut sRGB: MobileGestalt answers no deep colour, so WebKit, '
                              'MaterialKit and CA stay on 8-bit BGRA instead of b3a8/w30r surfaces (mkadt-fuxi.py)')
@@ -1432,6 +1928,8 @@ def main():
                              'earlier loader profile; options given explicitly still win')
     args = parser.parse_args()
     try:
+        require(not args.bt_controller_identity or (args.bt_native and args.bt == 5),
+                '--bt-controller-identity requires --bt 5 --bt-native')
         if args.like:
             # 省掉每次手抄上一顆 loader 的平台選項；測試相關開關（wifi/tap）仍須明寫。
             require(re.fullmatch(r'native-[a-z0-9-]+-loader', args.like), 'invalid --like loader name')

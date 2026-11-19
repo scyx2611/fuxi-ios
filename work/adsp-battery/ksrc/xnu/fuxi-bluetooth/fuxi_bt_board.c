@@ -17,11 +17,9 @@
 #define FUXI_BT_RCG_ROOT_OFF (1u << 31)
 /* hid 除頻 [4:0]、來源 [10:8]、MND 模式 [13:12]；bit 20（HW_CLK_CTRL）保留 XBL 的設定。 */
 #define FUXI_BT_RCG_CFG_FIELDS 0x371fu
-/* F(7372800, P_GCC_GPLL0_OUT_EVEN, 1, 384, 15625)：pre_div 2*1-1、parent_map_8 來源 6、雙沿 MND。 */
+/* F(hz, P_GCC_GPLL0_OUT_EVEN, 1, m, n)：pre_div 2*1-1、parent_map_8 來源 6、雙沿 MND（速率表每項都是這組）。 */
 #define FUXI_BT_RCG_CFG_VALUE (1u | (6u << 8) | (2u << 12))
 #define FUXI_BT_MND_MASK 0xffffu
-#define FUXI_BT_MND_M 384u
-#define FUXI_BT_MND_N 15625u
 
 static const uint32_t fuxi_bt_board_branches[] = {0x233d4, 0x233d0, 0x233cc, 0x23004, 0x1e754};
 
@@ -136,29 +134,37 @@ static enum fuxi_bt_status fuxi_bt_board_rcg_update(struct fuxi_bt_board *board)
     return fuxi_bt_board_fail(board, FUXI_BT_TIMEOUT, command);
 }
 
-static enum fuxi_bt_status fuxi_bt_board_rcg(struct fuxi_bt_board *board)
+/* 依速率表設 RCG；rcg_saved 必須已存好 XBL 的值（上半部保留位元照抄）。 */
+static enum fuxi_bt_status fuxi_bt_board_rcg_program(struct fuxi_bt_board *board,
+    const struct fuxi_bt_rate *rate)
 {
     static const uint32_t offsets[] = {4, 8, 12, 16};
-    uint32_t command = 0, values[4];
+    uint32_t command = 0, values[4], d;
     enum fuxi_bt_status status;
+    if (!rate || !rate->m || rate->m >= rate->n) {
+        return FUXI_BT_ARGUMENT;
+    }
     if (!fuxi_bt_board_read(board, FUXI_BT_GCC_BASE + FUXI_BT_RCG_CMD, &command)) {
         return board->error;
     }
     if (command & FUXI_BT_RCG_UPDATE) {
         return fuxi_bt_board_fail(board, FUXI_BT_BUSY, command);
     }
-    for (unsigned index = 0; index < 4; index++) {
-        if (!fuxi_bt_board_read(board, FUXI_BT_GCC_BASE + FUXI_BT_RCG_CMD + offsets[index],
-            &board->rcg_saved[index])) {
-            return board->error;
-        }
+    /* clk-rcg2 __clk_rcg2_configure_mnd：2d 值＝n，夾在 [m, 2(n-m)]；D 暫存器寫 ~2d */
+    d = rate->n;
+    if (d < rate->m) {
+        d = rate->m;
+    }
+    if (d > 2u * (uint32_t)(rate->n - rate->m)) {
+        d = 2u * (uint32_t)(rate->n - rate->m);
     }
     values[0] = (board->rcg_saved[0] & ~FUXI_BT_RCG_CFG_FIELDS) | FUXI_BT_RCG_CFG_VALUE;
-    values[1] = (board->rcg_saved[1] & ~FUXI_BT_MND_MASK) | FUXI_BT_MND_M;
+    values[1] = (board->rcg_saved[1] & ~FUXI_BT_MND_MASK) | rate->m;
     values[2] = (board->rcg_saved[2] & ~FUXI_BT_MND_MASK) |
-        (~(FUXI_BT_MND_N - FUXI_BT_MND_M) & FUXI_BT_MND_MASK);
-    values[3] = (board->rcg_saved[3] & ~FUXI_BT_MND_MASK) | (~FUXI_BT_MND_N & FUXI_BT_MND_MASK);
+        (~(uint32_t)(rate->n - rate->m) & FUXI_BT_MND_MASK);
+    values[3] = (board->rcg_saved[3] & ~FUXI_BT_MND_MASK) | (~d & FUXI_BT_MND_MASK);
     board->rcg_changed = true;
+    board->rcg_hz = 0;
     /* 和 Linux 一樣先寫 M/N/D 再寫 CFG，最後 CMD_UPDATE。 */
     for (unsigned index = 1; index < 4; index++) {
         if (!fuxi_bt_board_write(board, FUXI_BT_GCC_BASE + FUXI_BT_RCG_CMD + offsets[index], values[index])) {
@@ -182,7 +188,27 @@ static enum fuxi_bt_status fuxi_bt_board_rcg(struct fuxi_bt_board *board)
     if (command & FUXI_BT_RCG_ROOT_OFF) {
         return fuxi_bt_board_fail(board, FUXI_BT_OFF, command);
     }
+    board->rcg_hz = rate->source_hz;
     return FUXI_BT_OK;
+}
+
+static enum fuxi_bt_status fuxi_bt_board_rcg(struct fuxi_bt_board *board)
+{
+    static const uint32_t offsets[] = {4, 8, 12, 16};
+    uint32_t command = 0;
+    if (!fuxi_bt_board_read(board, FUXI_BT_GCC_BASE + FUXI_BT_RCG_CMD, &command)) {
+        return board->error;
+    }
+    if (command & FUXI_BT_RCG_UPDATE) {
+        return fuxi_bt_board_fail(board, FUXI_BT_BUSY, command);
+    }
+    for (unsigned index = 0; index < 4; index++) {
+        if (!fuxi_bt_board_read(board, FUXI_BT_GCC_BASE + FUXI_BT_RCG_CMD + offsets[index],
+            &board->rcg_saved[index])) {
+            return board->error;
+        }
+    }
+    return fuxi_bt_board_rcg_program(board, fuxi_bt_rate_find(FUXI_BT_BOOT_BAUD));
 }
 
 enum fuxi_bt_status fuxi_bt_board_power_on(struct fuxi_bt_board *board,
@@ -380,6 +406,7 @@ enum fuxi_bt_status fuxi_bt_board_power_off(struct fuxi_bt_board *board)
             cleanup = FUXI_BT_TIMEOUT;
         }
         board->rcg_changed = false;
+        board->rcg_hz = 0;
     }
     if (board->votes_changed) {
         uint32_t vote = 0;
@@ -426,15 +453,21 @@ static void fuxi_bt_board_wait(void *context, unsigned microseconds)
     board->io.wait_us(board->io.context, microseconds);
 }
 
+/*
+ * baud 必須在速率表內。RCG 來源頻率不同時，趁 FIFO 關著（GENI 引擎閒置、RFR 已還原）先改 RCG，
+ * 再用新的來源頻率與 baud 開 FIFO；對照 Linux qcom_geni_serial_set_termios 的 dev_pm_opp_set_rate＋
+ * M/S_CLK_CFG。
+ */
 static enum fuxi_bt_status fuxi_bt_board_acquire(void *context, unsigned baud)
 {
     struct fuxi_bt_board *board = context;
     const struct fuxi_bt_geni_fifo_io io = {
         board, fuxi_bt_board_se_read, fuxi_bt_board_se_write, fuxi_bt_board_now
     };
-    const struct fuxi_bt_geni_fifo_config config = {1, true, board->qup_version, FUXI_BT_SE_HZ};
+    const struct fuxi_bt_rate *rate = fuxi_bt_rate_find(baud);
+    struct fuxi_bt_geni_fifo_config config;
     enum fuxi_bt_status status;
-    if (baud != FUXI_BT_BOOT_BAUD) {
+    if (!rate) {
         return FUXI_BT_ARGUMENT;
     }
     if (board->fifo_used) {
@@ -443,6 +476,15 @@ static enum fuxi_bt_status fuxi_bt_board_acquire(void *context, unsigned baud)
     if (board->stage != FUXI_BT_STAGE_READY) {
         return FUXI_BT_NO_UART;
     }
+    if (board->rcg_hz != rate->source_hz) {
+        status = fuxi_bt_board_rcg_program(board, rate);
+        if (status != FUXI_BT_OK) {
+            return status;
+        }
+        board->rcg_switches++;
+    }
+    config = (struct fuxi_bt_geni_fifo_config){1, true, board->qup_version, rate->source_hz, rate->baud};
+    board->baud = rate->baud;
     board->fifo_used = true;
     status = fuxi_bt_geni_fifo_open(&board->fifo, &io, &config);
     for (unsigned poll = 0; status == FUXI_BT_AGAIN && poll < FUXI_BT_ACQUIRE_POLLS; poll++) {

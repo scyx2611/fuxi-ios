@@ -15,6 +15,9 @@
  *              the HAP525 runtime, sysctl kern.fuxivibrate; the library checks which program it is in)
  *   bit 3 (8)  wifid: native Wi-Fi diagnostics.
  *   bit 4 (16) Preferences: manual Wi-Fi password prompt when password sharing is unavailable.
+ *   bit 5 (32) /usr/sbin/BlueTool: the library answers com.apple.BlueTool for the WCN7850 that
+ *              fuxi,bt=5 has booted (the stock tool only knows Broadcom); FuxiBlueTool.c.
+ *   bit 6 (64) /usr/sbin/bluetoothd: diagnostics and the Qualcomm controller hooks.
  *
  * dyld honours it because the H1 AMFI dyld policy answer (patch 0103, request 0x5a) allows everything,
  * including a library that is missing. The variable follows the program's own environment.
@@ -25,8 +28,11 @@
 #define FUXI_INJECT_MEDIASERVER 4u
 #define FUXI_INJECT_WIFI_AUDIT  8u
 #define FUXI_INJECT_WIFI_PROMPT 16u
+#define FUXI_INJECT_BLUETOOL    32u
+#define FUXI_INJECT_BLUETOOTHD  64u
 #define FUXI_INJECT_ALL         (FUXI_INJECT_APPS | FUXI_INJECT_SPRINGBOARD | FUXI_INJECT_MEDIASERVER | \
-                                FUXI_INJECT_WIFI_AUDIT | FUXI_INJECT_WIFI_PROMPT)
+                                FUXI_INJECT_WIFI_AUDIT | FUXI_INJECT_WIFI_PROMPT | FUXI_INJECT_BLUETOOL | \
+                                FUXI_INJECT_BLUETOOTHD)
 #define FUXI_INJECT_APP_LIB     "/usr/local/lib/fuxi/libfuxi-app.dylib"
 #define FUXI_INJECT_SB_LIB      "/usr/local/lib/fuxi/libfuxi-sb.dylib"
 #define FUXI_INJECT_ENV_MAX     128
@@ -64,6 +70,14 @@ fuxi_inject_library(unsigned mode, const char *path, const char *name)
 	}
 	if (strcmp(name, "wifid") == 0) {
 		return (mode & FUXI_INJECT_WIFI_AUDIT) != 0 && strcmp(path, "/usr/sbin/wifid") == 0 ?
+		       FUXI_INJECT_SB_LIB : NULL;
+	}
+	if (strcmp(name, "BlueTool") == 0) {
+		return (mode & FUXI_INJECT_BLUETOOL) != 0 && strcmp(path, "/usr/sbin/BlueTool") == 0 ?
+		       FUXI_INJECT_SB_LIB : NULL;
+	}
+	if (strcmp(name, "bluetoothd") == 0) {
+		return (mode & FUXI_INJECT_BLUETOOTHD) != 0 && strcmp(path, "/usr/sbin/bluetoothd") == 0 ?
 		       FUXI_INJECT_SB_LIB : NULL;
 	}
 	if ((mode & FUXI_INJECT_WIFI_PROMPT) && strcmp(name, "Preferences") == 0 &&

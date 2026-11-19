@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import plistlib
 import struct
 
 
@@ -10,10 +11,12 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def inspect(data):
+def inspect(data, *, audio_bundle=False):
     require(len(data) >= 32, 'Truncated Mach-O header')
     magic, cpu, subtype, kind, commands, commands_size = struct.unpack_from('<6I', data)
-    require((magic, cpu, subtype, kind) == (0xfeedfacf, 0x100000c, 0, 6), 'Requires plain arm64 MH_DYLIB')
+    binary_type, type_name = (8, 'MH_BUNDLE') if audio_bundle else (6, 'MH_DYLIB')
+    require((magic, cpu, subtype, kind) == (0xfeedfacf, 0x100000c, 0, binary_type),
+            f'Requires plain arm64 {type_name}')
     commands_end = 32 + commands_size
     require(commands_end <= len(data) and commands <= commands_size // 8, 'Invalid load command bounds')
     offset = 32
@@ -53,16 +56,17 @@ def inspect(data):
                 dependencies.append(name)
         offset += size
     require(offset == commands_end and minimum is not None and signature is not None, 'Missing load commands')
-    require(identifier == '/usr/local/lib/fuxi/libfuxi-sb.dylib', 'Unexpected dylib identifier')
-    require(set(dependencies) == {
-        '/usr/lib/libSystem.B.dylib', '/usr/lib/libobjc.A.dylib',
+    expected_name = None if audio_bundle else '/usr/local/lib/fuxi/libfuxi-sb.dylib'
+    require(identifier == expected_name, 'Unexpected dylib identifier')
+    expected_dependencies = {
+        '/usr/lib/libSystem.B.dylib',
         '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',
-        '/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit',
-    } or set(dependencies) == {
-        '/usr/lib/libSystem.B.dylib', '/usr/lib/libobjc.A.dylib',
-        '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',
-        '/System/Library/Frameworks/IOKit.framework/IOKit',
-    }, 'Unexpected dependencies')
+    }
+    normalized = {name.replace('/IOKit.framework/Versions/A/', '/IOKit.framework/') for name in dependencies}
+    if not audio_bundle:
+        expected_dependencies.update({'/usr/lib/libobjc.A.dylib',
+            '/System/Library/Frameworks/IOKit.framework/IOKit'})
+    require(normalized == expected_dependencies, 'Unexpected dependencies')
     signature_offset, signature_size = signature
     require(signature_offset >= commands_end and signature_offset + signature_size <= len(data),
             'Code signature outside file')
@@ -120,17 +124,29 @@ def inspect(data):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('binary', type=Path)
+    parser.add_argument('path', type=Path)
+    parser.add_argument('--audio-bundle', action='store_true', help='verify an arm64 FuxiAudio.driver')
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
-    data = args.binary.read_bytes()
-    result = inspect(data)
+    binary = args.path
+    if args.audio_bundle:
+        binary = args.path / 'FuxiAudio'
+        info_bytes = (args.path / 'Info.plist').read_bytes()
+        info = plistlib.loads(info_bytes)
+        require(info.get('CFBundleExecutable') == binary.name and info.get('CFBundlePackageType') == 'BNDL'
+                and info.get('CFBundleIdentifier') == 'org.iosfuxi.audio', 'Unexpected FuxiAudio bundle metadata')
+        factory, = info.get('CFPlugInTypes', {}).get('443ABAB8-E7B3-491A-B985-BEB9187030DB', [])
+        require(info.get('CFPlugInFactories', {}).get(factory) == 'FuxiAudio_Create', 'Missing FuxiAudio factory')
+    data = binary.read_bytes()
+    result = inspect(data, audio_bundle=args.audio_bundle)
+    if args.audio_bundle:
+        result.update(factory='FuxiAudio_Create', info_sha256=hashlib.sha256(info_bytes).hexdigest())
     if args.self_test:
         for position in (4, 12, 4096):
             changed = bytearray(data)
             changed[position] ^= 1
             try:
-                inspect(changed)
+                inspect(changed, audio_bundle=args.audio_bundle)
             except (ValueError, struct.error):
                 continue
             raise ValueError(f'Corruption at {position} was accepted')

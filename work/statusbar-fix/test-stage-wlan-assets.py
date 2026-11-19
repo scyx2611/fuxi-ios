@@ -710,5 +710,139 @@ class WlanStageTests(unittest.TestCase):
         self.assertEqual(len(calls), len(set(calls)))
 
 
+class BluetoothStageTests(WlanStageTests):
+    """kind=bt：同一條覆蓋層流程部署 WCN7850 rampatch 與 NVM 到 /usr/local/share/fuxi/bt。"""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='fuxi-bt-stage-test-')
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name).resolve()
+        self.inputs = self.directory / 'inputs'
+        self.inputs.mkdir()
+        self.manifest_path = self.directory / 'manifest.json'
+        names = ['hmtbtfw20.tlv', 'hmtbtfw20.ver', 'hmtnv20.b0a', 'hmtnv20.b10a', 'hmtnv20.bin']
+        self.manifest = {
+            'kind': 'bt', 'root_path': stage.ROOT_PATH, 'required': names,
+            'provenance': {'source': 'Offline Bluetooth fixture only'}, 'files': {},
+        }
+        for position, name in enumerate(names):
+            contents = (f'OFFLINE_BT_FIXTURE_{position}_{name}\n').encode('ascii') * 5
+            path = self.inputs / name
+            path.write_bytes(contents)
+            self.manifest['files'][name] = {
+                'host_path': str(path), 'bytes': len(contents), 'sha256': stage.digest(contents),
+            }
+        self.save_manifest()
+
+    def guest_log(self, changed=True):
+        records = []
+        for name in stage.asset_names(self.manifest):
+            record = self.manifest['files'][name]
+            records.append({'runtime_path': str(stage.BT_PATH / name), 'sha256': record['sha256'],
+                            'bytes': record['bytes'], 'changed': changed})
+        return ('WLAN_STAGE_RESULT ' + json.dumps(records) + '\nFAST_WLAN_STAGE_SUCCESS\nGUEST_OK\n').encode('utf-8')
+
+    def test_bt_manifest_names_bounds_and_kind(self):
+        manifest, unused_checksum = stage.load_manifest(self.manifest_path)
+        self.assertEqual(stage.asset_names(manifest), tuple(self.manifest['required']))
+        self.assertEqual(stage.target_path(manifest), stage.BT_PATH)
+        bad_cases = []
+        for names in (['hmtbtfw20.tlv'], ['hmtnv20.bin', 'hmtnv20.b0a'], ['hmtbtfw20.tlv', 'hmtbtfw20.ver'],
+                      ['hmtbtfw20.tlv', 'hmtnv20.b0a', 'hmtnv20.B0A'], ['hmtbtfw20.tlv', '../hmtnv20.bin'],
+                      ['hmtbtfw20.tlv', 'hmtnv20.bin', 'amss.bin'], ['hmtbtfw20.tlv', 'hmtnv20.b12345']):
+            bad_cases.append(('required', names))
+        for key, value in bad_cases:
+            manifest = copy.deepcopy(self.manifest)
+            manifest[key] = value
+            manifest['files'] = {name: self.manifest['files'].get(name, self.manifest['files']['hmtnv20.bin'])
+                                 for name in value}
+            with self.subTest(names=value), self.assertRaises(ValueError):
+                stage.validate_manifest_schema(manifest)
+        for mutate in (lambda m: m.update(kind='other'), lambda m: m.update(provenance={}),
+                       lambda m: m.update(bdf_basename='board-2.bin'),
+                       lambda m: m['files']['hmtnv20.b0a'].update(bytes=stage.BT_MAX_NVM_BYTES + 1),
+                       lambda m: m['files']['hmtbtfw20.tlv'].update(bytes=stage.BT_MAX_PATCH_BYTES + 1),
+                       lambda m: m['files'].pop('hmtnv20.bin')):
+            manifest = copy.deepcopy(self.manifest)
+            mutate(manifest)
+            with self.assertRaises(ValueError):
+                stage.validate_manifest_schema(manifest)
+        manifest = copy.deepcopy(self.manifest)
+        manifest['files']['hmtbtfw20.tlv']['bytes'] = stage.BT_MAX_PATCH_BYTES
+        stage.validate_manifest_schema(manifest)
+
+    def test_bt_output_name_must_match_kind(self):
+        self.assertEqual(stage.validate_output(self.directory / 'run-bt-offline', self.directory),
+                         self.directory / 'run-bt-offline')
+        arguments = SimpleNamespace(output=str(self.directory / 'run-wlan-offline'),
+                                    manifest=str(self.manifest_path), serial=stage.SERIAL, port=34616)
+        original_validate_output = stage.validate_output
+        with patch.object(stage, 'validate_output', side_effect=lambda path: original_validate_output(path, self.directory)), \
+                patch.object(stage, 'load_phone') as load_phone, self.assertRaises(ValueError):
+            stage.stage(arguments)
+        load_phone.assert_not_called()
+
+    def test_guest_changes_only_allowed_files_and_is_idempotent(self):
+        share, hashes = self.make_share()
+        root = self.make_root()
+        before = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob('*') if path.is_file()}
+        with self.guest_metadata_mock() as (owner, permissions):
+            records = stage.install_guest_assets(root, share)
+            self.assertTrue(all(record['changed'] for record in records))
+            self.assertEqual(owner.call_count, 5)
+            self.assertEqual([record['runtime_path'] for record in records],
+                             [str(stage.BT_PATH / name) for name in self.manifest['required']])
+            owner.reset_mock()
+            records = stage.install_guest_assets(root, share)
+            self.assertFalse(any(record['changed'] for record in records))
+            owner.assert_not_called()
+        for name, contents in before.items():
+            self.assertEqual((root / name).read_bytes(), contents)
+        expected_files = set(before) | {str(stage.BT_PATH / name).lstrip('/') for name in self.manifest['required']}
+        self.assertEqual({path.relative_to(root).as_posix() for path in root.rglob('*') if path.is_file()}, expected_files)
+        stage.verify_bundle(share, hashes)
+
+    def test_guest_tokens_and_exact_paths_are_required(self):
+        log = self.guest_log()
+        self.assertEqual(len(stage.guest_records(log, self.manifest)), 5)
+        with self.assertRaises(ValueError):
+            stage.guest_records(log.replace(b'/usr/local/share/fuxi/bt/', b'/usr/local/share/fuxi/wlan/'), self.manifest)
+
+    # 以下 WLAN 專屬（m3／BDF 欄位、五檔固定名單、run-wlan 名稱）的案例不適用藍牙組合
+    test_valid_manifest_reads_all_five_physical_files = None
+    test_input_mutation_during_read_is_rejected = None
+    test_missing_required_manifest_fields_fail = None
+    test_missing_m3_or_file_metadata_fail = None
+    test_empty_provenance_fails = None
+    test_bdf_paths_collisions_and_unsafe_names_fail = None
+    test_root_and_strict_filename_set_fail = None
+    test_duplicate_required_json_and_host_paths_fail = None
+    test_nonabsolute_host_paths_and_bad_hashes_fail = None
+    test_file_and_m3_bounds_reject_bad_types_and_lengths = None
+    test_total_bound_and_exact_boundary = None
+    test_physical_corruption_short_missing_and_wrong_length_fail = None
+    test_guest_corrupt_input_fails_before_root_changes = None
+    test_guest_rejects_target_symlinks_reparse_points_and_directories = None
+    test_failed_atomic_replace_cleans_only_its_temporary = None
+    test_output_requires_new_safe_fixed_parent = None
+    test_guest_serial_crcrlf_and_duplicate_reports = None
+    test_fresh_mapping_uses_existing_verifier_and_fixed_root_identity = None
+    test_mocked_pipeline_writes_verified_delta_and_receipt = None
+    test_mocked_pipeline_blocks_input_mutation_before_extraction = None
+    test_mocked_pipeline_blocks_missing_guest_tokens_before_extraction = None
+    test_mocked_pipeline_refuses_wrong_precondition_without_writes = None
+    test_mocked_pipeline_refuses_remote_corruption_without_writes = None
+    test_mocked_pipeline_unchanged_assets_skip_extraction_and_writes = None
+    test_invalid_manifest_does_not_reach_phone_or_locks = None
+    test_local_qcow2_delta_extraction_preserves_readonly_base = None
+    test_localhost_nbd_rejects_writes_and_reads_only_requested_blocks = None
+    test_delta_validates_both_binaries_and_undo_list = None
+    test_delta_rejects_duplicate_outside_indices_and_crlf = None
+    test_guest_script_ast_and_three_fsck_rules_match_existing = None
+    test_windows_ctime_difference_preserves_identity_and_mutation_checks = None
+    test_manifest_and_input_mutation_before_copy_are_rejected = None
+    test_checksum_duplicates_missing_hash_and_corruption_fail = None
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

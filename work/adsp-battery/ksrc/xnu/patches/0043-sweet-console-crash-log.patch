@@ -63,7 +63,25 @@
  	exception_type_t        exception,
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -1884,6 +1884,13 @@
+@@ -1433,4 +1433,17 @@
+ exit(proc_t p, struct exit_args *uap, int *retval)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (uap->rval == 1 && strcmp(p->p_comm, "bluetoothd") == 0) {
++		unsigned enabled = 0;
++		static unsigned traced;
++		if (PE_parse_boot_argn("fuxibtexittrace", &enabled, sizeof(enabled)) && enabled &&
++		    __atomic_fetch_add(&traced, 1u, __ATOMIC_RELAXED) < 3) {
++			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
++
++			/* The user address space is still intact at syscall entry. */
++			sweet_crash_log(p->p_comm, proc_getpid(p), 0, 1, 0);
++		}
++	}
++#endif
+ 	p->p_xhighbits = ((uint32_t)(uap->rval) & 0xFF000000) >> 24;
+ 	exit1(p, W_EXITCODE((uint32_t)uap->rval, 0), retval);
+@@ -1884,6 +1897,13 @@
  		subcode = ut->uu_subcode;
  		etype = ut->uu_exception;
  

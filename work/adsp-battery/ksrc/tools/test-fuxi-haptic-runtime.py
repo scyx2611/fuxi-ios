@@ -9,7 +9,7 @@ source = r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#include "fuxi_haptic_runtime.h"
+#include "fuxi_haptic_rtp.h"
 
 /* HAP525 假模型：Android 開機後留下的狀態，PLAY_EN 會讓 HPWR 變 READY，關掉後延遲幾次輪詢才回 DISABLED。 */
 typedef struct {
@@ -18,7 +18,7 @@ typedef struct {
     unsigned disable_delay;   /* 關掉 PLAY 後還要幾次 wait 才回 0 */
     unsigned pending;
     int stuck;                /* 1：PLAY 關掉也不回 0；2：連關開模組都不回 0 */
-    int write_fail, verify_lie;
+    int write_fail, verify_lie, fault_sticky;
     unsigned writes, waits;
     unsigned written[64];
 } Model;
@@ -43,10 +43,15 @@ static int wr(void *context, unsigned address, uint8_t value)
 {
     Model *model = context;
     assert(fuxi_haptic_writable(address));
-    assert(address == 0xf04c || address == 0xf046 || address == 0xf126);
+    assert(address == 0xf04c || address == 0xf046 || address == 0xf126 || address == 0xf066);
     if (model->writes < 64) model->written[model->writes] = address;
     model->writes++;
     if (model->write_fail) return -1;
+    if (address == 0xf066) {
+        /* FAULT_CLR 寫一清除，讀回永遠 0 */
+        if (!model->fault_sticky) model->reg[0x0c] &= (uint8_t)~value;
+        return 0;
+    }
     model->reg[address - 0xf000] = model->verify_lie ? (uint8_t)(value ^ 0x40) : value;
     if (address == 0xf04c) {
         if (value & 0x80u) {
@@ -95,12 +100,108 @@ static FuxiHapticIo io_for(Model *model)
     return io;
 }
 
+static Model rtp_model;
+static unsigned rtp_fill, rtp_writes, rtp_fail, rtp_played, rtp_received;
+static unsigned rtp_expected_prefill;
+static uint8_t rtp_data[FUXI_RTP_BYTES];
+
+static void rtp_status(void)
+{
+    rtp_model.reg[9] = (rtp_fill >> 8) | (rtp_played ? 0x40 : 0);
+    rtp_model.reg[10] = (uint8_t)rtp_fill;
+}
+static int rtp_read_status(uint8_t status[2])
+{
+    status[0] = rtp_model.reg[9];
+    status[1] = rtp_model.reg[10];
+    return 0;
+}
+static int rtp_write(unsigned addr, const uint8_t *data, unsigned n)
+{
+    if (++rtp_writes == rtp_fail) return -1;
+    if (addr == 0xf120) {
+        assert(n == 4 && rtp_received + n <= sizeof(rtp_data));
+        memcpy(rtp_data + rtp_received, data, n);
+        rtp_received += n;
+        rtp_fill += n;
+    } else {
+        assert(n == 1 && addr >= 0xf000 && addr < 0xf200);
+        rtp_model.reg[addr-0xf000] = *data;
+        if (addr == 0xf12d && *data == 1) rtp_fill = 0;
+        if (addr == 0xf04c) {
+            rtp_model.reg[11] = (*data & 0x80) ? 3 : 0;
+            if (*data & 0x80) {
+                assert(rtp_fill == rtp_expected_prefill);
+                rtp_played++;
+            }
+        }
+    }
+    rtp_status();
+    return 0;
+}
+static void rtp_wait(void *context, unsigned us)
+{
+    (void)context;
+    assert(us == 1000);
+    if (rtp_model.reg[0x4c] == 0x80) rtp_fill = rtp_fill < 24 ? 0 : rtp_fill - 24;
+    rtp_status();
+}
+static void test_rtp(void)
+{
+    uint8_t waveform[FUXI_RTP_BYTES] = {0};
+    for (unsigned i = 0; i < sizeof(waveform)-4; i++) waveform[i] = (uint8_t)(i * 3);
+    rtp_expected_prefill = FUXI_RTP_PREFILL;
+    for (unsigned fail = 0; fail < 108; fail++) {
+        android(&rtp_model);
+        rtp_model.reg[0x1a0] = 15;
+        rtp_writes = rtp_fill = rtp_played = rtp_received = 0;
+        rtp_fail = fail;
+        rtp_status();
+        FuxiHapticIo io = io_for(&rtp_model);
+        io.wait_us = rtp_wait;
+        FuxiRtpStats stats;
+        int result = fuxi_rtp_click(&io, rtp_write, rtp_read_status, waveform, FUXI_RTP_BYTES, 0x30, &stats);
+        if (!fail) {
+            assert(!result && stats.sent == 376 && stats.polls == 16 && rtp_played == 1);
+            assert(stats.before_start == 320 && stats.before_refill == 296 && !stats.last_fill);
+            assert(!memcmp(rtp_data, waveform, sizeof(waveform)));
+        } else assert(result);
+        assert(rtp_model.reg[0x4c] != 0x80 && !rtp_fill);
+        assert(rtp_model.reg[0x48] == 0x1c);
+    }
+    android(&rtp_model);
+    rtp_model.reg[0x1a0] = 15;
+    rtp_played = 1;
+    rtp_fill = 284;
+    rtp_fail = 0;
+    rtp_status();
+    FuxiHapticIo io = io_for(&rtp_model);
+    FuxiRtpStats stats;
+    assert(fuxi_rtp_click(&io, rtp_write, rtp_read_status, waveform, FUXI_RTP_BYTES, 0, &stats) && !stats.sent);
+    assert(rtp_fill == 284 && rtp_model.reg[0x12d] == 0);
+    rtp_fill = rtp_played = rtp_received = 0;
+    rtp_status();
+    io.wait_us = rtp_wait;
+    static const uint8_t tick[] = {12, (uint8_t)-12, 24, (uint8_t)-24, 0, 0, 0, 0};
+    rtp_expected_prefill = sizeof(tick);
+    assert(!fuxi_rtp_click(&io, rtp_write, rtp_read_status, tick, sizeof(tick), 0, &stats));
+    assert(stats.sent == sizeof(tick) && stats.before_start == sizeof(tick) && stats.last_fill == 0);
+    assert(!memcmp(rtp_data, tick, sizeof(tick)) && rtp_played == 1);
+    uint8_t quiet[] = {4, (uint8_t)-4, 2, 0};
+    uint8_t strong[] = {96, (uint8_t)-96, 48, 0};
+    assert(fuxi_rtp_pcm_gain(quiet, sizeof(quiet)) == 8);
+    assert(quiet[0] == 8 && (int8_t)quiet[1] == -8 && quiet[2] == 4 && !quiet[3]);
+    assert(fuxi_rtp_pcm_gain(strong, sizeof(strong)) == 96);
+    assert(strong[0] == 96 && (int8_t)strong[1] == -96 && strong[2] == 48 && !strong[3]);
+}
+
 int main(void)
 {
     Model model;
     FuxiHapticIo io;
     unsigned polls = 0, toggled = 0;
     uint8_t fault = 0, hpwr = 0;
+    unsigned cleared = 0;
 
     /* 呼叫者 */
     assert(fuxi_vibrate_caller_allowed(1, 0, NULL));
@@ -185,58 +286,85 @@ int main(void)
 
     /* 正常一下：0x81 開、READY、0x01 關、三次輪詢後 DISABLED，不動模組 */
     android(&model);
-    assert(fuxi_vibrate_start(&io) == FUXI_HAPTIC_OK);
+    assert(fuxi_vibrate_start(&io, 0, &cleared) == FUXI_HAPTIC_OK);
     assert(model.reg[0x4c] == 0x81 && model.reg[0x0b] == 3);
     assert(fuxi_vibrate_health(&io, &fault, &hpwr) == FUXI_HAPTIC_OK && hpwr == 3 && !fault);
-    assert(fuxi_vibrate_stop(&io, &polls, &toggled) == FUXI_HAPTIC_OK);
+    assert(fuxi_vibrate_stop(&io, 0, &polls, &toggled) == FUXI_HAPTIC_OK);
     assert(polls == 3 && !toggled && model.reg[0x4c] == 0x01 && model.reg[0x46] == 0x80 && !model.reg[0x0b]);
     assert(model.writes == 2 && model.written[0] == 0xf04c && model.written[1] == 0xf04c);
     assert(fuxi_vibrate_check(&io) == FUXI_HAPTIC_OK);
 
     /* 立刻 DISABLED：只輪詢一次 */
     android(&model); model.disable_delay = 0;
-    assert(!fuxi_vibrate_start(&io));
-    assert(!fuxi_vibrate_stop(&io, &polls, &toggled) && polls == 1 && !toggled);
+    assert(!fuxi_vibrate_start(&io, 0, &cleared));
+    assert(!fuxi_vibrate_stop(&io, 0, &polls, &toggled) && polls == 1 && !toggled);
 
-    /* 播放中出現 fault */
+    /* 播放中 AUTO_RES_ERROR（低振幅實機 0x2）：照常播放，只回報；SC、HPWR_RDY、未知位元才是 fault */
     android(&model);
-    assert(!fuxi_vibrate_start(&io));
+    assert(!fuxi_vibrate_start(&io, 0, &cleared) && !cleared);
     model.reg[0x0c] = 0x02;
-    assert(fuxi_vibrate_health(&io, &fault, &hpwr) == FUXI_HAPTIC_FAULT && fault == 2);
+    assert(fuxi_vibrate_health(&io, &fault, &hpwr) == FUXI_HAPTIC_OK && fault == 2 && hpwr == 3);
+    model.reg[0x0c] = 0x04;
+    assert(fuxi_vibrate_health(&io, &fault, &hpwr) == FUXI_HAPTIC_FAULT && fault == 4);
+    model.reg[0x0c] = 0x06;
+    assert(fuxi_vibrate_health(&io, &fault, &hpwr) == FUXI_HAPTIC_FAULT);
+    model.reg[0x0c] = 0x01;
+    assert(fuxi_vibrate_health(&io, &fault, &hpwr) == FUXI_HAPTIC_FAULT);
+    model.reg[0x0c] = 0x08;
+    assert(fuxi_vibrate_health(&io, &fault, &hpwr) == FUXI_HAPTIC_FAULT);
+
+    /* 上一次留下 AUTO_RES_ERROR：開播前寫 FAULT_CLR=0x02、確認歸零才寫 PLAY */
+    android(&model); model.reg[0x0c] = 0x02; cleared = 0;
+    assert(fuxi_vibrate_start(&io, 0, &cleared) == FUXI_HAPTIC_OK && cleared == 1);
+    assert(model.writes == 2 && model.written[0] == 0xf066 && model.written[1] == 0xf04c);
+    assert(!model.reg[0x0c] && model.reg[0x4c] == 0x81);
+    /* 清不掉：不開 */
+    android(&model); model.reg[0x0c] = 0x02; model.fault_sticky = 1; cleared = 0;
+    assert(fuxi_vibrate_start(&io, 0, &cleared) == FUXI_HAPTIC_FAULT && cleared == 1);
+    assert(model.writes == 1 && model.reg[0x4c] == 0x01);
+    /* SC 跟 AUTO_RES 一起：不清、不開 */
+    android(&model); model.reg[0x0c] = 0x06; cleared = 0;
+    assert(fuxi_vibrate_start(&io, 0, &cleared) == FUXI_HAPTIC_FAULT && !cleared && !model.writes);
+    /* owner 換人：不清、不開 */
+    android(&model); model.reg[0x0c] = 0x02; model.owners[0] = 2; cleared = 0;
+    assert(fuxi_vibrate_start(&io, 0, &cleared) == FUXI_HAPTIC_HARDWARE && !cleared && !model.writes);
+    /* 清除寫入失敗 */
+    android(&model); model.reg[0x0c] = 0x02; model.write_fail = 1; cleared = 0;
+    assert(fuxi_vibrate_start(&io, 0, &cleared) == FUXI_HAPTIC_IO && !cleared && model.reg[0x4c] == 0x01);
 
     /* 有 fault 就不開 */
     android(&model); model.reg[0x0c] = 0x01;
-    assert(fuxi_vibrate_start(&io) == FUXI_HAPTIC_FAULT && model.writes == 0 && model.reg[0x4c] == 0x01);
+    assert(fuxi_vibrate_start(&io, 0, &cleared) == FUXI_HAPTIC_FAULT && model.writes == 0 && model.reg[0x4c] == 0x01);
 
     /* HPWR 卡住：照 Linux 關開模組一次，之後回 DISABLED，模組留在開 */
     android(&model); model.stuck = 1;
-    assert(!fuxi_vibrate_start(&io));
-    assert(fuxi_vibrate_stop(&io, &polls, &toggled) == FUXI_HAPTIC_OK);
+    assert(!fuxi_vibrate_start(&io, 0, &cleared));
+    assert(fuxi_vibrate_stop(&io, 0, &polls, &toggled) == FUXI_HAPTIC_OK);
     assert(toggled && polls == FUXI_VIBRATE_STOP_POLLS + 1 && model.reg[0x46] == 0x80 && !model.reg[0x0b]);
     assert(model.writes == 4 && model.written[2] == 0xf046 && model.written[3] == 0xf046);
 
     /* 連關開模組都停不下來：回逾時，呼叫端鎖死 */
     android(&model); model.stuck = 2;
-    assert(!fuxi_vibrate_start(&io));
-    assert(fuxi_vibrate_stop(&io, &polls, &toggled) == FUXI_HAPTIC_TIMEOUT);
+    assert(!fuxi_vibrate_start(&io, 0, &cleared));
+    assert(fuxi_vibrate_stop(&io, 0, &polls, &toggled) == FUXI_HAPTIC_TIMEOUT);
     assert(toggled && polls == 2 * FUXI_VIBRATE_STOP_POLLS);
 
     /* 寫入讀回不符 */
     android(&model); model.verify_lie = 1;
-    assert(fuxi_vibrate_start(&io) == FUXI_HAPTIC_VERIFY);
+    assert(fuxi_vibrate_start(&io, 0, &cleared) == FUXI_HAPTIC_VERIFY);
 
     /* 寫入失敗時停止仍會輪詢、走退路，結果不得是 OK */
     android(&model);
-    assert(!fuxi_vibrate_start(&io));
+    assert(!fuxi_vibrate_start(&io, 0, &cleared));
     model.write_fail = 1;
-    assert(fuxi_vibrate_stop(&io, &polls, &toggled) != FUXI_HAPTIC_OK);
+    assert(fuxi_vibrate_stop(&io, 0, &polls, &toggled) != FUXI_HAPTIC_OK);
 
     /* owner 改變時停止直接回硬體錯誤（不寫） */
     android(&model);
-    assert(!fuxi_vibrate_start(&io));
+    assert(!fuxi_vibrate_start(&io, 0, &cleared));
     model.owners[0] = 2;
     unsigned before = model.writes;
-    assert(fuxi_vibrate_stop(&io, &polls, &toggled) == FUXI_HAPTIC_HARDWARE && model.writes == before);
+    assert(fuxi_vibrate_stop(&io, 0, &polls, &toggled) == FUXI_HAPTIC_HARDWARE && model.writes == before);
 
     /* 振幅：0 或相同不寫；不同就寫 0xf126 並讀回；播放中可改；讀回不符、owner 換人不更新現值 */
     uint8_t current = 0;
@@ -247,9 +375,9 @@ int main(void)
     assert(!fuxi_vibrate_amplitude(&io, 0xff, &current, &amplitude_writes) && !amplitude_writes && !model.writes);
     assert(!fuxi_vibrate_amplitude(&io, 0x60, &current, &amplitude_writes));
     assert(current == 0x60 && model.reg[0x126] == 0x60 && amplitude_writes == 1 && model.written[0] == 0xf126);
-    assert(!fuxi_vibrate_start(&io));
+    assert(!fuxi_vibrate_start(&io, 0, &cleared));
     assert(!fuxi_vibrate_amplitude(&io, 0x30, &current, &amplitude_writes) && current == 0x30 && model.reg[0x4c] == 0x81);
-    assert(!fuxi_vibrate_stop(&io, &polls, &toggled) && model.reg[0x126] == 0x30);
+    assert(!fuxi_vibrate_stop(&io, 0, &polls, &toggled) && model.reg[0x126] == 0x30);
     assert(fuxi_vibrate_amplitude(&io, 0x100, &current, &amplitude_writes) == FUXI_HAPTIC_INVALID && current == 0x30);
     android(&model); current = 0xff; model.verify_lie = 1;
     assert(fuxi_vibrate_amplitude(&io, 0x60, &current, &amplitude_writes) == FUXI_HAPTIC_VERIFY && current == 0xff);
@@ -257,7 +385,21 @@ int main(void)
     assert(fuxi_vibrate_amplitude(&io, 0x60, &current, &amplitude_writes) == FUXI_HAPTIC_HARDWARE);
     assert(current == 0xff && !model.writes && model.reg[0x126] == 0xff);
 
-    puts("PASS: HAP525 DIRECT_PLAY runtime caller policy, lease, amplitude field, Android-state check, start/stop/HPWR poll, module toggle fallback, fault and verify paths");
+    android(&model);
+    assert(!fuxi_vibrate_stock_brake(&io));
+    model.reg[0x50] = 0x41;
+    model.reg[0x170] = 0xff; model.reg[0x171] = 0x3f; model.reg[0x172] = 0x1f;
+    assert(fuxi_vibrate_stock_brake(&io));
+    model.reg[0x177] = 1;
+    assert(!fuxi_vibrate_stock_brake(&io));
+    assert(!fuxi_vibrate_start(&io, 8, &cleared) && model.reg[0x4c] == 0x89);
+    assert(!fuxi_vibrate_stop(&io, 8, &polls, &toggled) && !toggled && model.reg[0x4c] == 1);
+    assert(!fuxi_vibrate_attack_level(0) && fuxi_vibrate_attack_level(4) == 66);
+    for (unsigned level = 1; level <= 255; level++) {
+        assert(fuxi_vibrate_attack_level(level) >= level && fuxi_vibrate_attack_level(level) <= 255);
+    }
+    test_rtp();
+    puts("PASS: HAP525 DIRECT_PLAY runtime caller policy, lease, amplitude field, Android-state check, start/stop/HPWR poll, module toggle fallback, AUTO_RES clear/tolerate, fault and verify paths");
     return 0;
 }
 '''

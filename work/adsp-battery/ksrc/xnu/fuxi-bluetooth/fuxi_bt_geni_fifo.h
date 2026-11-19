@@ -83,6 +83,7 @@ struct fuxi_bt_geni_fifo_config {
     bool resources_owned;
     uint32_t qup_version;
     uint32_t source_hz;
+    uint32_t baud; /* 0＝FUXI_BT_BOOT_BAUD */
 };
 
 struct fuxi_bt_geni_fifo {
@@ -107,6 +108,8 @@ struct fuxi_bt_geni_fifo {
     uint32_t startup_secondary_irq;
     unsigned tx_depth;
     unsigned rx_depth;
+    uint32_t baud;
+    uint32_t divider;
     uint32_t saved[FUXI_BT_FIFO_SAVED_REGISTERS];
     uint64_t start_us;
     unsigned start_polls;

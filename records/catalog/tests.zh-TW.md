@@ -14,12 +14,14 @@
 | `ksrc:tools/test-fuxi-arm64e.py` |  | [S-115](../items/S-upstream.zh-TW.md#s-115-實作實驗性原生-arm64e-核心建置與開機金鑰初始化fuxi_arm64e1)、[S-116](../items/S-upstream.zh-TW.md#s-116-調整-arm64e-核心下-fat-binary-評分以停用-user-jop-避免-fpac-panicfuxiarm64e) |
 | `ksrc:tools/test-fuxi-ath12k-link.py` | kernel-adsp-battery.yml | [K-074](../items/K-kernel.zh-TW.md#k-074-ath12k-接受韌體配置的-peer-id-0)、[K-050](../items/K-kernel.zh-TW.md#k-050-ath12k-模組連結與-ci)、[K-075](../items/K-kernel.zh-TW.md#k-075-ath12k-wmi-掃描優先級與首輪掃描時間) |
 | `ksrc:tools/test-fuxi-audio-prep.py` | kernel-adsp-battery.yml | [K-015](../items/K-kernel.zh-TW.md#k-015-gpr-音訊準備主機模型) |
-| `ksrc:tools/test-fuxi-audio-spf.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-014](../items/K-kernel.zh-TW.md#k-014-音訊-spf-狀態查詢) |
+| `ksrc:tools/test-fuxi-audio-spf.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-014](../items/K-kernel.zh-TW.md#k-014-音訊-spf-狀態查詢)、[K-078](../items/K-kernel.zh-TW.md#k-078-用目前-adsp-驗證-fuxi-喇叭與播放圖) |
 | `ksrc:tools/test-fuxi-audio.py` |  | [S-113](../items/S-upstream.zh-TW.md#s-113-移植音訊-gpraudioreach-封包編碼與共用-rsc-active-tcs-仲裁器基礎p-au1)、[K-015](../items/K-kernel.zh-TW.md#k-015-gpr-音訊準備主機模型) |
 | `ksrc:tools/test-fuxi-backlight.py` |  | [S-109](../items/S-upstream.zh-TW.md#s-109-實作-applearmbacklight-服務與-dcs-0x51-螢幕亮度控制fuxibacklight)、[K-017](../items/K-kernel.zh-TW.md#k-017-背光模式-4applearmbacklightdcs-0x51) |
 | `ksrc:tools/test-fuxi-battery-pause.py` | hw000-preparation.yml | [K-008](../items/K-kernel.zh-TW.md#k-008-電池查詢暫停get-pause實驗) |
 | `ksrc:tools/test-fuxi-battery-prep.py` | kernel-adsp-battery.yml | [K-001](../items/K-kernel.zh-TW.md#k-001-adsp-開機與-glink-電池讀值)、[K-003](../items/K-kernel.zh-TW.md#k-003-單電芯電量換算)、[K-007](../items/K-kernel.zh-TW.md#k-007-電池欄位逐項過期ttl) |
 | `ksrc:tools/test-fuxi-battery-publication.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-002](../items/K-kernel.zh-TW.md#k-002-sweetbattery-發布真實電量)、[K-004](../items/K-kernel.zh-TW.md#k-004-充電器種類真實充電資訊與-10-秒刷新)、[K-005](../items/K-kernel.zh-TW.md#k-005-拔線測試讀值fuxiadsp4)、[K-007](../items/K-kernel.zh-TW.md#k-007-電池欄位逐項過期ttl)、[K-009](../items/K-kernel.zh-TW.md#k-009-sweetbattery-改走-iokit-work-loop-發布) |
+| `ksrc:tools/test-fuxi-bluetooth-pump.py` | kernel-adsp-battery.yml | [K-077](../items/K-kernel.zh-TW.md#k-077-wcn7850-uartsk-與-skywalk-常駐收送) |
+| `ksrc:tools/test-fuxi-bluetooth-setup.py` | kernel-adsp-battery.yml | [K-076](../items/K-kernel.zh-TW.md#k-076-wcn7850-藍牙韌體下載與-hci-resetfuxibt4) |
 | `ksrc:tools/test-fuxi-bluetooth-xnu.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-037](../items/K-kernel.zh-TW.md#k-037-藍牙-geni-fifo-與-ios-16-藍牙-abi-準備) |
 | `ksrc:tools/test-fuxi-bluetooth.py` | kernel-adsp-battery.yml | [K-037](../items/K-kernel.zh-TW.md#k-037-藍牙-geni-fifo-與-ios-16-藍牙-abi-準備) |
 | `ksrc:tools/test-fuxi-bt-board.py` | kernel-adsp-battery.yml | [K-039](../items/K-kernel.zh-TW.md#k-039-藍牙板級上電與-qca-版本查詢fuxibt3) |
@@ -27,7 +29,7 @@
 | `ksrc:tools/test-fuxi-bt-geni-fifo.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-037](../items/K-kernel.zh-TW.md#k-037-藍牙-geni-fifo-與-ios-16-藍牙-abi-準備) |
 | `ksrc:tools/test-fuxi-charge-evidence.py` | hw000-preparation.yml | [K-010](../items/K-kernel.zh-TW.md#k-010-充電證據工具) |
 | `ksrc:tools/test-fuxi-compile-sched.py` |  | [S-097](../items/S-upstream.zh-TW.md#s-097-實作-fuxi-觸控編譯-cpu-加速推薦核心遮罩與熱壓力橋接fuxiperffuxitpfuxicores) |
-| `ksrc:tools/test-fuxi-exec-inject.py` | kernel-adsp-battery.yml | [K-020](../items/K-kernel.zh-TW.md#k-020-核心在-exec-時注入函式庫fxinj補丁-0118)、[U-018](../items/U-userland.zh-TW.md#u-018-手動加入-wi-fi-時的密碼框等待) |
+| `ksrc:tools/test-fuxi-exec-inject.py` | kernel-adsp-battery.yml | [K-020](../items/K-kernel.zh-TW.md#k-020-核心在-exec-時注入函式庫fxinj補丁-0118)、[U-018](../items/U-userland.zh-TW.md#u-018-手動加入-wi-fi-時的密碼框等待)、[K-077](../items/K-kernel.zh-TW.md#k-077-wcn7850-uartsk-與-skywalk-常駐收送) |
 | `ksrc:tools/test-fuxi-gpu-clock.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
 | `ksrc:tools/test-fuxi-gpu-dcvs.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
 | `ksrc:tools/test-fuxi-gpu-irq.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
@@ -99,6 +101,7 @@
 | `ksrc:tools/test-fuxi-metal2.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化)、[S-100](../items/S-upstream.zh-TW.md#s-100-實作受閘控執行路徑代換測試路由與-nativeadreno-abi-效能除錯追蹤sweetexecswap) |
 | `ksrc:tools/test-fuxi-metal2g.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
 | `ksrc:tools/test-fuxi-metal2h.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
+| `ksrc:tools/test-fuxi-mfb-align.py` | kernel-adsp-battery.yml | [K-077](../items/K-kernel.zh-TW.md#k-077-wcn7850-uartsk-與-skywalk-常駐收送) |
 | `ksrc:tools/test-fuxi-nativemetal-bridge.cpp` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-nativemetal.py` | native-metal-host-tests.yml | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁)、[T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試)、[T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `ksrc:tools/test-fuxi-pac.py` |  | [S-114](../items/S-upstream.zh-TW.md#s-114-實作全核心-el1-pac-指針驗證硬體自我測試fuxigpuncimport-bit-25) |
@@ -115,7 +118,7 @@
 | `ksrc:tools/test-fuxi-rpmh-shared.py` | kernel-adsp-battery.yml | [K-011](../items/K-kernel.zh-TW.md#k-011-adsp-與-wlan-共用-rpmh序列化與隔離)、[K-012](../items/K-kernel.zh-TW.md#k-012-adsp-與-wlan-聯合測試開關) |
 | `ksrc:tools/test-fuxi-rtc-read.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-036](../items/K-kernel.zh-TW.md#k-036-rtc-校時adt-fuxirtc-offset) |
 | `ksrc:tools/test-fuxi-scm.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu) |
-| `ksrc:tools/test-fuxi-sys.py` |  | [S-107](../items/S-upstream.zh-TW.md#s-107-實作依-entitlement-授權特權與無容器程序-sandbox-路徑回應fuxiprivsfuxisbpath) |
+| `ksrc:tools/test-fuxi-sys.py` |  | [U-021](../items/U-userland.zh-TW.md#u-021-從-ios-hal-的-actuator-輸出驅動-hap525)、[S-107](../items/S-upstream.zh-TW.md#s-107-實作依-entitlement-授權特權與無容器程序-sandbox-路徑回應fuxiprivsfuxisbpath) |
 | `ksrc:tools/test-fuxi-tap-command.py` | kernel-adsp-battery.yml | [K-035](../items/K-kernel.zh-TW.md#k-035-裝置端-ui-測試指令tapstourtapcmd) |
 | `ksrc:tools/test-fuxi-thermal-summary.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-thermald.py` |  | [S-097](../items/S-upstream.zh-TW.md#s-097-實作-fuxi-觸控編譯-cpu-加速推薦核心遮罩與熱壓力橋接fuxiperffuxitpfuxicores) |
@@ -190,10 +193,15 @@
 | `harness:tests/test-surface-plane-result.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml、kernel-surface-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `harness:tests/test-surfrow-mode2.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `harness:tools/test-flashlight-levels.c` | sb-shape.yml | [K-031](../items/K-kernel.zh-TW.md#k-031-手電筒調光不重開輸出與五檔)、[U-003](../items/U-userland.zh-TW.md#u-003-ios-手電筒控制接上核心租約與五檔亮度) |
+| `harness:tools/test-oslog-format.c` | sb-shape.yml | [U-022](../items/U-userland.zh-TW.md#u-022-bluetoothd-os_log-轉錄到-consolefuxibt-oslog) |
 | `harness:tools/test-vibe-pattern.c` | sb-shape.yml | [K-033](../items/K-kernel.zh-TW.md#k-033-hap525-direct_play-震動執行期)、[U-004](../items/U-userland.zh-TW.md#u-004-ios-震動交給核心-hap525-執行期mediaserverdfigvibratormediaexperience) |
 | `harness:tools/test-vibe-worker.py` | sb-shape.yml | [U-004](../items/U-userland.zh-TW.md#u-004-ios-震動交給核心-hap525-執行期mediaserverdfigvibratormediaexperience) |
 | `ws:dualboot/tests/host.c` |  | [B-004](../items/B-boot.zh-TW.md#b-004-雙系統開機選單boot_a-常駐)、[B-011](../items/B-boot.zh-TW.md#b-011-a-槽選單顯示倒數10-秒後自動進-android) |
 | `ws:dualboot/tests/test-remove-ksu.py` |  | [B-005](../items/B-boot.zh-TW.md#b-005-移除-ksu-模組檢查移到主機) |
+| `ws:work/adsp-battery/test-amp-run-cs35l41.py` |  | [K-078](../items/K-kernel.zh-TW.md#k-078-用目前-adsp-驗證-fuxi-喇叭與播放圖) |
+| `ws:work/adsp-battery/test-amp-tone-cs35l41.py` |  | [K-078](../items/K-kernel.zh-TW.md#k-078-用目前-adsp-驗證-fuxi-喇叭與播放圖) |
+| `ws:work/adsp-battery/test-haptic-apid.py` |  | [K-033](../items/K-kernel.zh-TW.md#k-033-hap525-direct_play-震動執行期) |
+| `ws:work/adsp-battery/test-muted-cs35l41.py` |  | [K-078](../items/K-kernel.zh-TW.md#k-078-用目前-adsp-驗證-fuxi-喇叭與播放圖) |
 | `ws:work/adsp-battery/test-rtc-calibration.py` |  | [K-036](../items/K-kernel.zh-TW.md#k-036-rtc-校時adt-fuxirtc-offset) |
 | `ws:work/boot-chain/test-deploy-recovery.py` |  | [B-002](../items/B-boot.zh-TW.md#b-002-已驗證部署與還原deploy-verifiedprepare-test) |
 | `ws:work/boot-chain/test-loader-entry-ram.py` |  | [B-003](../items/B-boot.zh-TW.md#b-003-loader-的-ram-sku-預檢與-ram-入口防護) |
@@ -201,4 +209,4 @@
 | `ws:work/boot-chain/test-runtime-ram-profile.py` |  | [B-003](../items/B-boot.zh-TW.md#b-003-loader-的-ram-sku-預檢與-ram-入口防護) |
 | `ws:work/statusbar-fix/test-launcher-framebuffer.ps1` |  | [K-035](../items/K-kernel.zh-TW.md#k-035-裝置端-ui-測試指令tapstourtapcmd)、[T-048](../items/T-tools.zh-TW.md#t-048-手機啟動器-launch-loader-checkps1) |
 | `ws:work/statusbar-fix/test-root-layers.py` |  | [B-009](../items/B-boot.zh-TW.md#b-009-上機前差分備份工具)、[U-014](../items/U-userland.zh-TW.md#u-014-ios-root-疊加層快照底檔hfs-journal-重播與差分寫入) |
-| `ws:work/statusbar-fix/test-stage-wlan-assets.py` |  | [U-013](../items/U-userland.zh-TW.md#u-013-wlan-韌體與-bdf-放進-ios-root) |
+| `ws:work/statusbar-fix/test-stage-wlan-assets.py` |  | [U-013](../items/U-userland.zh-TW.md#u-013-wlan-韌體與-bdf-放進-ios-root)、[U-020](../items/U-userland.zh-TW.md#u-020-wcn7850-藍牙韌體放進-ios-rootstage-wlan-assets-kindbt) |

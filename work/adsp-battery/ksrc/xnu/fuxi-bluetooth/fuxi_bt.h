@@ -11,6 +11,7 @@
 #define FUXI_BT_TLMM_BASE UINT64_C(0xf100000)
 #define FUXI_BT_UART_INTID 493u
 #define FUXI_BT_BOOT_BAUD 115200u
+#define FUXI_BT_MAX_BAUD 3200000u /* Linux qca_set_baudrate 拒絕 3.2 Mbaud 以上 */
 #define FUXI_BT_TIMEOUT_US 2000000u
 #define FUXI_BT_MAX_POLLS 2000u
 #define FUXI_BT_MAX_RX 4096u
@@ -86,10 +87,23 @@ struct fuxi_bt_snapshot {
     uint32_t secondary_irq;
 };
 
+/*
+ * UART 速率：SE6 RCG 來源（GPLL0_OUT_EVEN 300 MHz × m/n）、GENI 除頻後的 baud，
+ * 以及 QCA 0xfc48 的速率列舉值（Linux btqca.h enum qca_baudrate）。
+ */
+struct fuxi_bt_rate {
+    uint32_t baud;
+    uint32_t source_hz;
+    uint16_t m;
+    uint16_t n;
+    uint8_t qca;
+};
+
 typedef enum fuxi_bt_status (*fuxi_bt_read32_fn)(void *, uint64_t, uint32_t *);
 
 const char *fuxi_bt_status_name(enum fuxi_bt_status status);
 bool fuxi_bt_uart_ops_valid(const struct fuxi_bt_uart_ops *ops);
+const struct fuxi_bt_rate *fuxi_bt_rate_find(uint32_t baud);
 enum fuxi_bt_status fuxi_bt_probe_run(unsigned opt_in,
     const struct fuxi_bt_uart_ops *ops, struct fuxi_bt_result *result);
 enum fuxi_bt_status fuxi_bt_snapshot_read(fuxi_bt_read32_fn read32,

@@ -24,9 +24,11 @@ int main(void)
     const char *wifi = "/usr/sbin/wifid";
     const char *settings = "/Applications/Preferences.app/Preferences";
     const char *app = "/Applications/MobileSafari.app/MobileSafari";
+    const char *bluetool = "/usr/sbin/BlueTool";
+    const char *bluetoothd = "/usr/sbin/bluetoothd";
     char env[FUXI_INJECT_ENV_MAX];
 
-    assert(FUXI_INJECT_ALL == 31u);
+    assert(FUXI_INJECT_ALL == 127u);
     for (unsigned mode = 0; mode <= FUXI_INJECT_ALL; mode++) {
         assert(same(fuxi_inject_library(mode, sb, "SpringBoard"), (mode & 2u) ? FUXI_INJECT_SB_LIB : NULL));
         assert(same(fuxi_inject_library(mode, media, "mediaserverd"), (mode & 4u) ? FUXI_INJECT_SB_LIB : NULL));
@@ -45,6 +47,13 @@ int main(void)
         assert(!fuxi_inject_library(mode, "/usr/libexec/audiomxd", "audiomxd"));
         assert(!fuxi_inject_library(mode, NULL, "mediaserverd"));
         assert(!fuxi_inject_library(mode, media, NULL));
+        /* BlueTool 替身與 bluetoothd 只認原廠路徑 */
+        assert(same(fuxi_inject_library(mode, bluetool, "BlueTool"), (mode & 32u) ? FUXI_INJECT_SB_LIB : NULL));
+        assert(same(fuxi_inject_library(mode, bluetoothd, "bluetoothd"), (mode & 64u) ? FUXI_INJECT_SB_LIB : NULL));
+        assert(!fuxi_inject_library(mode, "/var/tmp/BlueTool", "BlueTool"));
+        assert(!fuxi_inject_library(mode, "/usr/sbin/BlueTool2", "BlueTool2"));
+        assert(!fuxi_inject_library(mode, "/usr/libexec/bluetoothd", "bluetoothd"));
+        assert(!fuxi_inject_library(mode, "/usr/sbin/bluetoothuserd", "bluetoothuserd"));
     }
     /* SpringBoard 不會拿到 app 函式庫，.appex 與 app 內 helper 不算 app */
     assert(same(fuxi_inject_library(1u, sb, "SpringBoard"), NULL));
@@ -57,7 +66,7 @@ int main(void)
     assert(!fuxi_inject_env(FUXI_INJECT_SB_LIB, env, 10));
     assert(!fuxi_inject_env(FUXI_INJECT_SB_LIB, env, 0));
     assert(!fuxi_inject_library(16u, "/Applications/Other.app/Preferences", "Preferences"));
-    puts("PASS: exec injection modes 0..31, exact Settings executable, other app modes and environment bounds");
+    puts("PASS: exec injection modes 0..127, exact Settings/BlueTool/bluetoothd executables, other app modes and environment bounds");
     return 0;
 }
 '''

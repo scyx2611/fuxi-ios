@@ -4,6 +4,7 @@
 /*
  * WCN7850 藍牙 UART 的板級準備（fuxi,bt=3）：
  * QUP2 SE6 時脈投票、SE6 RCG 設成 7.3728 MHz（GPLL0_OUT_EVEN 300 MHz × 384/15625，與 Linux gcc-sm8550 相同）、
+ * 之後 acquire 要求其他 baud 時，在 FIFO 關閉期間把 RCG 改成速率表的來源頻率（power_off 還原 XBL 的值）、
  * gpio76–79 切成 qup2_se6、BT_EN（gpio81）拉高。前提是 WLAN 已把 WCN 的電源軌和 WLAN_EN（gpio80）打開。
  * 純 C；MMIO 經由呼叫端提供的 read/write（XNU 走 fault-safe 存取，主機測試走模擬模型）。
  * power_off 依旗標逆序還原 power_on 改過的東西，不論 power_on 成功或失敗都要呼叫。
@@ -62,6 +63,9 @@ struct fuxi_bt_board {
     uint32_t added_votes;
     uint32_t rcg_saved[4]; /* cfg、m、n、d */
     uint32_t rcg_cfg;
+    uint32_t rcg_hz; /* 目前 RCG 設定的來源頻率；0＝未設或設定中途失敗 */
+    uint32_t baud; /* 最近一次 acquire 的 baud */
+    unsigned rcg_switches;
     uint32_t qup_version;
     uint32_t firmware;
     uint32_t pin_ctl[4];

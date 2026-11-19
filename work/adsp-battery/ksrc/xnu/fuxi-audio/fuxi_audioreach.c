@@ -21,6 +21,9 @@
 #define PROP_CONT_DOMAIN 0x08001014u
 #define PROP_PORT_INFO 0x08001015u
 #define PARAM_I2S_INTF 0x08001019u
+#define PARAM_TDM_INTF 0x0800101Bu
+#define PARAM_TDM_LANE 0x0800106Au
+#define PARAM_HW_INTF_CLOCK 0x0800113Cu
 #define PARAM_HW_EP_MF 0x08001017u
 #define PARAM_FRAME_SIZE_FACTOR 0x08001018u
 #define PARAM_PCM_OUTPUT 0x08001008u
@@ -43,6 +46,7 @@
 #define LPAIF 0u
 #define LPAIF_RXTX 1u
 #define I2S_SECONDARY 1u
+#define TDM_SECONDARY 1u
 #define I2S_SD1 2u
 #define WS_INTERNAL 1u
 #define CODEC_TX3 4u
@@ -78,6 +82,12 @@ static void cmd_payload_end(W *w, uint32_t at) {set32(w, at + 12, w->n - at - CM
 /* One parameter block: header, body written by the caller, then padding to 8 bytes; param_size counts body and padding. */
 static uint32_t param_begin(W *w, uint32_t iid, uint32_t id) {uint32_t at = w->n; put32(w, iid); put32(w, id); put32(w, 0); put32(w, 0); return at;}
 static void param_end(W *w, uint32_t at) {pad_to(w, at + align8(w->n - at)); set32(w, at + 8, w->n - at - PARAM_HEADER);}
+
+static void param_end_exact(W *w, uint32_t at)
+{
+    set32(w, at + 8, w->n - at - PARAM_HEADER);
+    pad_to(w, at + align8(w->n - at));
+}
 
 typedef struct {uint32_t id, perf, direction, scenario;} Sg;
 typedef struct {uint32_t id, position;} Container;
@@ -125,22 +135,47 @@ static uint32_t graph_open(uint8_t *out, uint32_t capacity, uint32_t port, uint3
     return finish(&w);
 }
 
-uint32_t fuxi_ar_open_speaker_device(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token)
+static uint32_t open_speaker(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token,
+    uint32_t module, uint32_t instance)
 {
     static const Sg sg = {FUXI_AR_SG_SPEAKER, PERF_LOW_LATENCY, DIR_TX, SCENARIO_PLAYBACK};
     static const Container c = {FUXI_AR_SG_SPEAKER, POS_STREAM};
-    static const Module m[] = {{FUXI_AR_MOD_I2S_SINK, FUXI_AR_IID_SPEAKER_I2S, 1, 0}};
+    const Module m[] = {{module, instance, 1, 0}};
     return graph_open(out, capacity, port, token, &sg, &c, m, 1, 0, 0);
 }
 
-uint32_t fuxi_ar_open_playback_stream(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token)
+uint32_t fuxi_ar_open_speaker_device(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token)
+{
+    return open_speaker(out, capacity, port, token, FUXI_AR_MOD_I2S_SINK, FUXI_AR_IID_SPEAKER_I2S);
+}
+
+uint32_t fuxi_ar_open_speaker_tdm(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token)
+{
+    return open_speaker(out, capacity, port, token, FUXI_AR_MOD_TDM_SINK, FUXI_AR_IID_SPEAKER_TDM);
+}
+
+static uint32_t open_playback_stream(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, uint32_t sink)
 {
     static const Sg sg = {FUXI_AR_SG_PLAY, PERF_LOW_LATENCY, DIR_RX, SCENARIO_PLAYBACK};
     static const Container c = {FUXI_AR_SG_PLAY, POS_STREAM};
     static const Module m[] = {{FUXI_AR_MOD_WR_SHMEM, FUXI_AR_IID_PLAY_SHMEM, 0, 1}, {FUXI_AR_MOD_PCM_DEC, FUXI_AR_IID_PLAY_DEC, 1, 1},
                                {FUXI_AR_MOD_PCM_CNV, FUXI_AR_IID_PLAY_CNV, 1, 1}};
-    static const Link l[] = {{FUXI_AR_IID_PLAY_SHMEM, FUXI_AR_IID_PLAY_DEC}, {FUXI_AR_IID_PLAY_DEC, FUXI_AR_IID_PLAY_CNV}, {FUXI_AR_IID_PLAY_CNV, FUXI_AR_IID_SPEAKER_I2S}};
+    const Link l[] = {
+        {FUXI_AR_IID_PLAY_SHMEM, FUXI_AR_IID_PLAY_DEC},
+        {FUXI_AR_IID_PLAY_DEC, FUXI_AR_IID_PLAY_CNV},
+        {FUXI_AR_IID_PLAY_CNV, sink},
+    };
     return graph_open(out, capacity, port, token, &sg, &c, m, 3, l, 3);
+}
+
+uint32_t fuxi_ar_open_playback_stream(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token)
+{
+    return open_playback_stream(out, capacity, port, token, FUXI_AR_IID_SPEAKER_I2S);
+}
+
+uint32_t fuxi_ar_open_playback_stream_tdm(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token)
+{
+    return open_playback_stream(out, capacity, port, token, FUXI_AR_IID_SPEAKER_TDM);
 }
 
 uint32_t fuxi_ar_open_mic_device(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token)
@@ -185,6 +220,44 @@ uint32_t fuxi_ar_config_speaker_device(uint8_t *out, uint32_t capacity, uint32_t
     param_end(&w, at);
     hw_ep_mf(&w, FUXI_AR_IID_SPEAKER_I2S, f);
     frame_size_factor(&w, FUXI_AR_IID_SPEAKER_I2S);
+    cmd_payload_end(&w, cmd);
+    return finish(&w);
+}
+
+/* AudioReach pcm_tdm_api.h defines the wire layout. The profile comes from
+ * the earlier Fuxi driver (5efc5e2, a-tone5/a-spk1) on secondary TDM.
+ */
+uint32_t fuxi_ar_config_speaker_tdm(uint8_t *out, uint32_t capacity, uint32_t port, uint32_t token, const FuxiArFormat *f)
+{
+    const uint32_t iid = FUXI_AR_IID_SPEAKER_TDM;
+    W w;
+    begin(&w, out, capacity, port, FUXI_AR_APM_IID, token, FUXI_AR_OP_SET_CFG);
+    const uint32_t cmd = cmd_payload_start(&w);
+    uint32_t at = param_begin(&w, iid, PARAM_TDM_INTF);
+    put32(&w, LPAIF);
+    put32(&w, TDM_SECONDARY);
+    put16(&w, WS_INTERNAL);
+    put16(&w, 1); /* output */
+    put32(&w, 0xf);
+    put16(&w, 4);  /* slots */
+    put16(&w, 32); /* bits per slot */
+    put16(&w, 1);  /* sync mode */
+    put16(&w, 0);  /* sync polarity */
+    put16(&w, 1);  /* data delay */
+    put16(&w, 0);
+    param_end_exact(&w, at);
+    hw_ep_mf(&w, iid, f);
+    frame_size_factor(&w, iid);
+    at = param_begin(&w, iid, PARAM_TDM_LANE);
+    put16(&w, 1u << 1); /* SD1 */
+    put16(&w, 0);
+    param_end_exact(&w, at);
+    at = param_begin(&w, iid, PARAM_HW_INTF_CLOCK);
+    put32(&w, 0); /* clock id from the interface */
+    put32(&w, 0); /* frequency from the interface */
+    put32(&w, 4); /* inverted bit clock */
+    put32(&w, 0); /* default clock root */
+    param_end_exact(&w, at);
     cmd_payload_end(&w, cmd);
     return finish(&w);
 }

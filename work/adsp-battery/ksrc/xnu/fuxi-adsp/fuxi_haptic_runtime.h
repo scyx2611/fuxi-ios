@@ -23,7 +23,16 @@ enum {
     FUXI_VIBRATE_MODULE_ON = 0x80,
     FUXI_VIBRATE_VMAX_LIMIT = 0x1c, /* 50 mV/碼，1400 mV：Android 留下的值，不接受更高 */
     FUXI_VIBRATE_LEVEL_SHIFT = 16,  /* sysctl 值：bit 0..15 毫秒，bit 16..23 振幅，其餘須為 0 */
-    FUXI_VIBRATE_AMPLITUDE = 0xf126
+    FUXI_VIBRATE_AMPLITUDE = 0xf126,
+    /*
+     * FAULT_STATUS(0xf00c)：bit 2 SC、bit 1 AUTO_RES_ERROR、bit 0 HPWR_RDY_FAULT（Linux qcom-hv-haptics
+     * HAP_CFG_FAULT_STATUS_REG）。低振幅時反電動勢太弱，自動共振鎖不住會設 bit 1；Linux 播放中從不檢查它，
+     * 每次開播前 haptics_clear_fault 寫 FAULT_CLR(0xf066)。2026-11-18 實機：振幅 0x08..0x30 播放約 46 ms 就設 0x2，
+     * 舊版把它當致命錯誤，整個執行期鎖到重開機。現在只有 SC／HPWR_RDY／未知位元才停機鎖死；
+     * AUTO_RES_ERROR 只記錄，下次開播前清掉（只清這一位，SC 仍要人看）。
+     */
+    FUXI_VIBRATE_FAULT_CLEAR = 0xf066,
+    FUXI_VIBRATE_FAULT_AUTORES = 0x02
 };
 
 typedef struct {
@@ -131,18 +140,52 @@ static inline int fuxi_vibrate_check(const FuxiHapticIo *io)
     return fuxi_haptic_idle(io);
 }
 
+/* 播放中檢查：AUTO_RES_ERROR 只回報在 *fault，不算失敗；其他位元回 FAULT。 */
 static inline int fuxi_vibrate_health(const FuxiHapticIo *io, uint8_t *fault, uint8_t *hpwr)
 {
     if (io->read(io->context, 0xf00c, fault) || io->read(io->context, 0xf00b, hpwr)) return FUXI_HAPTIC_IO;
+    return *fault & (uint8_t)~FUXI_VIBRATE_FAULT_AUTORES ? FUXI_HAPTIC_FAULT : FUXI_HAPTIC_OK;
+}
+
+/* 只清 AUTO_RES_ERROR：FAULT_CLR 是寫一清除，不讀回比對，改讀 FAULT_STATUS 確認已歸零。 */
+static inline int fuxi_vibrate_clear_autores(const FuxiHapticIo *io, uint8_t *fault, unsigned *cleared)
+{
+    unsigned owner = 7;
+    if (*fault != FUXI_VIBRATE_FAULT_AUTORES) return *fault ? FUXI_HAPTIC_FAULT : FUXI_HAPTIC_OK;
+    if (io->owner(io->context, FUXI_VIBRATE_FAULT_CLEAR >> 8, &owner) || owner != 0) return FUXI_HAPTIC_HARDWARE;
+    if (io->write(io->context, FUXI_VIBRATE_FAULT_CLEAR, FUXI_VIBRATE_FAULT_AUTORES) ||
+        io->read(io->context, 0xf00c, fault))
+        return FUXI_HAPTIC_IO;
+    (*cleared)++;
     return *fault ? FUXI_HAPTIC_FAULT : FUXI_HAPTIC_OK;
 }
 
-static inline int fuxi_vibrate_start(const FuxiHapticIo *io)
+/* Fuxi 原機 DT 的閉迴路 brake-mode=1、brake-pattern=ff 3f 1f。
+ * qcom-hv-haptics 的 haptics_enable_play 在開與關都保留 BRAKE_EN。 */
+static inline int fuxi_vibrate_stock_brake(const FuxiHapticIo *io)
+{
+    static const uint8_t samples[] = {0xff, 0x3f, 0x1f, 0, 0, 0, 0, 0};
+    uint8_t value = 0;
+    if (fuxi_haptic_read_stable(io, 0xf050, &value) || (value >> 6) != 1) return 0;
+    for (unsigned i = 0; i < sizeof(samples); i++) {
+        if (fuxi_haptic_read_stable(io, 0xf170 + i, &value) || value != samples[i]) return 0;
+    }
+    return 1;
+}
+
+/* 第一次起振的約一個 LRA 週期提高振幅，後續視窗依原 envelope。 */
+static inline unsigned fuxi_vibrate_attack_level(unsigned level)
+{
+    return level ? level + (255u - level) / 4u : 0;
+}
+
+static inline int fuxi_vibrate_start(const FuxiHapticIo *io, unsigned brake, unsigned *cleared)
 {
     uint8_t fault = 0;
     if (io->read(io->context, 0xf00c, &fault)) return FUXI_HAPTIC_IO;
-    if (fault) return FUXI_HAPTIC_FAULT;
-    return fuxi_haptic_write_checked(io, 0xf04c, FUXI_VIBRATE_PLAY);
+    int result = fuxi_vibrate_clear_autores(io, &fault, cleared);
+    if (result) return result;
+    return fuxi_haptic_write_checked(io, 0xf04c, FUXI_VIBRATE_PLAY | brake);
 }
 
 static inline int fuxi_vibrate_wait_disabled(const FuxiHapticIo *io, unsigned *polls)
@@ -157,13 +200,16 @@ static inline int fuxi_vibrate_wait_disabled(const FuxiHapticIo *io, unsigned *p
 }
 
 /* 停止；*toggled 表示有沒有走關開模組的退路。回傳非 0 就要鎖死執行期。 */
-static inline int fuxi_vibrate_stop(const FuxiHapticIo *io, unsigned *polls, unsigned *toggled)
+static inline int fuxi_vibrate_stop(const FuxiHapticIo *io, unsigned brake, unsigned *polls, unsigned *toggled)
 {
-    int result = fuxi_haptic_write_checked(io, 0xf04c, FUXI_VIBRATE_IDLE);
+    int result = fuxi_haptic_write_checked(io, 0xf04c, FUXI_VIBRATE_IDLE | brake);
     *polls = 0;
     *toggled = 0;
     if (result == FUXI_HAPTIC_HARDWARE) return result;
-    if (!fuxi_vibrate_wait_disabled(io, polls)) return result;
+    if (!fuxi_vibrate_wait_disabled(io, polls)) {
+        if (!result && brake) result = fuxi_haptic_write_checked(io, 0xf04c, FUXI_VIBRATE_IDLE);
+        return result;
+    }
     *toggled = 1;
     int off = fuxi_haptic_write_checked(io, 0xf046, 0);
     int on = fuxi_haptic_write_checked(io, 0xf046, FUXI_VIBRATE_MODULE_ON);
@@ -171,6 +217,7 @@ static inline int fuxi_vibrate_stop(const FuxiHapticIo *io, unsigned *polls, uns
     if (waited) return waited;
     if (off) return off;
     if (on) return on;
+    if (!result && brake) result = fuxi_haptic_write_checked(io, 0xf04c, FUXI_VIBRATE_IDLE);
     return result;
 }
 #endif

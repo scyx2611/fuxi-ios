@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5649,6 +5649,57 @@
+@@ -5649,6 +5649,59 @@
   * Note:	The argument and environment vectors are user space pointers
   *		to arrays of user space pointers.
   */
@@ -43,12 +43,14 @@
 +	SInt32 n = OSIncrementAtomic(&said);
 +
 +	if (n == 0) {
-+		printf("FUXI INJECT: fxinj=%u:%s%s%s%s%s\n", mode,
++		printf("FUXI INJECT: fxinj=%u:%s%s%s%s%s%s%s\n", mode,
 +		    (mode & FUXI_INJECT_APPS) ? " applications get " FUXI_INJECT_APP_LIB ";" : "",
 +		    (mode & FUXI_INJECT_SPRINGBOARD) ? " SpringBoard gets " FUXI_INJECT_SB_LIB ";" : "",
 +		    (mode & FUXI_INJECT_MEDIASERVER) ? " mediaserverd gets " FUXI_INJECT_SB_LIB : "",
 +		    (mode & FUXI_INJECT_WIFI_AUDIT) ? " wifid gets " FUXI_INJECT_SB_LIB : "",
-+		    (mode & FUXI_INJECT_WIFI_PROMPT) ? " Preferences gets " FUXI_INJECT_SB_LIB : "");
++		    (mode & FUXI_INJECT_WIFI_PROMPT) ? " Preferences gets " FUXI_INJECT_SB_LIB : "",
++		    (mode & FUXI_INJECT_BLUETOOL) ? " BlueTool gets " FUXI_INJECT_SB_LIB : "",
++		    (mode & FUXI_INJECT_BLUETOOTHD) ? " bluetoothd gets " FUXI_INJECT_SB_LIB : "");
 +	}
 +	if (n < FUXI_INJECT_SAID) {
 +		printf("FUXI INJECT: %s <- %s\n", name, library);
@@ -58,7 +60,7 @@
  __attribute__((noinline))
  static int
  exec_extract_strings(struct image_params *imgp)
-@@ -5822,6 +5873,30 @@
+@@ -5822,6 +5875,30 @@
  		imgp->ip_envc++;
  	}
  
@@ -91,7 +93,7 @@
  		error = E2BIG;
 --- /dev/null
 +++ b/bsd/kern/fuxi_exec_inject.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,101 @@
 +/*
 + * fxinj=N, or ADT /chosen u32 "fuxi,inject"=N (FUXI): DYLD_INSERT_LIBRARIES added by the kernel at exec, for some programs (patch 0118).
 + *
@@ -109,6 +111,9 @@
 + *              the HAP525 runtime, sysctl kern.fuxivibrate; the library checks which program it is in)
 + *   bit 3 (8)  wifid: native Wi-Fi diagnostics.
 + *   bit 4 (16) Preferences: manual Wi-Fi password prompt when password sharing is unavailable.
++ *   bit 5 (32) /usr/sbin/BlueTool: the library answers com.apple.BlueTool for the WCN7850 that
++ *              fuxi,bt=5 has booted (the stock tool only knows Broadcom); FuxiBlueTool.c.
++ *   bit 6 (64) /usr/sbin/bluetoothd: diagnostics and the Qualcomm controller hooks.
 + *
 + * dyld honours it because the H1 AMFI dyld policy answer (patch 0103, request 0x5a) allows everything,
 + * including a library that is missing. The variable follows the program's own environment.
@@ -119,8 +124,11 @@
 +#define FUXI_INJECT_MEDIASERVER 4u
 +#define FUXI_INJECT_WIFI_AUDIT  8u
 +#define FUXI_INJECT_WIFI_PROMPT 16u
++#define FUXI_INJECT_BLUETOOL    32u
++#define FUXI_INJECT_BLUETOOTHD  64u
 +#define FUXI_INJECT_ALL         (FUXI_INJECT_APPS | FUXI_INJECT_SPRINGBOARD | FUXI_INJECT_MEDIASERVER | \
-+                                FUXI_INJECT_WIFI_AUDIT | FUXI_INJECT_WIFI_PROMPT)
++                                FUXI_INJECT_WIFI_AUDIT | FUXI_INJECT_WIFI_PROMPT | FUXI_INJECT_BLUETOOL | \
++                                FUXI_INJECT_BLUETOOTHD)
 +#define FUXI_INJECT_APP_LIB     "/usr/local/lib/fuxi/libfuxi-app.dylib"
 +#define FUXI_INJECT_SB_LIB      "/usr/local/lib/fuxi/libfuxi-sb.dylib"
 +#define FUXI_INJECT_ENV_MAX     128
@@ -158,6 +166,14 @@
 +	}
 +	if (strcmp(name, "wifid") == 0) {
 +		return (mode & FUXI_INJECT_WIFI_AUDIT) != 0 && strcmp(path, "/usr/sbin/wifid") == 0 ?
++		       FUXI_INJECT_SB_LIB : NULL;
++	}
++	if (strcmp(name, "BlueTool") == 0) {
++		return (mode & FUXI_INJECT_BLUETOOL) != 0 && strcmp(path, "/usr/sbin/BlueTool") == 0 ?
++		       FUXI_INJECT_SB_LIB : NULL;
++	}
++	if (strcmp(name, "bluetoothd") == 0) {
++		return (mode & FUXI_INJECT_BLUETOOTHD) != 0 && strcmp(path, "/usr/sbin/bluetoothd") == 0 ?
 +		       FUXI_INJECT_SB_LIB : NULL;
 +	}
 +	if ((mode & FUXI_INJECT_WIFI_PROMPT) && strcmp(name, "Preferences") == 0 &&

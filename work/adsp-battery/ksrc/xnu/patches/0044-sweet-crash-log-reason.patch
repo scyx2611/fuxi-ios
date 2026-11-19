@@ -1,6 +1,128 @@
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -1889,6 +1889,13 @@
+@@ -138,6 +138,56 @@
+ 
+ #include <pexpert/pexpert.h>
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <pexpert/device_tree.h>
++
++static unsigned
++fuxi_media_exit_enabled(void)
++{
++	static int cached = -1;
++	int cur = __atomic_load_n(&cached, __ATOMIC_RELAXED);
++	unsigned mode = 0;
++	DTEntry chosen;
++	const void *prop = NULL;
++	unsigned int bytes = 0;
++
++	if (cur >= 0) {
++		return (unsigned)cur;
++	}
++	if (!PE_parse_boot_argn("fuximediaexit", &mode, sizeof(mode))) {
++		mode = 0;
++		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++		    SecureDTGetProperty(chosen, "fuxi,media-exit-trace", &prop, &bytes) == kSuccess &&
++		    prop != NULL && bytes == sizeof(uint32_t)) {
++			memcpy(&mode, prop, sizeof(mode));
++		}
++	}
++	mode = mode != 0 ? 1u : 0u;
++	__atomic_store_n(&cached, (int)mode, __ATOMIC_RELAXED);
++	return mode;
++}
++
++/* 0: ignore, 1: media/WebKit target, 2: lskdd (tight cap) */
++static unsigned
++fuxi_media_exit_kind(const char *name)
++{
++	if (name == NULL) {
++		return 0;
++	}
++	if (strcmp(name, "mediaserverd") == 0 ||
++	    strcmp(name, "MobileSafari") == 0 ||
++	    strcmp(name, "audiomxd") == 0 ||
++	    strncmp(name, "VTDecoderXPC", 12) == 0 ||
++	    strncmp(name, "com.apple.WebKit", 16) == 0) {
++		return 1;
++	}
++	if (strcmp(name, "lskdd") == 0) {
++		return 2;
++	}
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ #include <kdp/kdp_dyld.h>
+ 
+ #if SYSV_SHM
+@@ -1444,6 +1494,18 @@
+ 			sweet_crash_log(p->p_comm, proc_getpid(p), 0, 1, 0);
+ 		}
+ 	}
++	if (fuxi_media_exit_enabled()) {
++		const char *name = proc_best_name(p);
++		unsigned kind = fuxi_media_exit_kind(name);
++		static unsigned sys_media_traced, sys_lskdd_traced;
++		if ((kind == 1 && __atomic_fetch_add(&sys_media_traced, 1u, __ATOMIC_RELAXED) < 32u) ||
++		    (kind == 2 && __atomic_fetch_add(&sys_lskdd_traced, 1u, __ATOMIC_RELAXED) < 2u)) {
++			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
++
++			printf("FUXI EXIT: syscall %s[%d] rval=%d\n", name, proc_getpid(p), uap->rval);
++			sweet_crash_log(name, proc_getpid(p), 0, (uint64_t)(uint32_t)uap->rval, 0);
++		}
++	}
+ #endif
+ 	p->p_xhighbits = ((uint32_t)(uap->rval) & 0xFF000000) >> 24;
+ 	exit1(p, W_EXITCODE((uint32_t)uap->rval, 0), retval);
+@@ -1861,6 +1923,45 @@
+ 	if (p->p_crash_behavior != 0 || p == initproc) {
+ 		proc_handle_critical_exit(p, rv);
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (fuxi_media_exit_enabled()) {
++		const char *name = proc_best_name(p);
++		unsigned kind = fuxi_media_exit_kind(name);
++		static unsigned prep_media_traced, prep_lskdd_traced;
++		if ((kind == 1 && __atomic_fetch_add(&prep_media_traced, 1u, __ATOMIC_RELAXED) < 64u) ||
++		    (kind == 2 && __atomic_fetch_add(&prep_lskdd_traced, 1u, __ATOMIC_RELAXED) < 4u)) {
++			proc_t cur = current_proc();
++			const char *by = cur != NULL ? proc_best_name(cur) : "(null)";
++			int by_pid = cur != NULL ? proc_getpid(cur) : -1;
++			uint32_t r_ns = 0;
++			uint64_t r_code = 0, r_flags = 0;
++			const char *r_desc = "(none)";
++			bool will_crash_log = !(PROC_HAS_EXITREASON(p) &&
++			    (PROC_EXITREASON_FLAGS(p) & OS_REASON_FLAG_NO_CRASH_REPORT)) &&
++			    (hassigprop(WTERMSIG(rv), SA_CORE) || ((proc_getcsflags(p) & CS_KILLED) != 0) ||
++			    (PROC_HAS_EXITREASON(p) && (PROC_EXITREASON_FLAGS(p) &
++			    OS_REASON_FLAG_GENERATE_CRASH_REPORT)));
++
++			if (PROC_HAS_EXITREASON(p)) {
++				char *desc = exit_reason_get_string_desc(p->p_exit_reason);
++				r_ns = p->p_exit_reason->osr_namespace;
++				r_code = p->p_exit_reason->osr_code;
++				r_flags = p->p_exit_reason->osr_flags;
++				if (desc != NULL) {
++					r_desc = desc;
++				}
++			}
++			printf("FUXI EXIT: %s[%d] rv=0x%x sig=%d status=%d self=%d by=%s[%d] cs=0x%x ns=%u code=0x%llx flags=0x%llx desc=%s\n",
++			    name, proc_getpid(p), rv, WTERMSIG(rv), WEXITSTATUS(rv), p == cur ? 1 : 0,
++			    by, by_pid, proc_getcsflags(p), r_ns, r_code, r_flags, r_desc);
++			if (p == cur && !will_crash_log && (WIFSIGNALED(rv) || PROC_HAS_EXITREASON(p))) {
++				extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
++				sweet_crash_log(name, proc_getpid(p), WTERMSIG(rv),
++				    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
++			}
++		}
++	}
++#endif
+ 
+ 	/*
+ 	 * Generate a corefile/crashlog if:
+@@ -1902,6 +2003,13 @@
  			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
  			sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
  			    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);

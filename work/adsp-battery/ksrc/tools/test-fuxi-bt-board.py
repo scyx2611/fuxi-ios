@@ -544,6 +544,116 @@ static void test_faults(void)
         total, early, cleanup_faults);
 }
 
+/*
+ * fuxi,bt-baud：acquire(baud) 依速率表重設 UART SE 的 RCG（GPLL0_EVEN 300 MHz 經 M/N），GENI 除頻跟著變。
+ * 期望值獨立手算（clk-rcg2：N 暫存器 ~(n-m)、D 暫存器 ~clamp(n, m, 2(n-m))，取低 16 位元）：
+ * 921600＝14.7456 MHz 768/15625、2M＝32 MHz 8/75、3M＝48 MHz 4/25、3.2M＝51.2 MHz 64/375。
+ */
+static void test_baud_switch(void)
+{
+    static const struct { uint32_t baud, m, n, d; } rates[] = {
+        {921600, 768, 0xc5f6, 0xc2f6},
+        {2000000, 8, 0xffbc, 0xffb4},
+        {3000000, 4, 0xffea, 0xffe6},
+        {3200000, 64, 0xfec8, 0xfe88},
+    };
+    struct soc soc;
+    struct fuxi_bt_board board;
+    struct fuxi_bt_board_io io;
+    struct fuxi_bt_uart_ops ops;
+    struct fuxi_bt_result result;
+    unsigned writes, total, before_off, early = 0, cleanup_faults = 0, switched = 0;
+    soc_init(&soc);
+    io = soc_io(&soc);
+    assert(fuxi_bt_board_power_on(&board, &io) == FUXI_BT_OK);
+    assert(board.rcg_hz == FUXI_BT_SE_HZ && board.rcg_switches == 0);
+    fuxi_bt_board_uart_ops(&board, &ops);
+    for (unsigned index = 0; index < sizeof(rates) / sizeof(rates[0]); index++) {
+        assert(ops.acquire(ops.context, rates[index].baud) == FUXI_BT_OK);
+        assert(soc_value(&soc, RCG(8)) == (0x10000u | rates[index].m));
+        assert(soc_value(&soc, RCG(12)) == (0x20000u | rates[index].n));
+        assert(soc_value(&soc, RCG(16)) == (0x30000u | rates[index].d));
+        assert(soc_value(&soc, RCG(4)) == 0x102601u && board.rcg_cfg == 0x102601u);
+        assert(soc.uart.regs[0x48 / 4] == 0x11 && soc.uart.regs[0x4c / 4] == 0x11);
+        assert(board.baud == rates[index].baud && board.fifo.baud == rates[index].baud && board.fifo.divider == 1);
+        assert(board.rcg_switches == index + 1 && board.error == FUXI_BT_OK);
+        assert(ops.release(ops.context) == FUXI_BT_OK && !board.fifo_used && board.fifo.restored);
+    }
+    /* 同速率再取：RCG 不再寫 */
+    writes = soc_find(&soc, RCG(8))->writes;
+    assert(ops.acquire(ops.context, 3200000) == FUXI_BT_OK && board.rcg_switches == 4);
+    assert(soc_find(&soc, RCG(8))->writes == writes);
+    assert(ops.release(ops.context) == FUXI_BT_OK);
+    /* 回 115200：模型控制器只在 7.3728 MHz 回應，probe 成功代表 RCG 已回開機值 */
+    assert(fuxi_bt_probe_run(1, &ops, &result) == FUXI_BT_OK && result.version_valid);
+    assert(board.rcg_switches == 5 && board.rcg_hz == FUXI_BT_SE_HZ && board.baud == FUXI_BT_BOOT_BAUD);
+    assert(soc_value(&soc, RCG(8)) == 0x10180u && soc_value(&soc, RCG(12)) == 0x2c476u &&
+           soc_value(&soc, RCG(16)) == 0x3c2f6u);
+    /* 換速時 root off：回 OFF、rcg_hz 歸零、FIFO 沒開；狀況解除後 115200 能重新設好 */
+    soc.rcg_root_off = true;
+    assert(ops.acquire(ops.context, 3000000) == FUXI_BT_OFF);
+    assert(!board.fifo_used && board.rcg_hz == 0 && board.rcg_changed && board.rcg_switches == 5);
+    soc.rcg_root_off = false;
+    assert(ops.acquire(ops.context, FUXI_BT_BOOT_BAUD) == FUXI_BT_OK);
+    assert(board.rcg_hz == FUXI_BT_SE_HZ && board.rcg_switches == 6 && soc.uart.regs[0x48 / 4] == 0x41);
+    assert(ops.release(ops.context) == FUXI_BT_OK);
+    /* 新速率開著時 power_off：先關 FIFO，RCG 與其他板級設定回到開機前 */
+    assert(ops.acquire(ops.context, 3200000) == FUXI_BT_OK && board.fifo_used);
+    assert(fuxi_bt_board_power_off(&board) == FUXI_BT_OK);
+    assert(!board.fifo_used && board.rcg_hz == 0 && !board.rcg_changed);
+    soc_assert_restored(&soc, 0);
+    for (unsigned index = 0; index < sizeof(saved_regs) / sizeof(saved_regs[0]); index++) {
+        assert(soc.uart.regs[saved_regs[index] / 4] == soc.uart.original[saved_regs[index] / 4]);
+    }
+
+    /* 換速流程（power_on → 3.2M 取還 → probe 回 115200 → power_off）每一次 MMIO 都注入一次失敗 */
+    soc_init(&soc);
+    io = soc_io(&soc);
+    assert(fuxi_bt_board_power_on(&board, &io) == FUXI_BT_OK);
+    fuxi_bt_board_uart_ops(&board, &ops);
+    assert(ops.acquire(ops.context, 3200000) == FUXI_BT_OK && ops.release(ops.context) == FUXI_BT_OK);
+    assert(fuxi_bt_probe_run(1, &ops, &result) == FUXI_BT_OK);
+    assert(fuxi_bt_board_power_off(&board) == FUXI_BT_OK);
+    total = soc.calls;
+    for (unsigned fail = 1; fail <= total; fail++) {
+        enum fuxi_bt_status cleanup;
+        uint64_t failed_pa = 0;
+        soc_init(&soc);
+        soc.fail_at = fail;
+        io = soc_io(&soc);
+        if (fuxi_bt_board_power_on(&board, &io) == FUXI_BT_OK) {
+            fuxi_bt_board_uart_ops(&board, &ops);
+            if (ops.acquire(ops.context, 3200000) == FUXI_BT_OK) {
+                switched++;
+            }
+            (void)ops.release(ops.context);
+            (void)fuxi_bt_probe_run(1, &ops, &result);
+        }
+        before_off = soc.calls;
+        cleanup = fuxi_bt_board_power_off(&board);
+        assert(soc.failed_call == fail);
+        if (fail <= before_off) {
+            early++;
+            soc_assert_restored(&soc, 0);
+        } else {
+            cleanup_faults++;
+            assert(cleanup != FUXI_BT_OK);
+            for (unsigned index = 0; index < soc.count; index++) {
+                if (soc.regs[index].value != soc.regs[index].original) {
+                    assert(!failed_pa);
+                    failed_pa = soc.regs[index].pa;
+                }
+            }
+            soc_assert_restored(&soc, failed_pa);
+        }
+        assert(!board.votes_changed && !board.rcg_changed && !board.pins_changed && !board.bt_en_changed);
+        assert(!board.fifo_used && board.rcg_hz == 0);
+    }
+    printf("PASS board baud switch: 4 rates M/N/D/CFG + GENI 0x11, same-rate reuse, back to 115200 probe, "
+           "root-off recovery, power_off at 3.2M; %u fault sites (%u before restore, %u during restore, %u switched)\n",
+        total, early, cleanup_faults, switched);
+}
+
 int main(void)
 {
     test_success();
@@ -552,7 +662,8 @@ int main(void)
     test_guards();
     test_no_reply();
     test_faults();
-    puts("PASS production WCN7850 board glue: success path, refusals, guards, no-reply and exhaustive MMIO faults");
+    test_baud_switch();
+    puts("PASS production WCN7850 board glue: success path, refusals, guards, no-reply, exhaustive MMIO faults and baud switching");
     return 0;
 }
 '''

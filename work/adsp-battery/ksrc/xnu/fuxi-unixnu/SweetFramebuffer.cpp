@@ -456,6 +456,28 @@ static void sweet_fb_refresh_publish(AppleCLCD *fb)
  OSSafeReleaseNULL(refresh);
 }
 
+/*
+ * disp0 fuxi,mfb-align=1：DisplayPipePlaneBaseAlignment 改用 iOS 讀取的字典格式。
+ * VideoToolbox FigGetAlignmentForIOSurfaceOutputToDisplayService（iOS 16.7）以
+ * IORegistryEntrySearchCFProperty 取得此屬性後，直接 CFDictionaryGetValue(…, "PlaneBaseAlignmentLinear")；
+ * 原本的裸數字會讓影片項目建立 render pipeline 時 mediaserverd 以 -[__NSCFNumber objectForKey:] abort。
+ * QuartzCore AppleDisplay 只在型別為字典時才讀同一個 key，否則維持預設 64，所以填 64 不改變 backboardd。
+ * DisplayPipeStrideRequirements 不發佈：VideoToolbox 與 QuartzCore 缺值時都用 64。
+ * 依據：主機 shared cache 反組譯（K-077 趟 21 紀錄）。
+ */
+static bool sweet_fb_align_publish(AppleCLCD *fb)
+{
+ OSDictionary *align = OSDictionary::withCapacity(1);
+ OSNumber *linear = OSNumber::withNumber(64ULL, 32);
+ bool ok = align && linear && align->setObject("PlaneBaseAlignmentLinear", linear) &&
+     fb->setProperty("DisplayPipePlaneBaseAlignment", align);
+ OSSafeReleaseNULL(linear);
+ OSSafeReleaseNULL(align);
+ IOLog("SWEET FB: DisplayPipePlaneBaseAlignment {PlaneBaseAlignmentLinear=64} %s (fuxi,mfb-align)\n",
+     ok ? "published" : "FAILED, number kept");
+ return ok;
+}
+
 static void sweet_fb_te_configure(AppleCLCD *fb)
 {
  unsigned enabled = 0, offset = 7800; /* 7.3 ms transfer + 0.5 ms margin */
@@ -632,6 +654,9 @@ AppleCLCD::start(IOService *provider)
 
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	setProperty("external", false);
+#if defined(FUXI)
+	if (sweet_fb_adt_u32(provider, "fuxi,mfb-align") != 1 || !sweet_fb_align_publish(this))
+#endif
 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
 #if defined(FUXI)
 	int backlight = 0;

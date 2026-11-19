@@ -100,7 +100,7 @@ enum fuxi_bt_status fuxi_bt_geni_fifo_open(struct fuxi_bt_geni_fifo *fifo,
 {
     uint32_t status, tx_status, rx_status, events, hw_tx, hw_rx;
     uint32_t master_control, secondary_control;
-    uint32_t divider, sampling, depth_mask;
+    uint32_t divider, sampling, depth_mask, baud;
     unsigned major, minor;
     if (!fifo || !config) {
         return FUXI_BT_ARGUMENT;
@@ -116,15 +116,19 @@ enum fuxi_bt_status fuxi_bt_geni_fifo_open(struct fuxi_bt_geni_fifo *fifo,
         return FUXI_BT_BUSY;
     }
     sampling = config->qup_version >= 0x20050000u ? 16u : 32u;
-    if (!config->source_hz || config->source_hz % (FUXI_BT_BOOT_BAUD * sampling)) {
+    baud = config->baud ? config->baud : FUXI_BT_BOOT_BAUD;
+    /* 只接受整數除頻（Linux get_clk_div_rate 找的也是剛好整除的來源頻率） */
+    if (baud > FUXI_BT_MAX_BAUD || !config->source_hz || config->source_hz % (baud * sampling)) {
         return FUXI_BT_ARGUMENT;
     }
-    divider = config->source_hz / (FUXI_BT_BOOT_BAUD * sampling);
+    divider = config->source_hz / (baud * sampling);
     if (!divider || divider > 4095) {
         return FUXI_BT_ARGUMENT;
     }
     memset(fifo, 0, sizeof(*fifo));
     fifo->io = *io;
+    fifo->baud = baud;
+    fifo->divider = divider;
     fifo->last_us = io->now_us(io->context);
     if (!fuxi_bt_fifo_read32(fifo, FUXI_BT_FIFO_IF_DISABLE, &fifo->interface_disable)) {
         return fuxi_bt_fifo_fail(fifo, FUXI_BT_IO);
@@ -258,10 +262,11 @@ enum fuxi_bt_status fuxi_bt_geni_fifo_poll(struct fuxi_bt_geni_fifo *fifo)
         return fuxi_bt_fifo_fail(fifo, FUXI_BT_PROTOCOL);
     }
     if (fifo->owns_master) {
-        if (++fifo->tx_polls >= FUXI_BT_FIFO_MAX_POLLS ||
-            now - fifo->tx_started_us >= FUXI_BT_FIFO_TX_TIMEOUT_US) {
-            return fuxi_bt_fifo_fail(fifo, FUXI_BT_TIMEOUT);
-        }
+        /*
+         * 先看傳送是否已完成，再判逾時：常駐收送（fuxi,bt=5）的輪詢間隔受排程影響，
+         * 已經送完的傳送晚一點被看到不算故障；只有仍在進行的傳送才套用時間與次數上限。
+         */
+        const bool polls_spent = ++fifo->tx_polls >= FUXI_BT_FIFO_MAX_POLLS;
         if (!fuxi_bt_fifo_read32(fifo, FUXI_BT_FIFO_TX_STATUS, &tx_status)) {
             return fuxi_bt_fifo_fail(fifo, FUXI_BT_IO);
         }
@@ -271,13 +276,8 @@ enum fuxi_bt_status fuxi_bt_geni_fifo_poll(struct fuxi_bt_geni_fifo *fifo)
         if (!fuxi_bt_fifo_now(fifo, &now)) {
             return fuxi_bt_fifo_fail(fifo, FUXI_BT_IO);
         }
-        if (now - fifo->tx_started_us >= FUXI_BT_FIFO_TX_TIMEOUT_US) {
-            return fuxi_bt_fifo_fail(fifo, FUXI_BT_TIMEOUT);
-        }
-        if (!(status & FUXI_BT_FIFO_MASTER_ACTIVE)) {
-            if (!(fifo->master_irq & FUXI_BT_FIFO_COMMAND_DONE)) {
-                return FUXI_BT_AGAIN;
-            }
+        if (!(status & FUXI_BT_FIFO_MASTER_ACTIVE) &&
+            (fifo->master_irq & FUXI_BT_FIFO_COMMAND_DONE)) {
             if (fifo->tx_remaining || (tx_status & 0xfffffffu)) {
                 return fuxi_bt_fifo_fail(fifo, FUXI_BT_PROTOCOL);
             }
@@ -287,6 +287,13 @@ enum fuxi_bt_status fuxi_bt_geni_fifo_poll(struct fuxi_bt_geni_fifo *fifo)
             }
             fifo->tx_completed += fifo->tx_size;
             fifo->owns_master = false;
+            return FUXI_BT_OK;
+        }
+        if (polls_spent || now - fifo->tx_started_us >= FUXI_BT_FIFO_TX_TIMEOUT_US) {
+            return fuxi_bt_fifo_fail(fifo, FUXI_BT_TIMEOUT);
+        }
+        if (!(status & FUXI_BT_FIFO_MASTER_ACTIVE)) {
+            return FUXI_BT_AGAIN;
         }
     } else if (status & FUXI_BT_FIFO_MASTER_ACTIVE) {
         return fuxi_bt_fifo_fail(fifo, FUXI_BT_BUSY);

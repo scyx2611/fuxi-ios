@@ -118,7 +118,7 @@
 ### U-005 UIKit 觸覺回饋與 CoreHaptics 初始化診斷
 
 - **日期**：2026-11-17 19:11（`harness: 80ce470`）～20:23（`harness: aa06726`）
-- **狀態**：診斷完成／未修復（已定位 CoreHaptics 初始化失敗為 `-4810`，並於 `FuxiVibrate.c` 預留 `fuxi,haptic-ui` 回退開關）
+- **狀態**：SpringBoard 回退實機通過。11 月 18 日試裝 U-021 的 HAL 後，SpringBoard 已能建立原生 CoreHaptics 引擎並經 Actuator 播放。Preferences 的個別操作仍待複驗。
 - **開關**：
   - `fuxi,haptic-ui=<8..40>`（ADT `/chosen`）：當 CoreHaptics engine 從未建成時，每次 UIKit 互動播放改用 `kern.fuxivibrate` 輕觸指定毫秒數（`8..40` ms）。
 - **問題／現象**：充電與系統音效已能震動，但使用者在控制中心、鍵盤／開關等 UIKit 互動操作仍完全感覺不到觸覺回饋。
@@ -135,8 +135,11 @@
 - **復現**：以含 `libfuxi-sb.dylib` 與 `fuxi,haptic=2` 的 loader 開機並操作 UIKit 控制項，於 console 檢視 CoreHaptics 初始化回傳與 `_UIFeedbackSystemSoundEngine` 分派紀錄。
 - **主機測試**：隨 `build-sb-shape.ps1` 編譯驗證（修正後已通過 WSL 與 Xcode 編譯檢查）。
 - **驗證紀錄**：2026-11-17 20:06 `native-hw000wifi-decisions-corehaptics-boot-1` 實測確認 UIKit 引擎 `enabled=1, muted=0`，CoreHaptics 引擎五次 `initialized=0`；22:25 `native-hw000wifi-rssiamp-boot-1` 仍回報 `-4810` 未修。
+- 2026-11-18 18:10 `native-hw000haptic-prefs-codex-1118` 實測 12 次 HAP525 播放全數停止成功。第 4 次自動共振錯誤於下一次播放前清除。SpringBoard 的 impact 和 selection 在 boot.log 第 4513–4522 行各帶出約 15 ms 的硬體播放紀錄。第 4537–4544 行確認設定 App 已啟動並載入 dylib，當趟缺少它的震動初始化與播放證據。
+- 修正版在 constructor 以程序名辨識 `Preferences`，同時保留原有的 App 路徑判斷。`sb-local-bt5-prefs-codex-r3-1118-artifact` 通過 WSL 建置和 ad hoc 碼頁驗證。K-077 同趟 loader 同步接出 Preferences 與 mediaserverd 的 stderr。成功須在 `app haptic fallback=1`、App generator 自測之後看到對應的 HAP525 播放。
+- 依 `native-hw000btsetup-1118/boot.log` 第 2467–2471 行的 `CAXException` 呼叫位址 `0x1a099feb4`，用既有 `prof-sym.py` 的 dyld cache 映射和 Capstone 核對 20H392 的 `SynthOutput::SynthOutput(HapticSynth&, bool)+0x994`。同分支用 `0x1a0ab3773` 的字串「Failed to default output Node」與 OSStatus −1 建立例外。實機另已成功建立 `aumu/hsyn/appl`，故下一步查預設輸出節點／音訊裝置。R3 修正 20H392 的例外診斷欄位，文字從物件 `+0x08` 讀取，OSStatus 從 `+0x108` 讀取，對照建構子 `0x1a08a296c`。
 - **參考來源**：iOS UIKit `_UIFeedbackSystemSoundEngine` 與 CoreHaptics `_internal_createCoreHapticsEngine`。
-- **結論／未完成**：已確認阻擋點在 `mediaserverd` `AVHapticServer` `-4810`；互動震動尚未修好，暫以 `fuxi,haptic-ui` 作為可選輕觸回退。
+- **結論／未完成**：原有配置的 `-4810` 已在 U-021 的 HAL 試裝配置排除。該趟同時啟用了輕觸回退，原生路徑的判據是 mediaserverd 的 Actuator 脈衝與核心對應振幅，詳見 U-021。
 - **出處**：`harness: userland/fuxi-shape/FuxiErrorAudit.h`、`FuxiVibrate.c`、`harness: 80ce470`、`aec9aba`、`a3df640`、`ac6f20a`、`aa06726`。（2026-11-18 主代理分配範圍與來源，Gemini 依原始檔撰寫，主代理核對欄位、提交時間與路徑）
 
 ### U-006 電池讀取者稽核函式庫
@@ -466,3 +469,79 @@
 - **參考來源**：既有 SpringBoard 唯讀稽核、20H392 的 `SBWiFiManager` 和 `SBSystemStatusWifiDataProvider`。
 - **結論／未完成**：有開補查的同條件趟次恢復鏈結圖示，關閉補查的對照趟重新看到有效 RSSI 與 0 格並存。日常整合見 B-012，當時的 GPU 重啟證據見 G-049。
 - **出處**：`work/hw000-adaptation-status.zh-TW.md` 的 14:13 段落。
+
+### U-021 從 iOS HAL 的 Actuator 輸出驅動 HAP525
+
+- 11-19 15:46 拉回的實機紀錄第 5073–5074 行顯示，一筆 132-byte PCM 峰值 34、一次輪詢後播放成功，隨後一筆逾時。使用者當時不在手機旁。原始紀錄在 `work/adsp-battery/fuxilog/20261119-154617/console.txt`。
+
+- **2026-11-19 的觸感差異**：原廠 Android 四種 UI 操作均送 376 個 24 kHz 樣點。第一次以固定波形重播時，iOS 日常觸感因 FIFO 播放失敗而消失。改以單筆 SPMI 讀取 FIFO 深度後，實機記錄到 28 筆成功。將同一波形的 VMAX 改為 0x30 後，實機又有 26 筆成功，但使用者仍感覺所有場景相近，計時器快速滑動的回饋也會漏拍。
+- **有號 PCM 方案**：`--haptic 5 --hal-haptics --haptic-pcm` 使用帶 `kern.fuxihapticpcm` 的核心及 `audio-local-hal-pcm-1119-artifact`。HAL 依原本輸出時間排程，把 48 kHz 的有號波形降至 24 kHz，保留各段振幅和正負樣點。主機模型核對雙極樣點、8-byte 短封包、填充、播放及逾時回退。每個封包仍是有限長度的 FIFO 播放，密集刻度的連續性須用實機驗證。實機驗收看 `Actuator HAP525 first PCM packet`、`haptic RTP FIFO UI PCM`、HAL 丟送紀錄，以及使用者對計時器刻度、長按與強弱回饋的比較。
+
+- **日期**：2026-11-18。
+- **狀態**：WSL 建置、主機模型、HFS+ 離線試裝／還原通過。11 月 18 日實機已驗到原生 CoreHaptics、Actuator 與 HAP525 播放。
+- **開關**：loader `--hal-haptics` 寫入 `fuxihalhaptic=1`，搭配 `--haptic 3 --product-haptics`。根映像試驗透過 `launch-loader-check.ps1 -AudioHal enable|disable -AudioBundle <FuxiAudio.driver> -AudioSha <FuxiAudio SHA-256> -Out <紀錄名>`。
+- **問題／現象**：U-005 的 `SynthOutput` 建立失敗。HAL 需要可供 iOS 選擇的輸出裝置，既有 `FuxiAudio.driver` 已宣告 Actuator，但其 PCM 寫入只有計數。
+- **根因**：原機 iOS 的 Actuator 後端不在 Fuxi，現有 FuxiAudio 宣告的 Actuator 也沒有連到 HAP525。VirtualAudio 曾因原機音訊裝置缺失而停用。
+- **做法**：復用原本的 `FuxiAudio.c` HAL 裝置與 K-033 的 `kern.fuxivibrate`。以 `mOutputTime.mHostTime` 排程單聲道 PCM，每 10 ms 視窗換算成 0–128 的 HAP525 振幅，實際振動使用馬達的共振頻率。混音 callback 將視窗放進固定佇列，另一條執行緒送出有限時長的請求。取消時清除待播視窗並停止現有請求。試裝工具借用 `fuxi-sys-root.py`，將 VirtualAudio 搬回，還原時將同一份 bundle 搬回原位並移除本次試驗的 FuxiAudio 檔案。
+- **復現**：在 WSL 工作區執行 `bash work/adsp-battery/ksrc/tools/build-fuxi-sys.sh --audio-only <新的絕對產物路徑> <verify-sb-shape.py 的絕對路徑>`。上機使用 K-077 的參數並加 `--hal-haptics` 和本趟 RTC 校時。依序啟用試驗 HAL、暫時開機收紀錄、回 Android 並還原 HAL。看 `HAP525=1`、CoreHaptics engine 建成、`Actuator HAP525 first pulse` 和對應的核心 HAP525 播放。Android 回程後看 `AUDIO_HAL_AFTER action=disable` 與寫後讀回。
+- **主機測試**：`tools/test-fuxi-sys.py --audio-only` 驗證實際 callback 的 10 ms 時間戳、最大振幅、靜音、重複時間戳、過期與過遠視窗、StopIO 清理。ARM64 Mach-O bundle 工廠、Info.plist 和簽署碼頁校驗通過。合併 loader 參數 511 bytes。合成根目錄也涵蓋雜湊錯誤和拒絕移除其他版本。
+- **驗證紀錄**：`audio-local-hal-haptic-r2-1118-artifact` 的 FuxiAudio SHA-256 為 `bb0498844793f4079cc0e888c27c9476898a53725a4de4bcfe29a02ce30106c6`。QEMU 在 `native-layout0025-root.img` 的 qcow2 overlay 上完成試裝及還原，兩次皆通過 HFS+ 檢查，VirtualAudio 目錄 inode 均為 11598。原始紀錄在 `work/statusbar-fix/audio-hal-offline-layout0025-1118/`。
+  - `native-actuator-haptic-offline-1118-loader` 已用 K-078 的核心離線封裝，boot SHA-256 為 `dc6cba54f05a5f5c48211c0acf34ceb67af267f808198f39f8e18de9e21cc46b`。本配方省略 `--haptic-ui-ms`，以 Actuator 訊號驗收原生震動。重包時補本輪 RTC 校時，試裝與還原仍由上述 launcher 執行。
+- **參考來源**：本機既有的 HackiOS 衍生 FuxiAudio、K-033 的 HAP525 執行期，以及 Apple 的 HAL callback 介面。 [AudioServerPlugIn DoIOOperation](https://developer.apple.com/documentation/coreaudio/audioserverplugindriverinterface/doiooperation)
+- **實機驗證**：`work/Codex-Xiaomi13-GPU-20261109/native-hw000bt5-native-pcm-hal-1118-2202/boot.log` 第 1350 行確認 HAL 載入，第 4013 行 SpringBoard 回報 `initialized=1`。第 5150–5153 行 Actuator 輸出 6 ms、振幅 17，核心回報 `amp=0x11..0x11`、`fault-mid=0`、`stop-rc=0`，HAL 停止時計數為一筆請求、零錯誤。實機試裝寫入紀錄在 `work/statusbar-fix/audio-hal-enable-1118-2200/`。
+- **結論／未完成**：試裝配置的原生震動路徑已能驅動馬達。使用者兩次回報所有場景都有震感，但手感像轉子拖尾；起振加強的 mode 4 實機亦未通過手感驗收。
+- 11-19 14:50 實機，`native-av-muted-haptic-1119-pm-loader` 的 750 ms 長按後，Actuator 與 HAP525 都記錄同一筆 132 bytes PCM，核心回報 `polls=1 rc=0 peak=81 played=1 expired=0`。此趟無人在場評分手感，連續刻度另待驗證。持久紀錄 `work/adsp-battery/fuxilog/20261119-145858/console.txt` 第 4924、4927 行。
+- **同機 Android 基準**：`android-haptic-waves-1118-2352/report.json` 顯示 Xiaomi vibratorfeature HAL 開啟 event4，對應 PM8550B HAP525。四筆獨立 SPMI 紀錄（`work/adsp-battery/android-haptic-spmi-1118-2353/`）的點按、刻度、長按與開關均為 FIFO，rate code 10（24 kHz），先 320 再 56 bytes，每個 byte 均符合手機上的 0_click_P_RTP.bin。第一次 play enable 至 disable 為 16.023、16.160、16.112、16.027 ms。重播命令 `python -X utf8 work/adsp-battery/verify-haptic-rtp.py work/adsp-battery/android-haptic-waves-1118-2352/0_click_P_RTP.bin work/adsp-battery/android-haptic-spmi-1118-2353`。iOS HAL 現行 10 ms 峰值轉 DIRECT_PLAY 路徑會丟掉正負相位；同機 Android 波形與 iOS 回饋的實機比對是後續驗收依據。喇叭出聲另見 K-078。
+- **出處**：`ksrc/tools/fuxi-audio/FuxiAudio.c`、`work/statusbar-fix/stage-audio-hal-guest.py`、U-005 和 K-033。
+
+### U-020 WCN7850 藍牙韌體放進 iOS root（stage-wlan-assets kind=bt）
+
+- **日期**：2026-11-18 16:50–17:16
+- **狀態**：已部署（`/usr/local/share/fuxi/bt/` 50 檔，寫前比對、寫後讀回通過）
+- **開關**：manifest 的 `"kind": "bt"`；輸出目錄名必須是 `run-bt-…`（`run-wlan-…` 給 WLAN），名稱與 kind 不符就拒絕。
+- **問題／現象**：K-076 的 `fuxi,bt=4` 要從 iOS root 讀 rampatch 與 NVM，原本只有 WLAN 資產的部署流程。
+- **根因**：藍牙檔名、數量與大小跟 WLAN 不同（WLAN 固定 5 檔；藍牙 2 份 rampatch／版本檔加 48 份 NVM），且要放在另一個目錄。
+- **做法**：
+  - 韌體來源：2026-11-18 以 KSU root 唯讀複製手機 Android `/vendor/bt_firmware/image/` 的 `hmtbtfw20.tlv`（231,484 bytes）、`hmtbtfw20.ver`（版本 `BTFW.HAMILTON.2.0.0-00613-PATCHZ-1.35836.5.36233.6`）、47 份 `hmtnv20.b*` 與 `hmtnv20.bin`；手機端與本機 SHA256 逐檔相符，存在 `work\adsp-battery\bt-firmware\`（含 `SHA256SUMS`）。原廠韌體只留在本機，不匯出到公開倉庫。
+  - `work\statusbar-fix\stage-wlan-assets.py`：加 kind=bt。檔名限 `hmtbtfw20.(tlv|ver)`／`hmtnv20.(b<2–4 位十六進位>|bin)`，2–64 檔，必須有 rampatch 與至少一份 NVM；rampatch 上限 1 MiB、NVM 上限 64 KiB；目的地 `/usr/local/share/fuxi/bt`。其餘（read-through、qcow2 疊加層、逐塊比對、寫後讀回）沿用 U-013／U-014。
+  - manifest：`work\adsp-battery\bt-stage-input-20261118.json`（SHA256 `009551d1…bb23bbd`）。因為還沒讀過本機的 board ID，全部 NVM 一起部署。
+- **復現**：
+
+  ```powershell
+  Set-Location work/statusbar-fix
+  python -X utf8 stage-wlan-assets.py --manifest D:\xiaomi13\fuxi_ios\work\adsp-battery\bt-stage-input-20261118.json --output run-bt-wcn7850-fw-20261118
+  ```
+
+  預期最後一行 `WLAN_ASSETS_STAGE_DONE written`；`receipt.json` 的 `state` 為 `written`（重跑為 `unchanged`）。
+- **主機測試**：`work\statusbar-fix\test-stage-wlan-assets.py`（45 項，新增 `BluetoothStageTests`：檔名／數量／kind、輸出名與 kind 對應、guest 安裝冪等、guest 路徑與 token）。
+- **驗證紀錄**：17:13:28–17:16:06，`work\statusbar-fix\run-bt-wcn7850-fw-20261118\`：只讀手機 356 MiB，變動 8 塊（`PRE_OK 8`、`WRITE_OK 8`），guest 端 50 檔雜湊全對，`verify-native-map.py: OK`，root extents 未變。
+- **參考來源**：U-013 的 WLAN 部署流程；Linux btqca 的韌體檔名規則。
+- **結論／未完成**：板級 NVM 確定後可只留實際用到的那一份（見 K-076）。
+- **出處**：`work/hw000-adaptation-status.zh-TW.md` 的 11-18 藍牙段落。
+
+### U-022 bluetoothd os_log 轉錄到 console（fuxi,bt-oslog）
+
+- **日期**：2026-11-19 09:50–10:34
+- **狀態**：已實機驗證（os_log 趟 2 無 crash，轉錄出 VSC stall 的原因）
+- **開關**：ADT `/chosen fuxi,bt-oslog`（u32，預設 0）：bit 0 default／error／fault（每程序最多 4000 行），bit 1 info、bit 2 debug（合計最多 1500 行）。需要核心 0118 的注入位元 64（bluetoothd）及 `sweetnull` 含 bluetoothd；loader 產生器 `--bt-oslog <1..7>`，要求 `--bt-native` 與 `--stderr-log` 含 bluetoothd。
+- **問題／現象**：K-077 的 bluetoothd 反覆自願重啟，20H392 的 OI 日誌只走 os_log，重啟原因（`Bluetooth error - restarting { … reason=%d … }`）也只寫 os_log，console 看不到。
+- **根因**：（診斷工具）bluetoothd 的 stderr 是 `/dev/null`，os_log 不經過核心 console。
+- **做法**：
+  - `harness/userland/fuxi-shape/FuxiBluetoothLog.c`：用 dyld `__DATA,__interpose` 攔 bluetoothd 匯入的 `_os_log_impl`／`_os_log_error_impl`／`_os_log_fault_impl`／`_os_log_debug_impl`、`os_log_pack_send_and_compose`、`os_log_type_enabled`、`exit`／`_exit`、`abort_with_payload`，把訊息寫到 fd 2；核心 0048 印成 `|bluetoothd| BTLOG …`（每行最多 256 bytes，續行前綴 `BTLOG+`）。其他程序或開關為 0 時只尾呼叫轉發。
+  - `FuxiOsLogFormat.h`：解析 clang 的 os_log 緩衝區（summary／count 與 item 描述），支援 `%d %u %x %s %p %c %@ %{public}`、精度與寬度。`%@` 只展開 CFString，其他物件印 `<obj>`；private 參數印 `<private>`，位址形字串遮成 `xx`。
+  - os_log 趟 1 bluetoothd 在轉錄時 SIGSEGV：`%{public,mask.hash}` 這類 specifier 在緩衝區多一個 mask item（kind 7），舊版把它當參數取走，後面全部錯位。r2 略過 mask item，`%@` 先確認 item kind 是物件。
+- **復現**：
+
+  ```powershell
+  .\work\localbuild\build-sb-shape.ps1 -Name sb-local-btoslog-r2-1119-artifact
+  python -X utf8 work/adsp-battery/prepare-wlan-w18-loader.py build --like native-btsetup-1118-loader --artifact <K-077 核心> --name <loader> ... --bt 5 --bt-native --bt-oslog 3 --stderr-log mediaserverd,bluetoothd,BlueTool --rtc-calibration <json>
+  ```
+
+  上機用 `launch-loader-check.ps1 -Dylib …\sb-local-btoslog-r2-1119-artifact\libfuxi-sb.dylib -DylibSha e5793544ce690d264f82a0335c73ef9f151051308df1e10e701bab52552e12d6`。回來只查 `BTLOG S `／`BTLOG X `／`BTLOG C ` 與含 restart／reason／timeout 的行；輸出要先濾掉含 MAC 的行再收錄。
+- **主機測試**：`harness/tools/test-oslog-format.c`（mask item、精度、`%@` 非物件、遮位址字串等案例），`work/localbuild/fuxi-sb-build.sh` 與 `sb-shape.yml` 都以 ASan／UBSan 執行。
+- **驗證紀錄**：
+  - r1（`sb-local-btoslog-1119-artifact`）：os_log 趟 1（10:23），bluetoothd SIGSEGV，證據 `work/Codex-Xiaomi13-GPU-20261109/native-hw000bt5-oslog-1119-1023/boot.log`。
+  - r2（SHA-256 `e5793544ce690d264f82a0335c73ef9f151051308df1e10e701bab52552e12d6`，本機 WSL 4 秒）：os_log 趟 2（10:34），無 crash，轉錄出 StackManager、VSC 完成狀態及 `BD_VSC_OLYMPIC_ANTENNA_PREF_B` 的 `Invalid data size 0`／VSC stall／reason=3602，見 K-077。證據 `native-hw000bt5-oslog2-1119-1034/boot.log`（SHA-256 `a24a0bc3227b3a781b98d22fe95a77016045484cfe0cf3d5741f412086bd6f29`）。
+- **參考來源**：dyld `mach-o/dyld-interposing.h` 的 DYLD_INTERPOSE（APSL）；libsystem_trace `os/log.h`、`os/log_private.h` 的函式原型；`sys/reason.h`。ADT 讀法同 `FuxiBlueTool.c`。
+- **結論／未完成**：只在診斷趟次開；藍牙日常可用後關閉（每次輸出有行數上限，但仍佔 console）。
+- **出處**：K-077 的 os_log 趟 1／2。

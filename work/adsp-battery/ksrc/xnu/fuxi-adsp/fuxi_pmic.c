@@ -22,6 +22,7 @@
 #include "fuxi_torch_steady.h"
 #include "fuxi_haptic_pulse.h"
 #include "fuxi_haptic_runtime.h"
+#include "fuxi_haptic_rtp.h"
 #include "sweet_spmi_bus.h"
 
 extern kern_return_t pmap_enter_options_addr(pmap_t, vm_map_offset_t, uint64_t, vm_prot_t, vm_prot_t, unsigned, boolean_t,
@@ -52,12 +53,28 @@ static FuxiTorchRuntime fp_torch_state;
 static unsigned fp_torch_ready;
 static unsigned fp_torch_audit_enabled;
 static struct fp_window fp_haptic_channels[2];
+/* Linux spmi-pmic-arb v5/v7 retains the PPID to APID mapping. Enable the
+ * fast path only for the two verified EE0 haptic channels on a test boot. */
+static unsigned fp_haptic_apid_plus_one[2];
 static FuxiHapticState fp_haptic_state;
 static LCK_MTX_DECLARE(fp_vibrate_lock, &fp_group);
 static FuxiVibrateRuntime fp_vibrate_state;
 static unsigned fp_vibrate_ready;
 static unsigned fp_vibrate_kick;
 static unsigned fp_vibrate_selftest;
+static unsigned fp_vibrate_transient, fp_vibrate_brake;
+static const uint8_t *fp_rtp_wave;
+static uint32_t fp_rtp_vmax;
+static unsigned fp_rtp_pcm_enabled;
+static unsigned fp_rtp_ready;
+static uint64_t fp_rtp_deadline;
+static struct {
+    uint8_t samples[FUXI_RTP_BYTES];
+    unsigned length;
+    uint64_t deadline;
+} fp_rtp_pending[8];
+static unsigned fp_rtp_head, fp_rtp_count;
+#define FP_HAPTIC_ATTACK_NS 5710000ull /* Fuxi DT 的 LRA 週期 */
 
 static kern_return_t fp_map(struct fp_window *window)
 {
@@ -94,6 +111,17 @@ static int fp_find(unsigned sid, unsigned peripheral, unsigned *owner)
 {
     int selected = -1;
     const unsigned ppid = sid << 8 | peripheral;
+    if (sid == 7 && (peripheral == 0xf0 || peripheral == 0xf1)) {
+        unsigned cached = __atomic_load_n(&fp_haptic_apid_plus_one[peripheral-0xf0], __ATOMIC_ACQUIRE);
+        if (cached) {
+            unsigned apid = cached - 1;
+            if (apid >= fp_apids) return -1;
+            uint32_t map = fp_read32(&fp_core, 0x2000 + 4 * apid);
+            if (((map >> 8) & 0xfff) != ppid) return -1;
+            *owner = fp_read32(&fp_config, 0x1000 + 4 * apid) & 7u;
+            return *owner == 0 ? (int)apid : -1;
+        }
+    }
     for (unsigned apid = 0; apid < fp_apids; apid++) {
         uint32_t map = fp_read32(&fp_core, 0x2000 + 4 * apid);
         if (!map || ((map >> 8) & 0xfff) != ppid) continue;
@@ -106,7 +134,7 @@ static int fp_find(unsigned sid, unsigned peripheral, unsigned *owner)
     return selected;
 }
 
-static int fp_read(unsigned sid, unsigned address, uint8_t *value)
+static int fp_read_registers(unsigned sid, unsigned address, uint8_t *values, unsigned count)
 {
     unsigned owner = 0;
     int result = -1;
@@ -117,12 +145,14 @@ static int fp_read(unsigned sid, unsigned address, uint8_t *value)
     /* 同一個 arbiter 一次只服務一筆 EE0 交易；按鍵輪詢（20 ms）、RTC 與 WLAN P17 都用 sweet_spmi_bus_lock，
      * 這裡在 fp_lock 之內再取它（順序固定 fp_lock -> bus），從命令寫入持有到結果讀完。 */
     sweet_spmi_bus_lock();
-    fp_write32(&fp_observer, channel, 1u << 27 | (address & 0xffu) << 4);
+    fp_write32(&fp_observer, channel, 1u << 27 | (address & 0xffu) << 4 | (count - 1u));
     for (unsigned poll = 0; poll < 1000; poll++) {
         uint32_t status = fp_read32(&fp_observer, channel + 8);
         if (status & 1u) {
             if (!(status & 0x0eu)) {
-                *value = (uint8_t)fp_read32(&fp_observer, channel + 0x18);
+                uint32_t data = fp_read32(&fp_observer, channel + 0x18);
+                for (unsigned i = 0; i < count; i++)
+                    values[i] = (uint8_t)(data >> (8 * i));
                 result = 0;
             } else if (fp_rejected_logged < 8) {
                 fp_rejected_logged++;
@@ -140,6 +170,11 @@ bus_done:
 done:
     lck_mtx_unlock(&fp_lock);
     return result;
+}
+
+static int fp_read(unsigned sid, unsigned address, uint8_t *value)
+{
+    return fp_read_registers(sid, address, value, 1);
 }
 
 static void fp_survey(unsigned sid, unsigned base, const char *name)
@@ -398,10 +433,13 @@ static int fp_haptic_read(void *context, unsigned address, uint8_t *value)
     return fp_read(7, address, value);
 }
 
-static int fp_haptic_write(void *context, unsigned address, uint8_t value)
+static int fp_rtp_read_status(uint8_t status[2])
 {
-    (void)context;
-    if (!fuxi_haptic_writable(address)) return -1;
+    return fp_read_registers(7, 0xf009, status, 2);
+}
+
+static int fp_haptic_transfer(unsigned address, uint32_t payload, unsigned bytes)
+{
     unsigned owner = 7;
     int result = -1;
     lck_mtx_lock(&fp_lock);
@@ -412,8 +450,8 @@ static int fp_haptic_write(void *context, unsigned address, uint8_t value)
     if ((physical & ~(uint64_t)PAGE_MASK) != window->physical) goto done;
     unsigned channel = physical & PAGE_MASK;
     sweet_spmi_bus_lock();
-    fp_write32(window, channel + 0x10, value);
-    fp_write32(window, channel, (address & 0xffu) << 4);
+    fp_write32(window, channel + 0x10, payload);
+    fp_write32(window, channel, ((address & 0xffu) << 4) | (bytes - 1u));
     for (unsigned poll = 0; poll < 1000; poll++) {
         uint32_t status = fp_read32(window, channel + 8);
         if (status & 1u) {
@@ -431,8 +469,33 @@ done:
     return result;
 }
 
+static int fp_haptic_write(void *context, unsigned address, uint8_t value)
+{
+    (void)context;
+    if (!fuxi_haptic_writable(address)) return -1;
+    return fp_haptic_transfer(address, value, 1);
+}
+
+/* 0xf120 的四個樣點必須在同一筆 SPMI 寫交易送出。 */
+static int fp_rtp_write(unsigned address, const uint8_t *data, unsigned size)
+{
+    if (address == 0xf120 && size == 4) {
+        return fp_haptic_transfer(address, (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+            ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24), size);
+    }
+    if (size != 1) return -1;
+    switch (address) {
+    case 0xf048: case 0xf04a: case 0xf04c: case 0xf05e: case 0xf05f: case 0xf070: case 0xf071:
+    case 0xf072: case 0xf124: case 0xf12a: case 0xf12d:
+        return fp_haptic_transfer(address, data[0], 1);
+    default:
+        return -1;
+    }
+}
+
 static int fp_haptic_prepare(void)
 {
+    unsigned found[2];
     for (unsigned index = 0; index < 2; index++) {
         unsigned owner = 7;
         int apid = fp_find(7, 0xf0 + index, &owner);
@@ -450,6 +513,19 @@ static int fp_haptic_prepare(void)
             printf("FUXI PMIC: haptic channel mapping failed peripheral=%#x\n", 0xf0 + index);
             return -1;
         }
+        found[index] = (unsigned)apid;
+    }
+    DTEntry chosen;
+    const void *prop;
+    unsigned bytes;
+    uint32_t opt = 0;
+    if (fp_rtp_pcm_enabled && SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+        SecureDTGetProperty(chosen, "fuxi,haptic-fast-apid", &prop, &bytes) == kSuccess && bytes == sizeof(opt))
+        memcpy(&opt, prop, sizeof(opt));
+    if (opt == 1) {
+        for (unsigned i = 0; i < 2; i++)
+            __atomic_store_n(&fp_haptic_apid_plus_one[i], found[i] + 1, __ATOMIC_RELEASE);
+        printf("FUXI PMIC: haptic PCM cached two EE0 APIDs with live map and owner checks\n");
     }
     return 0;
 }
@@ -461,20 +537,61 @@ static void fp_vibrate_kick_worker(void)
     thread_wakeup((event_t)&fp_vibrate_kick);
 }
 
+static int fp_vibrate_write_allowed(void)
+{
+    char name[32] = {0};
+    proc_selfname(name, sizeof(name));
+    proc_t process = proc_self();
+    int platform = process && csproc_get_platform_binary(process) != 0;
+    if (process) proc_rele(process);
+    return fuxi_vibrate_caller_allowed(kauth_cred_issuser(kauth_cred_get()), platform, name);
+}
+
+static int fp_vibrate_pcm_sysctl SYSCTL_HANDLER_ARGS
+{
+    (void)oidp;
+    (void)arg1;
+    (void)arg2;
+    if (!fp_rtp_pcm_enabled || !__atomic_load_n(&fp_rtp_ready, __ATOMIC_ACQUIRE)) return ENOTSUP;
+    if (!req->newptr || req->oldptr) return EINVAL;
+    if (!fp_vibrate_write_allowed()) return EPERM;
+    size_t length = req->newlen;
+    if (length < 8 || length > FUXI_RTP_BYTES || (length & 3u)) return EINVAL;
+    uint8_t samples[FUXI_RTP_BYTES];
+    int error = SYSCTL_IN(req, samples, length);
+    if (error) return error;
+    for (size_t i = 0; i < length; i++) {
+        int sample = (int8_t)samples[i];
+        if (sample < -FUXI_RTP_PCM_LIMIT || sample > FUXI_RTP_PCM_LIMIT ||
+            (i >= length - 4 && sample != 0)) return EINVAL;
+    }
+    lck_mtx_lock(&fp_vibrate_lock);
+    if (fp_vibrate_state.failed || !__atomic_load_n(&fp_rtp_ready, __ATOMIC_RELAXED)) {
+        error = EIO;
+    } else if (fp_rtp_count == sizeof(fp_rtp_pending) / sizeof(fp_rtp_pending[0])) {
+        error = EAGAIN;
+    } else {
+        unsigned slot = (fp_rtp_head + fp_rtp_count) % (sizeof(fp_rtp_pending) / sizeof(fp_rtp_pending[0]));
+        memcpy(fp_rtp_pending[slot].samples, samples, length);
+        fp_rtp_pending[slot].length = (unsigned)length;
+        fp_rtp_pending[slot].deadline = fp_torch_now() + 40000000ull;
+        fp_rtp_count++;
+    }
+    lck_mtx_unlock(&fp_vibrate_lock);
+    if (!error) fp_vibrate_kick_worker();
+    return error;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, fuxihapticpcm, CTLTYPE_OPAQUE | CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
+    0, 0, fp_vibrate_pcm_sysctl, "S,fuxihapticpcm", "Bounded signed 24 kHz HAP525 FIFO samples");
+
 static int fp_vibrate_sysctl SYSCTL_HANDLER_ARGS
 {
     (void)oidp;
     (void)arg1;
     (void)arg2;
     if (!__atomic_load_n(&fp_vibrate_ready, __ATOMIC_ACQUIRE)) return ENOTSUP;
-    if (req->newptr) {
-        char name[32] = {0};
-        proc_selfname(name, sizeof(name));
-        proc_t process = proc_self();
-        int platform = process && csproc_get_platform_binary(process) != 0;
-        if (process) proc_rele(process);
-        if (!fuxi_vibrate_caller_allowed(kauth_cred_issuser(kauth_cred_get()), platform, name)) return EPERM;
-    }
+    if (req->newptr && !fp_vibrate_write_allowed()) return EPERM;
     lck_mtx_lock(&fp_vibrate_lock);
     int value = (int)fuxi_vibrate_remaining_ms(&fp_vibrate_state, fp_torch_now());
     int failed = fp_vibrate_state.failed;
@@ -484,9 +601,24 @@ static int fp_vibrate_sysctl SYSCTL_HANDLER_ARGS
     int error = sysctl_io_number(req, value, sizeof(value), &value, &changed);
     if (error || !changed) return error;
     unsigned ms = 0, level = 0;
-    if (fuxi_vibrate_decode(value, &ms, &level)) return EINVAL;
+    /* HAL emits this once per contiguous tactile gesture, never per PCM window. */
+    int click = value == 0x01000000;
+    if (click && !__atomic_load_n(&fp_rtp_ready, __ATOMIC_ACQUIRE)) {
+        /* The first RTP HAL build cannot fall back itself. Keep basic UI
+         * feedback available with a single bounded pulse. */
+        if (!fp_rtp_wave) return ENOTSUP;
+        click = 0;
+        value = (96 << FUXI_VIBRATE_LEVEL_SHIFT) | 15;
+    }
+    if (!click && fuxi_vibrate_decode(value, &ms, &level)) return EINVAL;
     lck_mtx_lock(&fp_vibrate_lock);
-    error = fuxi_vibrate_request_level(&fp_vibrate_state, ms, level, fp_torch_now()) ? EIO : 0;
+    uint64_t now = fp_torch_now();
+    if (click && fp_vibrate_state.failed) {
+        error = EIO;
+    } else {
+        error = fuxi_vibrate_request_level(&fp_vibrate_state, ms, level, now) ? EIO : 0;
+        if (!error) fp_rtp_deadline = click ? now + 40000000ull : 0;
+    }
     lck_mtx_unlock(&fp_vibrate_lock);
     if (!error) fp_vibrate_kick_worker();
     return error;
@@ -535,28 +667,97 @@ static void fp_vibrate_worker(void *argument, wait_result_t wait_result)
     (void)wait_result;
     const FuxiHapticIo io = {NULL, fp_haptic_owner, fp_haptic_read, fp_haptic_write, fp_flash_wait, 0};
     unsigned playing = 0, logged = 0, health_checks = 0, amplitude_writes = 0, amplitude_logged = 0;
+    unsigned autores_cleared = 0, autores_plays = 0, autores_logged = 0;
+    unsigned pcm_played = 0, pcm_expired = 0;
     uint8_t mid_hpwr = 0, mid_fault = 0, amplitude = fp_vibrate_android_amplitude, low = 0, high = 0;
     uint64_t started_ns = 0;
+    if (fp_rtp_wave) {
+        FuxiRtpStats stats;
+        int result = fuxi_rtp_click(&io, fp_rtp_write, fp_rtp_read_status, fp_rtp_wave, FUXI_RTP_BYTES, 0, &stats);
+        printf("FUXI PMIC: haptic RTP FIFO boot click bytes=%u polls=%u rc=%d pre=%u refill=%u last=%u\n",
+            stats.sent, stats.polls, result, stats.before_start, stats.before_refill, stats.last_fill);
+        if (result == -2) {
+            fp_vibrate_fail(&io, "RTP restore", result);
+            return;
+        }
+        if (!result) __atomic_store_n(&fp_rtp_ready, 1u, __ATOMIC_RELEASE);
+    }
     for (;;) {
         unsigned seen = __atomic_load_n(&fp_vibrate_kick, __ATOMIC_ACQUIRE);
         uint64_t now = fp_torch_now();
+        uint8_t pcm[FUXI_RTP_BYTES];
+        unsigned pcm_length = 0;
+        uint64_t queued_ns = 0;
         lck_mtx_lock(&fp_vibrate_lock);
         unsigned failed = fp_vibrate_state.failed;
         unsigned want = fuxi_vibrate_wanted(&fp_vibrate_state, now);
         unsigned level = fp_vibrate_state.level;
         uint64_t deadline = fp_vibrate_state.deadline;
+        int click = !playing && !failed && now < fp_rtp_deadline;
+        if (!playing) fp_rtp_deadline = 0;
+        if (!click && !want && !playing && !failed && fp_rtp_count) {
+            unsigned slot = fp_rtp_head;
+            queued_ns = fp_rtp_pending[slot].deadline - 40000000ull;
+            if (now < fp_rtp_pending[slot].deadline) {
+                pcm_length = fp_rtp_pending[slot].length;
+                memcpy(pcm, fp_rtp_pending[slot].samples, pcm_length);
+            }
+            fp_rtp_head = (fp_rtp_head + 1) % (sizeof(fp_rtp_pending) / sizeof(fp_rtp_pending[0]));
+            fp_rtp_count--;
+            if (!pcm_length) {
+                lck_mtx_unlock(&fp_vibrate_lock);
+                if (++pcm_expired <= 8)
+                    printf("FUXI PMIC: haptic RTP FIFO UI PCM expired=%u played=%u queue_us=%llu\n",
+                        pcm_expired, pcm_played, (now - queued_ns) / 1000ull);
+                continue;
+            }
+        }
         lck_mtx_unlock(&fp_vibrate_lock);
+        if (click || pcm_length) {
+            FuxiRtpStats stats = {0};
+            uint8_t fault = 0;
+            int result = io.read(io.context, 0xf00c, &fault);
+            if (!result) result = fuxi_vibrate_clear_autores(&io, &fault, &autores_cleared);
+            const uint8_t *wave = pcm_length ? pcm : fp_rtp_wave;
+            unsigned length = pcm_length ? pcm_length : FUXI_RTP_BYTES;
+            unsigned boosted_peak = pcm_length ? fuxi_rtp_pcm_gain(pcm, pcm_length) : 0;
+            if (!result) result = fuxi_rtp_click(&io, fp_rtp_write, fp_rtp_read_status, wave, length, fp_rtp_vmax, &stats);
+            if (pcm_length && !result) pcm_played++;
+            if (logged < 64 || result) {
+                logged++;
+                if (pcm_length) printf("FUXI PMIC: haptic RTP FIFO UI PCM bytes=%u polls=%u rc=%d peak=%u played=%u expired=%u queue_us=%llu service_us=%llu\n",
+                    stats.sent, stats.polls, result, boosted_peak, pcm_played, pcm_expired,
+                    (now >= queued_ns ? now - queued_ns : 0) / 1000ull, (fp_torch_now() - now) / 1000ull);
+                else printf("FUXI PMIC: haptic RTP FIFO UI click bytes=%u polls=%u rc=%d pre=%u refill=%u last=%u vmax=%#x\n",
+                    stats.sent, stats.polls, result, stats.before_start, stats.before_refill, stats.last_fill,
+                    fp_rtp_vmax ? fp_rtp_vmax : fp_vibrate_android_vmax);
+            }
+            if (result == -2) {
+                fp_vibrate_fail(&io, "RTP UI restore", result);
+            } else if (result) {
+                __atomic_store_n(&fp_rtp_ready, 0u, __ATOMIC_RELEASE);
+                lck_mtx_lock(&fp_vibrate_lock);
+                fp_rtp_count = 0;
+                if (seen == __atomic_load_n(&fp_vibrate_kick, __ATOMIC_ACQUIRE) &&
+                    !fp_rtp_deadline && !fp_vibrate_state.deadline)
+                    (void)fuxi_vibrate_request_level(&fp_vibrate_state, 15, 96, fp_torch_now());
+                lck_mtx_unlock(&fp_vibrate_lock);
+            }
+            continue;
+        }
         if (failed && !playing) {
             fp_vibrate_sleep(seen, 0);
             continue;
         }
         if (want && !failed) {
             /* 振幅先於開始寫；播放中改了也照寫（Linux haptics_set_gain 同樣在播放中改 DIRECT_PLAY） */
+            if (fp_vibrate_transient && (!playing || now - started_ns < FP_HAPTIC_ATTACK_NS))
+                level = fuxi_vibrate_attack_level(level);
             unsigned before = amplitude_writes;
             int result = fuxi_vibrate_amplitude(&io, level, &amplitude, &amplitude_writes);
             if (result) {
                 unsigned polls = 0, toggled = 0;
-                int stop_result = playing ? fuxi_vibrate_stop(&io, &polls, &toggled) : 0;
+                int stop_result = playing ? fuxi_vibrate_stop(&io, fp_vibrate_brake, &polls, &toggled) : 0;
                 playing = 0;
                 lck_mtx_lock(&fp_vibrate_lock);
                 fp_vibrate_state.playing = 0;
@@ -579,10 +780,10 @@ static void fp_vibrate_worker(void *argument, wait_result_t wait_result)
         }
         if (want && !playing) {
             low = high = amplitude;
-            int result = fuxi_vibrate_start(&io);
+            int result = fuxi_vibrate_start(&io, fp_vibrate_brake, &autores_cleared);
             if (result) {
                 unsigned polls = 0, toggled = 0;
-                int stop_result = fuxi_vibrate_stop(&io, &polls, &toggled);
+                int stop_result = fuxi_vibrate_stop(&io, fp_vibrate_brake, &polls, &toggled);
                 fp_vibrate_fail(&io, "start refused", result);
                 printf("FUXI PMIC: vibrate start cleanup rc=%d polls=%u toggled=%u\n", stop_result, polls, toggled);
                 continue;
@@ -600,7 +801,7 @@ static void fp_vibrate_worker(void *argument, wait_result_t wait_result)
         if (playing && (!want || failed)) {
             unsigned polls = 0, toggled = 0;
             uint64_t stop_ns = fp_torch_now();
-            int result = fuxi_vibrate_stop(&io, &polls, &toggled);
+            int result = fuxi_vibrate_stop(&io, fp_vibrate_brake, &polls, &toggled);
             uint64_t stopped_ns = fp_torch_now();
             playing = 0;
             lck_mtx_lock(&fp_vibrate_lock);
@@ -609,9 +810,9 @@ static void fp_vibrate_worker(void *argument, wait_result_t wait_result)
             lck_mtx_unlock(&fp_vibrate_lock);
             if (logged < 16 || result || toggled) {
                 logged++;
-                printf("FUXI PMIC: vibrate play=%llu on-us=%llu checks=%u hpwr-mid=%#x fault-mid=%#x stop-rc=%d stop-polls=%u stop-us=%llu toggled=%u amp=%#x..%#x\n",
+                printf("FUXI PMIC: vibrate play=%llu on-us=%llu checks=%u hpwr-mid=%#x fault-mid=%#x stop-rc=%d stop-polls=%u stop-us=%llu toggled=%u amp=%#x..%#x autores-plays=%u cleared=%u\n",
                     plays, (stop_ns - started_ns) / 1000, health_checks, mid_hpwr, mid_fault, result, polls,
-                    (stopped_ns - stop_ns) / 1000, toggled, low, high);
+                    (stopped_ns - stop_ns) / 1000, toggled, low, high, autores_plays, autores_cleared);
             }
             if (result) fp_vibrate_fail(&io, "stop unverified", result);
             continue;
@@ -621,10 +822,19 @@ static void fp_vibrate_worker(void *argument, wait_result_t wait_result)
             int result = fuxi_vibrate_health(&io, &fault, &hpwr);
             health_checks++;
             mid_hpwr = hpwr; /* 停止前最後一次看到的 HPWR；播放中應為 3（READY） */
+            if (!result && (fault & FUXI_VIBRATE_FAULT_AUTORES) && !(mid_fault & FUXI_VIBRATE_FAULT_AUTORES)) {
+                /* Linux 播放中不看這一位；照常播完，下次開播前清 */
+                autores_plays++;
+                if (autores_logged < 4) {
+                    autores_logged++;
+                    printf("FUXI PMIC: vibrate auto-resonance error while playing amp=%#x on-us=%llu hpwr=%#x; continuing, cleared before next play (count=%u)\n",
+                        amplitude, (fp_torch_now() - started_ns) / 1000, hpwr, autores_plays);
+                }
+            }
             mid_fault |= fault;
             if (result) {
                 unsigned polls = 0, toggled = 0;
-                int stop_result = fuxi_vibrate_stop(&io, &polls, &toggled);
+                int stop_result = fuxi_vibrate_stop(&io, fp_vibrate_brake, &polls, &toggled);
                 playing = 0;
                 lck_mtx_lock(&fp_vibrate_lock);
                 fp_vibrate_state.playing = 0;
@@ -635,6 +845,8 @@ static void fp_vibrate_worker(void *argument, wait_result_t wait_result)
                 continue;
             }
             uint64_t next = fp_torch_now() + FUXI_VIBRATE_POLL_MS * 1000000ull;
+            if (fp_vibrate_transient && now - started_ns < FP_HAPTIC_ATTACK_NS && started_ns + FP_HAPTIC_ATTACK_NS < next)
+                next = started_ns + FP_HAPTIC_ATTACK_NS;
             fp_vibrate_sleep(seen, deadline && deadline < next ? deadline : next);
             continue;
         }
@@ -670,6 +882,10 @@ static void fp_vibrate_runtime_start(void)
     if (result) {
         printf("FUXI PMIC: vibrate runtime refused check rc=%d; writes=0\n", result);
         return;
+    }
+    if (fp_vibrate_transient) {
+        fp_vibrate_brake = fuxi_vibrate_stock_brake(&io) ? 0x08u : 0;
+        printf("FUXI PMIC: haptic transient attack-us=5710 stock-brake=%u\n", !!fp_vibrate_brake);
     }
     thread_t thread = NULL;
     if (kernel_thread_start(fp_vibrate_worker, NULL, &thread) != KERN_SUCCESS) {
@@ -815,7 +1031,7 @@ void fuxi_pmic_init(void)
     }
     fp_torch_audit_enabled = torch_audit == 1 && mode == 3;
     if ((!mode && !haptic) || __atomic_exchange_n(&fp_started, 1u, __ATOMIC_ACQ_REL)) return;
-    if (mode > 3 || haptic > 3) {
+    if (mode > 3 || haptic > 5) {
         printf("FUXI PMIC: unsupported mode=%u haptic=%u; hardware untouched\n", mode, haptic);
         return;
     }
@@ -834,7 +1050,23 @@ void fuxi_pmic_init(void)
     fp_survey(7, 0xf200, "haptic-boost");
     fp_haptic_fifo_survey(mode);
     if (haptic == 1) fp_haptic_diagnostic();
-    if (haptic == 2 || haptic == 3) {
+    if (haptic == 5) {
+        if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
+            SecureDTGetProperty(chosen, "fuxi,haptic-rtp", &property, &bytes) != kSuccess ||
+            bytes != FUXI_RTP_BYTES) haptic = 0;
+        else {
+            fp_rtp_wave = property;
+            unsigned hal = 0;
+            fp_rtp_pcm_enabled = PE_parse_boot_argn("fuxihalhaptic", &hal, sizeof(hal)) && hal == 3;
+            if (SecureDTGetProperty(chosen, "fuxi,haptic-rtp-vmax", &property, &bytes) == kSuccess &&
+                bytes == sizeof(fp_rtp_vmax)) {
+                memcpy(&fp_rtp_vmax, property, sizeof(fp_rtp_vmax));
+                if (fp_rtp_vmax > FUXI_RTP_TEST_VMAX_LIMIT) fp_rtp_vmax = 0;
+            }
+        }
+    }
+    if (haptic >= 2 && haptic <= 5) {
+        fp_vibrate_transient = haptic == 4;
         fp_vibrate_selftest = haptic == 3;
         fp_vibrate_runtime_start();
     }

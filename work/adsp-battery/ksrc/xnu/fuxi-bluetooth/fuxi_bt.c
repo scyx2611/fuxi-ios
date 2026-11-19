@@ -40,6 +40,30 @@ bool fuxi_bt_uart_ops_valid(const struct fuxi_bt_uart_ops *ops)
         ops->release && ops->now_us && ops->wait_us;
 }
 
+/*
+ * 來源頻率與 m/n 取自 Linux drivers/clk/qcom/gcc-sm8550.c ftbl_gcc_qupv3_wrap2_s6_clk_src
+ * （P_GCC_GPLL0_OUT_EVEN、pre_div 1）；QUP ≥ 2.5 取樣 16，除頻 = 來源 / (baud × 16)：
+ * 115200 用 7.3728 MHz 除 4，其餘除 1。qca 值對照 Linux btqca.h enum qca_baudrate；
+ * Linux 的 WCN7850 DT 用 max-speed 3200000。
+ */
+static const struct fuxi_bt_rate fuxi_bt_rates[] = {
+    {115200u, 7372800u, 384u, 15625u, 0u},
+    {921600u, 14745600u, 768u, 15625u, 10u},
+    {2000000u, 32000000u, 8u, 75u, 13u},
+    {3000000u, 48000000u, 4u, 25u, 14u},
+    {3200000u, 51200000u, 64u, 375u, 17u}
+};
+
+const struct fuxi_bt_rate *fuxi_bt_rate_find(uint32_t baud)
+{
+    for (unsigned index = 0; index < sizeof(fuxi_bt_rates) / sizeof(fuxi_bt_rates[0]); index++) {
+        if (fuxi_bt_rates[index].baud == baud) {
+            return &fuxi_bt_rates[index];
+        }
+    }
+    return NULL;
+}
+
 static enum fuxi_bt_status fuxi_bt_event(const uint8_t *event,
     unsigned size, struct fuxi_bt_result *result)
 {

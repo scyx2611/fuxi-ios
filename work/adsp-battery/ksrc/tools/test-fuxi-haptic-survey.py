@@ -19,6 +19,7 @@ PREFIX = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "fuxi_haptic_rtp.h"
 
 typedef unsigned DTEntry;
 struct fp_window { unsigned unused; };
@@ -37,6 +38,8 @@ static struct {
     unsigned observations, summaries, valid, stable, identity, attempts, observed_fifo, contradictory;
     unsigned fail_read, poison_failure, owner_change, apid_change, mutate_read, selector_race, selector_reads;
     unsigned status_reads, invalid_rows, tlra_lines, vibrate, vibrate_selftest;
+    unsigned wave_bytes, hal, vmax;
+    uint8_t wave[FUXI_RTP_BYTES];
 } model;
 
 static void lck_mtx_lock(int *lock) { assert(!*lock); *lock = 1; }
@@ -106,6 +109,7 @@ static unsigned exchange(unsigned *target, unsigned value, unsigned order)
 static int PE_parse_boot_argn(const char *name, void *value, unsigned bytes)
 {
     assert(bytes == sizeof(unsigned));
+    if (!strcmp(name, "fuxihalhaptic")) { memcpy(value, &model.hal, bytes); return model.hal != 0; }
     if (model.by_dt) return 0;
     if (!strcmp(name, "fuxipmic")) { memcpy(value, &model.mode, bytes); return model.mode != 0; }
     if (!strcmp(name, "fuxihaptic")) { memcpy(value, &model.haptic, bytes); return model.haptic != 0; }
@@ -125,6 +129,11 @@ static int SecureDTGetProperty(DTEntry entry, const char *name, void **value, un
     *bytes = sizeof(unsigned);
     if (!strcmp(name, "fuxi,pmic")) *value = &model.mode;
     else if (!strcmp(name, "fuxi,haptic")) *value = &model.haptic;
+    else if (!strcmp(name, "fuxi,haptic-rtp") && model.wave_bytes) {
+        *value = model.wave;
+        *bytes = model.wave_bytes;
+    }
+    else if (!strcmp(name, "fuxi,haptic-rtp-vmax")) *value = &model.vmax;
     else return -1;
     return 0;
 }
@@ -141,7 +150,9 @@ static void fp_survey(unsigned sid, unsigned base, const char *name)
 static void fp_flash_pulse(void) { model.flash++; }
 static void fp_torch_start(void) { model.torch++; }
 static void fp_haptic_diagnostic(void) { model.diagnostic++; }
-static unsigned fp_vibrate_selftest;
+static unsigned fp_vibrate_selftest, fp_vibrate_transient, fp_rtp_pcm_enabled;
+static uint32_t fp_rtp_vmax;
+static const uint8_t *fp_rtp_wave;
 static void fp_vibrate_runtime_start(void) { model.vibrate++; model.vibrate_selftest = fp_vibrate_selftest; }
 '''
 
@@ -152,6 +163,8 @@ static void fixture(unsigned mode)
     memset(&model, 0, sizeof(model));
     memset(fp_poisoned, 0, sizeof(fp_poisoned));
     fp_started = fp_apids = fp_torch_audit_enabled = 0;
+    fp_vibrate_selftest = fp_vibrate_transient = fp_rtp_pcm_enabled = fp_rtp_vmax = 0;
+    fp_rtp_wave = NULL;
     fp_lock = 0;
     model.mode = mode;
     model.registers[0x01] = model.registers[0x101] = 4;
@@ -188,13 +201,23 @@ int main(void)
     }
     fixture(0); model.haptic = 1; run();
     assert(model.diagnostic == 1 && !model.observations && !model.vibrate);
-    /* haptic=2 啟動 DIRECT_PLAY 執行期、3 另加自測、4 以上拒絕且不碰硬體 */
-    for (index = 2; index <= 3; index++) {
+    for (index = 2; index <= 4; index++) {
         fixture(0); model.haptic = index; fp_vibrate_selftest = 7; run();
         assert(model.vibrate == 1 && model.vibrate_selftest == (index == 3) && !model.diagnostic);
+        assert(fp_vibrate_transient == (index == 4) && !fp_rtp_wave);
         assert(model.maps == 3 && !model.observations && !model.flash && !model.torch);
     }
-    fixture(0); model.haptic = 4; run();
+    for (index = 0; index < 2; index++) {
+        fixture(0); model.by_dt = 1; model.haptic = 5;
+        model.wave_bytes = index ? FUXI_RTP_BYTES - 1 : 0; run();
+        assert(!model.vibrate && !fp_rtp_wave && !fp_rtp_pcm_enabled);
+        fixture(0); model.by_dt = 1; model.haptic = 5; model.wave_bytes = FUXI_RTP_BYTES;
+        model.hal = index ? 3 : 1; model.vmax = FUXI_RTP_TEST_VMAX_LIMIT + index; run();
+        assert(model.vibrate == 1 && !model.vibrate_selftest && !fp_vibrate_transient);
+        assert(fp_rtp_wave == model.wave && fp_rtp_pcm_enabled == index);
+        assert(fp_rtp_vmax == (index ? 0u : FUXI_RTP_TEST_VMAX_LIMIT));
+    }
+    fixture(0); model.haptic = 6; run();
     assert(!model.vibrate && !model.maps && !model.legacy && !model.reads && !model.diagnostic);
     for (index = 1; index <= 58; index++) {
         fixture(1); model.fail_read = index; run();
@@ -257,17 +280,18 @@ def source_snippets():
     # 三種 arbiter 交易（observer 讀、flash 寫、haptic 寫）都要在與按鍵輪詢共用的匯流排鎖內完成，
     # 鎖序固定 fp_lock -> bus，且交易途中不得跳過解鎖。
     assert '#include "sweet_spmi_bus.h"' in text
-    assert len(re.findall(r'^\s+fp_write32\(', text, re.M)) == 5
-    for name, following in (('static int fp_read(', 'static void fp_survey('),
-                            ('static int fp_flash_write(', 'static void fp_flash_wait('),
-                            ('static int fp_haptic_write(', 'static int fp_haptic_prepare(')):
-        body = text[text.index(name):text.index(following)]
+    guarded_writes = 0
+    for name in ('static int fp_read_registers(', 'static int fp_flash_write(', 'static int fp_haptic_transfer('):
+        start = text.index(name)
+        body = text[start:text.index('\n}', start)]
         assert body.count('sweet_spmi_bus_lock();') == 1 and body.count('sweet_spmi_bus_unlock();') == 1, name
         locked = body.index('sweet_spmi_bus_lock();')
         label = body.index('bus_done:\n    sweet_spmi_bus_unlock();\ndone:\n    lck_mtx_unlock(&fp_lock);')
         assert body.index('lck_mtx_lock(&fp_lock);') < locked < body.index('fp_write32(') < label, name
         assert 'goto done;' not in body[locked:label] and 'return' not in body[locked:label], name
         assert body.count('fp_write32(') == len(re.findall(r'fp_write32\(', body[locked:label])), name
+        guarded_writes += body.count('fp_write32(')
+    assert guarded_writes == 5 == len(re.findall(r'^\s+fp_write32\(', text, re.M))
     return survey, initializer
 
 
@@ -300,11 +324,11 @@ def main():
         environment = RUNNER.msvc_environment(compiler) if microsoft else os.environ.copy()
         if microsoft:
             command = [compiler, '/nologo', '/std:c11', '/W4', '/WX', '/TC', '/D_CRT_SECURE_NO_WARNINGS',
-                       '/Fo' + str(directory / 'survey.obj'), '/Fe' + str(binary), str(source)]
+                       '/I' + str(PMIC.parent), '/Fo' + str(directory / 'survey.obj'), '/Fe' + str(binary), str(source)]
         else:
             command = [compiler, '-std=c11', '-g', '-O1', '-Wall', '-Wextra', '-Werror',
                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
-                       '-fno-omit-frame-pointer', str(source), '-o', str(binary)]
+                       '-fno-omit-frame-pointer', '-I', str(PMIC.parent), str(source), '-o', str(binary)]
         subprocess.run(command, check=True, cwd=directory, env=environment, timeout=120)
         print(f'PASS: host compile/link; compiler={compiler}', flush=True)
         if microsoft:

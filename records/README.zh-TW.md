@@ -64,7 +64,7 @@
 
 <!-- INDEX:BEGIN -->
 
-共 409 項紀錄；目錄涵蓋 317 筆提交、244 份補丁、176 個開關、196 份測試、568 個檔案。
+共 415 項紀錄；目錄涵蓋 342 筆提交、244 份補丁、197 個開關、204 份測試、602 個檔案。
 
 ### S：上游繼承補丁（iOS 16、XNU 27 與 GPU 建置）（117 項）
 
@@ -296,7 +296,7 @@
 | [G-048](items/G-gpu.zh-TW.md#g-048-雙系統開機鏈-chain-v2-與-chain-v3-寫入-boot_b) | 雙系統開機鏈 `chain-v2` 與 `chain-v3` 寫入 `boot_b` | 修復：將 `fuxibacklight=4`、`fuxi,adsp=3` 與 `fuxi,log=1` 寫入 `boot_b`（修正亮度連滑停止並加入 `mtdblk` 獨立開機日誌） | `fuxibacklight=4`、`fuxi,adsp=3`、`fuxi,log=1` |
 | [G-049](items/G-gpu.zh-TW.md#g-049-未解決項目鎖定自訂-devicelost4-空檔重幀材質重用等) | 未解決項目（鎖定自訂 DeviceLost、4+ 空檔、重幀材質重用等） | 未完成。已錄到一次 `DeviceLost` 後的顯示程序重啟與保護性停用，首次錯誤的原因待查。 | 無 |
 
-### K：核心硬體適配（000 線，2026-11-14 起）（75 項）
+### K：核心硬體適配（000 線，2026-11-14 起）（78 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -375,8 +375,11 @@
 | [K-073](items/K-kernel.zh-TW.md#k-073-優先處理-wi-fi-關閉批次接收與連線統計bit-79) | 優先處理 Wi-Fi 關閉、批次接收與連線統計（bit 7～9） | 實驗（ux1023 上機一趟；ux767 對照未跑） |  |
 | [K-074](items/K-kernel.zh-TW.md#k-074-ath12k-接受韌體配置的-peer-id-0) | ath12k 接受韌體配置的 peer ID 0 | 修正版完成一趟暫時開機驗證，重連後即有資料流量 | 使用含 peer ID 0 修補的 ath12k 物件。對照組與修正版都開啟接收批次（ADT fuxi,wifi-ux=1023），沿用相同命令列與 root extents。 |
 | [K-075](items/K-kernel.zh-TW.md#k-075-ath12k-wmi-掃描優先級與首輪掃描時間) | ath12k WMI 掃描優先級與首輪掃描時間 | 修正版暫時開機三輪設定頁關開通過 | 核心按需 Wi-Fi 追蹤 fuxiwifitrace。A/B 使用相同 ADT、命令列與 root extents，變更 ath12k 物件的 WMI priority 欄位。 |
+| [K-076](items/K-kernel.zh-TW.md#k-076-wcn7850-藍牙韌體下載與-hci-resetfuxibt4) | WCN7850 藍牙韌體下載與 HCI reset（fuxi,bt=4） | 實驗（已通：韌體下載、HCI reset、讀版本；iOS bluetoothd 傳輸未做） | ADT `fuxi,bt=4`（或 `fuxibt=4`）；loader `prepare-wlan-w18-loader.py --bt 4`（另檢查核心含 `FUXI BT: setup status=` 與 `/usr/local/share/fuxi/bt/` 字串）。韌體要先用 `stage-wlan-assets.py` kind=bt 放進 iOS root（U-020）。 |
+| [K-077](items/K-kernel.zh-TW.md#k-077-wcn7850-uartsk-與-skywalk-常駐收送) | WCN7850 UART.SK 與 Skywalk 常駐收送 | 11-19 設定頁關閉再開啟後，Windows 重新連線並即時讀回 5 項 RFCOMM 服務。iOS 另建立過對外 BLE 連線。使用者已配對 Apple 耳機（趟 17），趟 20 換到 3.2 Mbaud 後確認 A2DP 聲音正常。關藍牙閃退與長時間穩定性待驗。 | ADT `fuxi,bt=5`，自測另加 `fuxi,bt-probe=1`；原生 bluetoothd 用 `--bt-native`（另開 `fuxi,inject` 位元 32）。UART 換速 `fuxi,bt-baud`（u32，loader `--bt-baud`）與控制器日誌關閉 `fuxi,bt-nolog`（loader `--bt-nolog`），預設都關（趟 20）。 |
+| [K-078](items/K-kernel.zh-TW.md#k-078-用目前-adsp-驗證-fuxi-喇叭與播放圖) | 用目前 ADSP 驗證 Fuxi 喇叭與播放圖 | 21:25 實機建圖六步全部 `status=0`；22:02 PCM（模式 5）實機通過，靜音 80 ms 各步驟 `status=0`、`probe complete result=ok`。11-19 16:57／17:01 mode 6 靜音保護試跑兩趟通過；18:04 mode 7 下方喇叭 `-30 dB` 1 秒 2 kHz 短測實機通過（`pup 1 ms`、PLL 鎖定、`48000 frames`、`stray=0`、`checks=10` 全零故障、`down ok`、腳位還原、`PCM probe complete result=ok`）。耳聽確認、上方喇叭／較高音量（需另獲同意）與 iOS 即時音訊 HAL／`mediaserverd` 輸出仍在後面。 | `--audio-tdm-graph`。寫入 ADT `fuxi,audio-spf=4`，預設停用；`--audio-tdm-pcm` 為模式 5。 |
 
-### U：iOS root 與使用者空間（19 項）
+### U：iOS root 與使用者空間（22 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -384,7 +387,7 @@
 | [U-002](items/U-userland.zh-TW.md#u-002-狀態欄位置uikit-偏好鍵split1080provider與只寫少數區塊的部署) | 狀態欄位置：UIKit 偏好鍵（Split1080／provider）與只寫少數區塊的部署 | 已採用並部分演進（UIKit provider 覆寫改回清除，`FuxiShape.c` 接手 `-notchRect`，其建立的「只寫少數改動區塊」部署鏈沿用至今） |  |
 | [U-003](items/U-userland.zh-TW.md#u-003-ios-手電筒控制接上核心租約與五檔亮度) | iOS 手電筒控制接上核心租約與五檔亮度 | 已採用並進入日常（`chain-v7`～`v9` 啟用，控制中心五檔實測通過） |  |
 | [U-004](items/U-userland.zh-TW.md#u-004-ios-震動交給核心-hap525-執行期mediaserverdfigvibratormediaexperience) | iOS 震動交給核心 HAP525 執行期（mediaserverd／FigVibrator／MediaExperience） | 部分可用（來電／通知／充電與系統聲音 `VibePattern`／`Atoms` 震動及包絡振幅調整實測通過；UIKit CoreHaptics 互動震動仍因 `-4810` 未解決） |  |
-| [U-005](items/U-userland.zh-TW.md#u-005-uikit-觸覺回饋與-corehaptics-初始化診斷) | UIKit 觸覺回饋與 CoreHaptics 初始化診斷 | 診斷完成／未修復（已定位 CoreHaptics 初始化失敗為 `-4810`，並於 `FuxiVibrate.c` 預留 `fuxi,haptic-ui` 回退開關） |  |
+| [U-005](items/U-userland.zh-TW.md#u-005-uikit-觸覺回饋與-corehaptics-初始化診斷) | UIKit 觸覺回饋與 CoreHaptics 初始化診斷 | SpringBoard 回退實機通過。11 月 18 日試裝 U-021 的 HAL 後，SpringBoard 已能建立原生 CoreHaptics 引擎並經 Actuator 播放。Preferences 的個別操作仍待複驗。 |  |
 | [U-006](items/U-userland.zh-TW.md#u-006-電池讀取者稽核函式庫) | 電池讀取者稽核函式庫 | 已採用（診斷工具，需時透過 ADT 開關啟用） |  |
 | [U-007](items/U-userland.zh-TW.md#u-007-wi-fi-診斷函式庫corewifi-掃描結果過濾候選比對autojoin-決策) | Wi-Fi 診斷函式庫（CoreWiFi 掃描結果、過濾、候選比對、autojoin 決策） | 已採用（診斷工具，成功將無法自動加入縮小至原生資格檢查與密碼查詢） |  |
 | [U-008](items/U-userland.zh-TW.md#u-008-原生-wi-fi-決策日誌開關唯讀擷取離線重播) | 原生 Wi-Fi 決策日誌：開關、唯讀擷取、離線重播 | 已採用（提供零風險唯讀分析與離線重播工具鏈） |  |
@@ -399,6 +402,9 @@
 | [U-017](items/U-userland.zh-TW.md#u-017-safari-網路觸覺與-wi-fi-自動加入的使用者回報對齊) | Safari 網路、觸覺與 Wi-Fi 自動加入的使用者回報對齊 | 部分通過／持續追蹤（Safari 連網與充電震動已由使用者確認；互動震動與當日階段性 Wi-Fi 自動加入對齊結果作為後續修正依據） | 無獨立開關（綜合各診斷趟次實機回饋對齊狀態紀錄） |
 | [U-018](items/U-userland.zh-TW.md#u-018-手動加入-wi-fi-時的密碼框等待) | 手動加入 Wi-Fi 時的密碼框等待 | 採用。使用者已在暫時開機的測試版確認密碼框卡頓消失。 | loader 的 --wifi-password-prompt 設定 fuxi,inject bit 4（16），限制到 /Applications/Preferences.app/Preferences。預設關閉。 |
 | [U-019](items/U-userland.zh-TW.md#u-019-個人熱點切換後恢復狀態欄圖示) | 個人熱點切換後恢復狀態欄圖示 | 14:32 啟用補查通過單趟驗證。14:53 關閉補查的對照版再現 0 格。15:34 開機的日常合併候選版已通過使用者核對。 | `--wifi-sb-refresh` 設定 ADT `fuxi,wifi-sb` bit 1，預設關閉。可搭配 bit 0 的 `--wifi-sb-audit` 觀察原生旗標。 |
+| [U-020](items/U-userland.zh-TW.md#u-020-wcn7850-藍牙韌體放進-ios-rootstage-wlan-assets-kindbt) | WCN7850 藍牙韌體放進 iOS root（stage-wlan-assets kind=bt） | 已部署（`/usr/local/share/fuxi/bt/` 50 檔，寫前比對、寫後讀回通過） | manifest 的 `"kind": "bt"`；輸出目錄名必須是 `run-bt-…`（`run-wlan-…` 給 WLAN），名稱與 kind 不符就拒絕。 |
+| [U-021](items/U-userland.zh-TW.md#u-021-從-ios-hal-的-actuator-輸出驅動-hap525) | 從 iOS HAL 的 Actuator 輸出驅動 HAP525 | WSL 建置、主機模型、HFS+ 離線試裝／還原通過。11 月 18 日實機已驗到原生 CoreHaptics、Actuator 與 HAP525 播放。 | loader `--hal-haptics` 寫入 `fuxihalhaptic=1`，搭配 `--haptic 3 --product-haptics`。根映像試驗透過 `launch-loader-check.ps1 -AudioHal enable\|disable -AudioBundle <FuxiAudio.driver> -AudioSha <FuxiAudio SHA-256> -Out <紀錄名>`。 |
+| [U-022](items/U-userland.zh-TW.md#u-022-bluetoothd-os_log-轉錄到-consolefuxibt-oslog) | bluetoothd os_log 轉錄到 console（fuxi,bt-oslog） | 已實機驗證（os_log 趟 2 無 crash，轉錄出 VSC stall 的原因） | ADT `/chosen fuxi,bt-oslog`（u32，預設 0）：bit 0 default／error／fault（每程序最多 4000 行），bit 1 info、bit 2 debug（合計最多 1500 行）。需要核心 0118 的注入位元 64（bluetoothd）及 `sweetnull` 含 bluetoothd；loader 產生器 `--bt-oslog <1..7>`，要求 `--bt-native` 與 `--stderr-log` 含 bluetoothd。 |
 
 ### B：開機鏈、部署與雙系統選單（12 項）
 
