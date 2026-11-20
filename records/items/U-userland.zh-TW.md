@@ -567,7 +567,7 @@
 ### U-023 bluetoothd 相容修補：關藍牙閃退與單實例 BLE 廣播（fuxi,bt-fix）
 
 - **日期**：2026-11-20 01:58–09:20
-- **狀態**：已實機驗證（趟 32／33：設定頁關→開兩次無閃退，電源循環後 Windows SDP 成功）。只在測試 loader，日常 boot_a 未改。
+- **狀態**：已實機驗證（趟 32／33：設定頁關→開兩次無閃退，電源循環後 Windows SDP 成功）。11-20 10:01 已併入日常 boot_a（B-013，`--bt-fix 3`，不帶 `--bt-oslog`）。
 - **開關**：ADT `/chosen fuxi,bt-fix`（u32，預設 0）：bit 0 補 H4 傳輸表的 PrepareTerminate；bit 1 讓 bluetoothd 讀到 `SupportsMultipleAdvertising=false`。需要核心 0118 的注入位元 64（bluetoothd）。loader 產生器 `--bt-fix <1..3>`，要求 `--bt-native` 與含 ` bluetoothd gets ` 的核心，並把 `fuxi,inject` 加上 64；不綁 `--bt-oslog`／`--stderr-log`。
 - **問題／現象**：
   - K-077 趟 16 起，設定頁關藍牙時 bluetoothd 必定 SIGSEGV（pc 0，lr 換算 `0x1000f3b50`）。launchd 重啟後開關仍能再打開，但每次關藍牙都重來一輪。
@@ -639,6 +639,5 @@
   - 關藍牙閃退已解決，bit 1 也去掉了 `0xfd48` 的未知命令。
   - 仍待做：
     - Windows 端 BLE 掃描與 GATT 仍找不到手機（修補前就是如此）。
-    - 併入日常 loader 需要另外部署，日常 boot_a 目前未改。
-    - 日常使用時可以考慮關掉 `--bt-oslog`；`--bt-fix` 不需要它。
+    - 日常版已由 B-013 部署（不帶 `--bt-oslog`），但日常版的關→開還沒有在常駐選單進 iOS 後實測。
 - **出處**：K-077 趟 18 第 15028 行（關藍牙閃退初次記錄，趟 16 第 11192 行也有）。

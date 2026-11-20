@@ -64,7 +64,7 @@
 
 <!-- INDEX:BEGIN -->
 
-共 416 項紀錄；目錄涵蓋 349 筆提交、244 份補丁、198 個開關、205 份測試、604 個檔案。
+共 417 項紀錄；目錄涵蓋 350 筆提交、244 份補丁、198 個開關、205 份測試、604 個檔案。
 
 ### S：上游繼承補丁（iOS 16、XNU 27 與 GPU 建置）（117 項）
 
@@ -405,9 +405,9 @@
 | [U-020](items/U-userland.zh-TW.md#u-020-wcn7850-藍牙韌體放進-ios-rootstage-wlan-assets-kindbt) | WCN7850 藍牙韌體放進 iOS root（stage-wlan-assets kind=bt） | 已部署（`/usr/local/share/fuxi/bt/` 50 檔，寫前比對、寫後讀回通過） | manifest 的 `"kind": "bt"`；輸出目錄名必須是 `run-bt-…`（`run-wlan-…` 給 WLAN），名稱與 kind 不符就拒絕。 |
 | [U-021](items/U-userland.zh-TW.md#u-021-從-ios-hal-的-actuator-輸出驅動-hap525) | 從 iOS HAL 的 Actuator 輸出驅動 HAP525 | WSL 建置、主機模型、HFS+ 離線試裝／還原通過。11 月 18 日實機已驗到原生 CoreHaptics、Actuator 與 HAP525 播放。 | loader `--hal-haptics` 寫入 `fuxihalhaptic=1`，搭配 `--haptic 3 --product-haptics`。根映像試驗透過 `launch-loader-check.ps1 -AudioHal enable\|disable -AudioBundle <FuxiAudio.driver> -AudioSha <FuxiAudio SHA-256> -Out <紀錄名>`。 |
 | [U-022](items/U-userland.zh-TW.md#u-022-bluetoothd-os_log-轉錄到-consolefuxibt-oslog) | bluetoothd os_log 轉錄到 console（fuxi,bt-oslog） | 已實機驗證（os_log 趟 2 無 crash，轉錄出 VSC stall 的原因） | ADT `/chosen fuxi,bt-oslog`（u32，預設 0）：bit 0 default／error／fault（每程序最多 4000 行），bit 1 info、bit 2 debug（合計最多 1500 行）。需要核心 0118 的注入位元 64（bluetoothd）及 `sweetnull` 含 bluetoothd；loader 產生器 `--bt-oslog <1..7>`，要求 `--bt-native` 與 `--stderr-log` 含 bluetoothd。 |
-| [U-023](items/U-userland.zh-TW.md#u-023-bluetoothd-相容修補關藍牙閃退與單實例-ble-廣播fuxibt-fix) | bluetoothd 相容修補：關藍牙閃退與單實例 BLE 廣播（fuxi,bt-fix） | 已實機驗證（趟 32／33：設定頁關→開兩次無閃退，電源循環後 Windows SDP 成功）。只在測試 loader，日常 boot_a 未改。 | ADT `/chosen fuxi,bt-fix`（u32，預設 0）：bit 0 補 H4 傳輸表的 PrepareTerminate；bit 1 讓 bluetoothd 讀到 `SupportsMultipleAdvertising=false`。需要核心 0118 的注入位元 64（bluetoothd）。loader 產生器 `--bt-fix <1..3>`，要求 `--bt-native` 與含 ` bluetoothd gets ` 的核心，並把 `fuxi,inject` 加上 64；不綁 `--bt-oslog`／`--stderr-log`。 |
+| [U-023](items/U-userland.zh-TW.md#u-023-bluetoothd-相容修補關藍牙閃退與單實例-ble-廣播fuxibt-fix) | bluetoothd 相容修補：關藍牙閃退與單實例 BLE 廣播（fuxi,bt-fix） | 已實機驗證（趟 32／33：設定頁關→開兩次無閃退，電源循環後 Windows SDP 成功）。11-20 10:01 已併入日常 boot_a（B-013，`--bt-fix 3`，不帶 `--bt-oslog`）。 | ADT `/chosen fuxi,bt-fix`（u32，預設 0）：bit 0 補 H4 傳輸表的 PrepareTerminate；bit 1 讓 bluetoothd 讀到 `SupportsMultipleAdvertising=false`。需要核心 0118 的注入位元 64（bluetoothd）。loader 產生器 `--bt-fix <1..3>`，要求 `--bt-native` 與含 ` bluetoothd gets ` 的核心，並把 `fuxi,inject` 加上 64；不綁 `--bt-oslog`／`--stderr-log`。 |
 
-### B：開機鏈、部署與雙系統選單（12 項）
+### B：開機鏈、部署與雙系統選單（13 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -423,6 +423,7 @@
 | [B-010](items/B-boot.zh-TW.md#b-010-loader-安全核對) | loader 安全核對 | 日常使用中（每次上機前強制核對 iOS 映像 FIEMAP、pin 狀態與 loader ADT extents） | `verify-native-map.py`（無參數）；`verify-loader-safety.py <loader 目錄名>`；`verify-args-on-loader-payload.py <loader 目錄名>`；`check-pin-readonly.c`（`check-pin-readonly <檔案...>`） |
 | [B-011](items/B-boot.zh-TW.md#b-011-a-槽選單顯示倒數10-秒後自動進-android) | a 槽選單顯示倒數，10 秒後自動進 Android | 已寫入 a 槽，Android 自動交接與讀回通過 | dualboot/build.py 的 --timeout 預設 10 秒、0 等待手動選擇、1–60 秒自動倒數。--default 改初始焦點，逾時固定選 Android。 |
 | [B-012](items/B-boot.zh-TW.md#b-012-日常-a-槽整合-wi-fi-修正與前置鏡頭對齊) | 日常 a 槽整合 Wi-Fi 修正與前置鏡頭對齊 | 日常 a 槽已寫入並讀回。10 秒自動進 Android 已在常駐版驗證。 | 從 B-011 保留 10 秒倒數。ADT 採用 `fuxi,sbshape=300103`、`fuxi,wifi-ux=2047`、`fuxi,inject=30`、`fuxi,wifi-sb=3`。 |
+| [B-013](items/B-boot.zh-TW.md#b-013-日常-a-槽整合原生藍牙關藍牙修補與-safari-影片前置) | 日常 a 槽整合原生藍牙、關藍牙修補與 Safari 影片前置 | 日常 a 槽已寫入並讀回，10 秒自動進 Android 在常駐版通過。同一份 iOS payload 已暫時開機到 SpringBoard。常駐選單的 iOS 路徑待使用者手動選擇後驗證。 | 保留 B-012 的倒數、狀態欄高度 103 與 Wi-Fi 開關。新增原生藍牙：`fuxi,bt=5`、`--bt-native`（`sweetnoexec` 不再擋 bluetoothd）、IBS、`bt-optional`、`bt-pad`、`bt-mask`、`bt-txmask`、3.2 Mbaud、`bt-nolog`、控制器身分節點，以及 U-023 的 `fuxi,bt-fix=3`、`fuxiprivs=1`、disp0 `fuxi,mfb-align=1`。`fuxi,inject` 從 30 改為 126。不帶 `fuxi,bt-oslog`、`fuxi,bt-link-log`、點擊腳本或 bluetoothd stderr。 |
 
 ### T：工具、建置與流程（60 項）
 

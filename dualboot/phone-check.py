@@ -182,7 +182,8 @@ def backup_phone(restore, out, state):
 # 常駐選單已寫入 boot_a 後，RAM 試開仍要能跑：接受原廠或這些已驗證安裝讀回的整顆雜湊。
 INSTALLED_BOOT_A_REPORTS = ("persistent-slot-a-20261118", "persistent-slot-a-upgrade-launching-20261118",
                             "persistent-slot-a-upgrade-countdown-20261118",
-                            "persistent-slot-a-upgrade-wifi-sb103-20261118")
+                            "persistent-slot-a-upgrade-wifi-sb103-20261118",
+                            "persistent-slot-a-upgrade-daily-bt-20261120")
 
 
 def installed_boot_a_shas():

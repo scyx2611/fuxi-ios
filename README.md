@@ -86,7 +86,7 @@
 | Wi-Fi 掃描 | 可掃描，仍偏慢 | 00:31 那趟：2.4 GHz 13 頻道約 **0.94 秒**、5 GHz 27 頻道約 **7.20 秒**、全頻約 **16.11 秒**；結果取回約 1–7 ms。不同掃描範圍分開比較。[E1](docs/status-20261118.zh-TW.md#e1) [E14](docs/status-20261118.zh-TW.md#e14) |
 | Wi-Fi 吞吐量 | 可傳輸，效能未達目標 | 使用者先前實測約 **100 Mbps**，後續確認有提升但未提供新數值，仍未達對照手機約 300 Mbps；AP 選擇器的 648–720 Mbps 是估計值，不能當實際網速。[E14](docs/status-20261118.zh-TW.md#e14) |
 | Wi-Fi 開關／重連 | 可切換，仍有偶發失敗 | 最新回退趟底層關閉 **2 ms**、開啟 **18 ms**；先出現一次 join=80，後續成功加入 5200 MHz。底層耗時不等於 UI 操作延遲。[E2](docs/status-20261118.zh-TW.md#e2) |
-| 藍牙 | 耳機可用；關閉藍牙不再閃退（測試開機） | 原廠 `bluetoothd` 直接驅動 QCA 控制器（SoC **0x40170200**）。UART 升到 **3.2 Mbaud** 後韌體載入約 **1.4 秒**，Apple 耳機 A2DP（AAC-ELD 48 kHz）播放正常，使用者已確認；耳機出盒會自動回連並完成加密。從設定頁配對 iPhone 不成功：對端沒開個人熱點時沒有可連的傳統藍牙服務（NAP `ServiceAvailability=0`），這是原生行為。關閉藍牙的閃退已修正：`bluetoothd` 的 H4 傳輸表少一個終止函式，由注入的 `libfuxi-sb.dylib` 在 ADT `fuxi,bt-fix` 開啟時補上；設定頁關→開兩趟皆未閃退，關開後電腦端 SDP 仍查得到 5 項服務。目前只在測試開機，日常開機尚未換上。[U-023](records/items/U-userland.zh-TW.md) · [2026-11-19／20 趟次](records/journal/hw000-runs.zh-TW.md) |
+| 藍牙 | 耳機可用；關閉藍牙不再閃退；已進日常開機 | 原廠 `bluetoothd` 直接驅動 QCA 控制器（SoC **0x40170200**）。UART 升到 **3.2 Mbaud** 後韌體載入約 **1.4 秒**，Apple 耳機 A2DP（AAC-ELD 48 kHz）播放正常，使用者已確認；耳機出盒會自動回連並完成加密。從設定頁配對 iPhone 不成功：對端沒開個人熱點時沒有可連的傳統藍牙服務（NAP `ServiceAvailability=0`），這是原生行為。關閉藍牙的閃退已修正：`bluetoothd` 的 H4 傳輸表少一個終止函式，由注入的 `libfuxi-sb.dylib` 在 ADT `fuxi,bt-fix` 開啟時補上；設定頁關→開兩趟皆未閃退，關開後電腦端 SDP 仍查得到 5 項服務。2026-11-20 起日常 boot_a 已帶原生藍牙與這個修補（[B-013](records/items/B-boot.zh-TW.md)）；同一份 iOS payload 暫時開機時藍牙就緒、`bluetoothd` 未閃退，常駐選單進 iOS 後的日常實測待做。[U-023](records/items/U-userland.zh-TW.md) · [2026-11-19／20 趟次](records/journal/hw000-runs.zh-TW.md) |
 | 行動網路 | 尚未驗收 | 沒有通話、SMS 或 4G／5G 數據連線通過紀錄。[E15](docs/status-20261118.zh-TW.md#e15) |
 | 個人熱點 | 尚未驗收 | Wi-Fi station 連線成功不代表 AP／網路分享功能可用。[E15](docs/status-20261118.zh-TW.md#e15) |
 
@@ -109,7 +109,7 @@
 | 影片硬體解碼 | 尚未驗收 | 尚無 Iris VPU／VideoToolbox 硬解播放通過紀錄。[E15](docs/status-20261118.zh-TW.md#e15) |
 | 日期與時間 | 校時與台北時區已有驗證 | ADT RTC offset 已生效，UI 曾確認顯示台北時間；完全斷電或 RTC 重設後需重新校準，長期走時未驗收。[E11](docs/status-20261118.zh-TW.md#e11) |
 | 第三方 App | 已有安裝及啟動案例 | 酷安 **16.2.5** 重簽 **28 個 Mach-O** 後可執行；登入與所有 app group 功能未驗收，不能推定所有 IPA 相容。[E14](docs/status-20261118.zh-TW.md#e14) |
-| 雙系統圖形選單 | 已常駐 boot_a | boot_a 為 `menu-launching-20261118`，安裝後 Android、iOS、Recovery 三條路徑都已實機驗證；開 iOS＝重開後在選單選 iOS。其他選項的 Fastboot／重新啟動／關機、完全關機後冷開機、ABL 重試與回退**尚未驗收**；b 槽選 Android 仍會循環。[E13](docs/status-20261118.zh-TW.md#e13) |
+| 雙系統圖形選單 | 已常駐 boot_a | 2026-11-20 起 boot_a 為 `menu-daily-bt-20261120`（10 秒無按鍵自動進 Android，按音量鍵可選 iOS），寫入讀回與 Android 回程已驗，這版的 iOS 路徑待手動驗證。更早的 `menu-launching-20261118` 已驗過 Android、iOS、Recovery 三條路徑；開 iOS＝重開後在選單選 iOS。其他選項的 Fastboot／重新啟動／關機、完全關機後冷開機、ABL 重試與回退**尚未驗收**；b 槽選 Android 仍會循環。[E13](docs/status-20261118.zh-TW.md#e13) |
 
 ### 開發工具
 

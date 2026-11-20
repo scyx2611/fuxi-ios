@@ -1,5 +1,7 @@
 # 小米 13 雙系統引導選單
 
+2026-11-20 10:01 起，日常 a 槽使用 `menu-daily-bt-20261120`。這版在 B-012 的前置鏡頭對齊與 Wi-Fi 修正之外，加入原生藍牙、關藍牙閃退修補（U-023）與 Safari 非 DRM 影片前置（`fuxi,mfb-align`）。常駐選單的 iOS 路徑待手動驗證；前一版 `menu-daily-wifi-sb103-20261118` 的回退映像在 `work/dualboot/persistent-slot-a-upgrade-daily-bt-20261120/`。
+
 2026-11-18 15:42 起，日常 a 槽使用 `menu-daily-wifi-sb103-20261118`，已整合前置鏡頭對齊及 Wi-Fi 修正。選單顯示倒數，10 秒內無按鍵即自動進 Android。按音量鍵可取消倒數、移動焦點，再短按電源鍵確認。 [安裝驗證](VALIDATION.zh-TW.md)
 
 2026-11-18 04:45：**KSU 模組「雙系統選單」已移除**。boot_a 常駐選單後，一般重開就會進選單，開 iOS＝重開後選 iOS；模組只剩重開按鈕。移除前已封存（`D:\xiaomi13\fuxi_Backup\ksu-module-remove-ksu-module-20261118\`），原本的 iOS 根映像檢查改由電腦端工具執行。boot_b 已換成同一份選單（`chain-v9-dualboot-launching`）只當備援；b 槽選 Android 會循環，不要切到 b 槽。細節見 `VALIDATION.zh-TW.md` 開頭。
@@ -12,7 +14,7 @@
 
 音量上／下移動焦點；短按電源鍵直接啟動焦點所在的 Android／iOS，或進入其他選項。沒有額外啟動按鈕。焦點以粗白框與箭頭表示。開機時尚未放開的按鍵、接點彈跳和組合鍵不會誤觸啟動；短按電源在放開後執行，不改變 PMIC 原有的長按重置設定。
 
-目前常駐版本及預覽位於 `work/dualboot/menu-daily-wifi-sb103-20261118/`。
+目前常駐版本及預覽位於 `work/dualboot/menu-daily-bt-20261120/`。
 
 預設選擇 Android 並倒數 10 秒。建置時可用 `--timeout` 指定 1–60 秒，或以 `--timeout 0` 等待手動選擇。任何實體按鍵都會取消當次倒數。`--default ios` 只改初始焦點，倒數到期仍啟動 Android。
 

@@ -489,7 +489,15 @@ def inspect(args):
     layout.configure_ram('9g')
     sku_metadata = layout.validate_live(args.live_fdt, True, args.ram_sku)
     mapping = verify_map(json.loads(args.map_record.read_text(encoding='utf-8')), chosen)
-    built = arguments(payload[72:680].split(b'\0', 1)[0].decode('ascii'), args.bdf, args.mlo,
+    source_line = payload[72:680].split(b'\0', 1)[0].decode('ascii')
+    replaced = None
+    if args.bt_native:
+        require(args.bt == 5 and not args.bt_probe, '--bt-native needs --bt 5 without the SpringBoard probe')
+        # 先從來源拿掉 bluetoothd 的 sweetnoexec，再組命令列，arguments() 的 607 bytes 檢查才會量到最後的命令列。
+        # 2026-11-20 日常藍牙版（daily-tuning＋privs）原本先檢查後刪 11 bytes，615 被誤擋，實際是 604。
+        # token 順序與舊流程相同：arguments() 保留來源順序，舊流程也是原地改寫同一個 token。
+        source_line, replaced = native_bluetooth_arguments(source_line)
+    built = arguments(source_line, args.bdf, args.mlo,
                       args.host_cap_secondary, args.omit_nm_modem, args.sleep_clock, args.big_mem, args.cnss_pdc,
                       args.errdec, args.native_ath12k, args.wifi_ios, args.wifi_self_test,
                       args.tap_script, args.tap_delay, args.wifi_join_test,
@@ -498,9 +506,7 @@ def inspect(args):
                       args.wifi_trace, args.scan_batch, args.stderr_log, args.privs,
                       daily_tuning=args.daily_tuning, wifi_args_adt=args.wifi_args_adt)
     line, removed = built[:2]
-    if args.bt_native:
-        require(args.bt == 5 and not args.bt_probe, '--bt-native needs --bt 5 without the SpringBoard probe')
-        line, replaced = native_bluetooth_arguments(line)
+    if replaced is not None:
         removed.append(replaced)
     require(not any(arg.startswith('fuxihalhaptic=') for arg in line.split()),
             'inherited fuxihalhaptic is not allowed')
