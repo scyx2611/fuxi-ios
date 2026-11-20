@@ -34,14 +34,14 @@
 | 項目 | 現狀 | 查驗數據與限制 |
 | --- | --- | --- |
 | 系統啟動 | 可進入 iOS 桌面 | iOS 16.7.16／XNU 8796.141.3；近期本機 9g 核心可進 SpringBoard。[E1](docs/status-20261118.zh-TW.md#e1) |
-| 螢幕顯示 | 全寬填滿已進日常 | 1125×2436 的 iOS 畫面縮到 1080×2400。鍵盤兩側完整、邊緣點按正常；填滿模式下垂直比例比水平約大 2.6%。[全寬顯示實測](records/items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
+| 螢幕顯示 | 等比全螢幕已進日常 | iOS 按 1125×2500 排版，寬高同乘 0.96，填滿 1080×2400 面板。實機驗收鍵盤兩端完整、邊緣點按及滑動正常。 [顯示驗證](records/items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
 | 螢幕更新時序 | 120 Hz 模式已啟用 | 最新已查驗開機的 TE 為 **120.7–120.9 Hz**；面板時序與實際 shown-FPS 分開記錄。[查驗結果](docs/cpu-gpu-final-20261118.zh-TW.md) |
 | 觸控 | 可點擊、滑動 | 同趟記錄 **245 次 down／245 次 up、241 段完成接觸**；這些是驅動紀錄，不是每次 UIKit 操作成功率。[E1](docs/status-20261118.zh-TW.md#e1) |
 | 觸控採樣／回報率 | **實測典型回報約 120 Hz** | 99 段較長單指接觸的回報間隔中位數 **8.333 ms**；驅動接觸時輪詢 **4 ms＝250 Hz**、閒置時 **8 ms＝125 Hz**。硬體內部掃描率尚無獨立量測。[E1](docs/status-20261118.zh-TW.md#e1) |
 | 多點觸控 | 已有雙指回報 | 同趟最大同時接觸數 **2**；程式上限 10 指，尚未據此宣稱十指手勢通過。[E1](docs/status-20261118.zh-TW.md#e1) |
 | 實體按鍵 | 電源鍵事件可讀 | 電源／音量鍵驅動輪詢 **20 ms＝50 Hz**；最新回退趟可見電源按下／放開及螢幕背光切換，音量完整操作另待驗收。[E2](docs/status-20261118.zh-TW.md#e2) |
 | 螢幕亮度 | 背光控制路徑已接通 | 連拉 8 次滑桿的歷史測試中，brightness 請求序號達 **3584**，該 console 未見 no clean completion；持續使用時的實際面板亮度仍需人眼驗收。[E10](docs/status-20261118.zh-TW.md#e10) |
-| 狀態欄 | 已依前鏡頭校正 | 填滿模式使用 360×86 的中央避讓區。實機截圖中時間與右側圖示中心均為 y=63 px，使用者已確認高度與兩側間距。[日常版驗證](records/items/B-boot.zh-TW.md#b-014-日常版全寬填滿與前鏡頭狀態欄間距) |
+| 狀態欄 | 已依前鏡頭校正 | 等比版沿用 360×86 的中央避讓區。實機截圖中，時間與右側圖示中心分別位於 (198.5, 61.5) 和 (908, 61.5) px。 [日常版驗證](records/items/B-boot.zh-TW.md#b-015-以面板比例排版的日常版) |
 
 ### CPU 調度與頻率
 
@@ -109,7 +109,7 @@
 | 影片硬體解碼 | 尚未驗收 | 尚無 Iris VPU／VideoToolbox 硬解播放通過紀錄。[E15](docs/status-20261118.zh-TW.md#e15) |
 | 日期與時間 | 校時與台北時區已有驗證 | ADT RTC offset 已生效，UI 曾確認顯示台北時間；完全斷電或 RTC 重設後需重新校準，長期走時未驗收。[E11](docs/status-20261118.zh-TW.md#e11) |
 | 第三方 App | 已有安裝及啟動案例 | 酷安 **16.2.5** 重簽 **28 個 Mach-O** 後可執行；登入與所有 app group 功能未驗收，不能推定所有 IPA 相容。[E14](docs/status-20261118.zh-TW.md#e14) |
-| 雙系統圖形選單 | 已常駐 boot_a | 2026-11-20 12:21 更新為 `menu-daily-fit-20261120`（10 秒無按鍵自動進 Android，按音量鍵可選 iOS），整個 boot_a 寫後讀回與 Android 回程已驗，同一 iOS payload 已從 RAM 開進 SpringBoard。更早的 `menu-launching-20261118` 已驗過 Android、iOS、Recovery 三條路徑；開 iOS＝重開後在選單選 iOS。其他選項的 Fastboot／重新啟動／關機、完全關機後冷開機、ABL 重試與回退**尚未驗收**；b 槽選 Android 仍會循環。[E13](docs/status-20261118.zh-TW.md#e13) |
+| 雙系統圖形選單 | 已常駐 boot_a | 2026-11-20 12:59 更新為 `menu-daily-aspect-20261120`（10 秒無按鍵自動進 Android，按音量鍵可選 iOS），整個 boot_a 寫後讀回與 Android 回程已驗，同一 iOS payload 已從 RAM 開進 SpringBoard。更早的 `menu-launching-20261118` 已驗過 Android、iOS、Recovery 三條路徑；開 iOS＝重開後在選單選 iOS。其他選項的 Fastboot／重新啟動／關機、完全關機後冷開機、ABL 重試與回退**尚未驗收**；b 槽選 Android 仍會循環。[B-015](records/items/B-boot.zh-TW.md#b-015-以面板比例排版的日常版) · [E13](docs/status-20261118.zh-TW.md#e13) |
 
 ### 開發工具
 

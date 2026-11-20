@@ -565,7 +565,7 @@ static uint64_t fg_dpu_page_pa(uintptr_t va)
 }
 static void fg_dpu_clean(uintptr_t va, unsigned bytes) { CleanPoC_DcacheRegion_Force(va, bytes); }
 static int fg_abi_live_for_scanout(void);
-/* /chosen fuxi,fit：只接受 1（等比）或 2（填滿）；缺少、長度不是 4 或其他值都當 0（原本的置中裁切）。
+/* /chosen fuxi,fit：1（等比）、2（填滿）、3（等比全螢幕）；缺少、長度不是 4 或其他值都當 0（原本的置中裁切）。
  * 第一次呼叫讀 ADT 後快取；SweetFramebuffer 啟動時就會先讀一次。 */
 static unsigned fg_fit_cached = ~0u;
 unsigned fuxi_display_fit(void)
@@ -578,7 +578,7 @@ unsigned fuxi_display_fit(void)
      SecureDTGetProperty(chosen, "fuxi,fit", &prop, &bytes) == kSuccess && prop && bytes == 4) {
   const uint8_t *p = (const uint8_t *)prop;
   unsigned v = p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
-  if (v == 1 || v == 2) fit = v;
+  if (v >= 1 && v <= 3) fit = v;
  }
  __atomic_store_n(&fg_fit_cached, fit, __ATOMIC_RELEASE);
  return fit;
@@ -796,16 +796,16 @@ static void fg_rect(unsigned src, unsigned dst, unsigned pitch,
  * 奇偶兩趟彼此差 0.05 列以內（tools/test-fuxi-adreno.py）。
  * 參考：mesa a6xx.xml 的 TPL1_A2D_SRC_TEXTURE_INFO FILTER（bit 16）；Turnip tu6_blit_image 的
  * r2d 縮放路徑同樣用整數座標、SRC／DEST 的 BR 都是起點+寬-1。實機取樣規則由 fg_fit_probe 核對。 */
-static void fg_rect_fit(unsigned src, unsigned dst, unsigned pitch, unsigned top, unsigned rows)
+static void fg_rect_fit(unsigned src, unsigned dst, unsigned pitch, unsigned top, unsigned rows, unsigned source_h)
 {
  unsigned sx = (src & 63)/4, dx = (dst & 63)/4;
  g3_emit(g4_pkt4(G4_SP_SRC_INFO, 5));
- g3_emit(0x00500430u | 1u<<16); g3_emit((FUXI_FIT_SRC_W+sx) | FUXI_FIT_SRC_H<<15);
+ g3_emit(0x00500430u | 1u<<16); g3_emit((FUXI_FIT_SRC_W+sx) | source_h<<15);
  g3_emit(src & ~63u); g3_emit(0); g3_emit((pitch/64) << 9);
  g3_emit(g4_pkt4(G4_RB_DST_INFO, 4));
  g3_emit(0x430); g3_emit(dst & ~63u); g3_emit(0); g3_emit(4320*2/64);
  g3_emit(g4_pkt4(G4_GRAS_SRC_X, 6));
- g3_emit(sx<<8); g3_emit((sx+FUXI_FIT_SRC_W-1)<<8); g3_emit(top<<8); g3_emit((top+FUXI_FIT_SRC_H-2)<<8);
+ g3_emit(sx<<8); g3_emit((sx+FUXI_FIT_SRC_W-1)<<8); g3_emit(top<<8); g3_emit((top+source_h-2)<<8);
  g3_emit(dx); g3_emit((dx+1079) | (rows-1)<<16);
  g4_event(63); g3_emit(g3_pkt7(0x2c, 1)); g3_emit(3); g4_wfi();
 }
@@ -931,7 +931,7 @@ int fuxi_gpu_copy(unsigned slot, uint64_t generation, uintptr_t source, uint64_t
  unsigned fit = fuxi_display_fit();
  if (fit) {
   /* 等比／填滿：只接 CA 的整張 1125x2436 邏輯畫面（來源 pitch 64 對齊）；局部或其他尺寸交回 CPU 最近鄰退路。 */
-  if (dx || dy || width != FUXI_FIT_SRC_W || height != FUXI_FIT_SRC_H ||
+  if (dx || dy || width != FUXI_FIT_SRC_W || height != fuxi_fit_source_h(fit) ||
       (source & 3) || (pitch & 63) || pitch > 131008 || ((uint64_t)sx+width)*4 > pitch ||
       length+(source&4095) > FG_SOURCE_BYTES ||
       ((uint64_t)sy+height-1)*pitch+((uint64_t)sx+width)*4 > length) { fg_fit_refused++; return 0; }
@@ -988,10 +988,10 @@ int fuxi_gpu_copy(unsigned slot, uint64_t generation, uintptr_t source, uint64_t
   for (unsigned k = 0; k < 2; k++)
    fg_rect_fit((inl ? FG_INL_SRC_VA : FG_SOURCE_VA)+slot*FG_SOURCE_BYTES+(source&4095)+sy*pitch+sx*4,
        (inl ? FG_INL_FB_VA : G4_FB_VA)+(fg_scanout_double_active ? fg_scanout_copy*0xa00000u : 0)+(fuxi_fit_y0(fit)+k)*4320,
-       pitch, k, fuxi_fit_h(fit)/2);
+       pitch, k, fuxi_fit_h(fit)/2, height);
   if (!(++fg_fit_frames % 600) || fg_fit_frames == 1)
-   printf("FUXI GPU FIT: mode %u frames %u refused %u (bilinear 1125x2436 -> 1080x%u at y %u, two passes)\n",
-       fit, fg_fit_frames, fg_fit_refused, fuxi_fit_h(fit), fuxi_fit_y0(fit));
+   printf("FUXI GPU FIT: mode %u frames %u refused %u (bilinear 1125x%u -> 1080x%u at y %u, two passes)\n",
+       fit, fg_fit_frames, fg_fit_refused, height, fuxi_fit_h(fit), fuxi_fit_y0(fit));
  } else
  for (unsigned y = 0; y < stride && y < height; y++)
   fg_rect((inl ? FG_INL_SRC_VA : FG_SOURCE_VA)+slot*FG_SOURCE_BYTES+(source&4095)+(sy+y)*pitch+sx*4,

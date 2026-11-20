@@ -184,7 +184,8 @@ INSTALLED_BOOT_A_REPORTS = ("persistent-slot-a-20261118", "persistent-slot-a-upg
                             "persistent-slot-a-upgrade-countdown-20261118",
                             "persistent-slot-a-upgrade-wifi-sb103-20261118",
                             "persistent-slot-a-upgrade-daily-bt-20261120",
-                            "persistent-slot-a-upgrade-daily-fit-20261120")
+                            "persistent-slot-a-upgrade-daily-fit-20261120",
+                            "persistent-slot-a-upgrade-daily-aspect-20261120")
 
 
 def installed_boot_a_shas():

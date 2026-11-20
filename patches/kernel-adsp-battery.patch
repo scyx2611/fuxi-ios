@@ -8649,7 +8649,7 @@ index 0000000..df484bd
 +    patch.write_text(expected, encoding='utf-8', newline='\n')
 +print('PASS: fuxi-wlan canonical source matches 0099')
 diff --git a/tools/test-fuxi-adreno.py b/tools/test-fuxi-adreno.py
-index 90bcefa..7555a3c 100644
+index 90bcefa..4bea548 100644
 --- a/tools/test-fuxi-adreno.py
 +++ b/tools/test-fuxi-adreno.py
 @@ -35,10 +35,18 @@ static unsigned fg_abi_present_wait, fg_client_busy, fg_scanout_owned, fg_scanou
@@ -8664,7 +8664,7 @@ index 90bcefa..7555a3c 100644
 +/* /chosen fuxi,fit 的主機模型：fit_model 就是 ADT 值。 */
 +static unsigned fit_model; static unsigned fuxi_display_fit(void) {return fit_model;}
 +#define FUXI_FIT_SRC_W 1125u
-+#define FUXI_FIT_SRC_H 2436u
++static inline unsigned fuxi_fit_source_h(unsigned fit) { return fit == 3 ? 2500u : 2436u; }
 +static inline unsigned fuxi_fit_y0(unsigned fit) { return fit == 1 ? 31u : 0u; }
 +static inline unsigned fuxi_fit_h(unsigned fit) { return fit == 1 ? 2338u : 2400u; }
 +static uint32_t fg_fit_frames, fg_fit_refused;
@@ -8710,47 +8710,49 @@ index 90bcefa..7555a3c 100644
      assert(br && n==1 && a[0]==3 && regs[G4_SP_SRC_INFO]==0x500430);
      assert(regs[G4_RB_BLIT]==0x10f03000 && regs[G4_GRAS_BLIT]==0x10f03000);
      unsigned sx=regs[0x8401]>>8, ex=regs[0x8402]>>8;
-@@ -459,6 +497,39 @@ int main(void)
+@@ -459,6 +497,41 @@ int main(void)
   assert(clean_bytes==4352ULL*2400);
   clean_bytes=0; fg_clean((uintptr_t)source_buf,4352,17,3,10,10);
   assert(clean_bytes==640);
 + /* /chosen fuxi,fit：CA 的整張 1125x2436（pitch 4608）兩趟雙線性縮進面板。來源是水平／垂直漸層，
 +  * 輸出要接近理想中心對應 ((p+0.5)*src/dst-0.5) 的漸層值；畫面外列不動、畫面每點剛好寫一次。 */
-+ for(unsigned fit=1;fit<=2;fit++) {
++ for(unsigned fit=1;fit<=3;fit++) {
 +  reset(); fit_model=fit; fg_fit_frames=fg_fit_refused=0;
++  unsigned logical_h = fit == 3 ? 2500 : 2436;
++  if (fit == 3) assert(1125u * 2400 == logical_h * 1080u);
 +  unsigned fp=4608, H=fit==1?2338:2400, Y0=fit==1?31:0;
-+  for(unsigned y=0;y<2436;y++) for(unsigned x=0;x<1152;x++) {
-+   uint32_t px=0xff000000u|(y*255/2435)<<8|(x<1125 ? x*255/1124 : 0x5a)|0x40u<<16;
++  for(unsigned y=0;y<logical_h;y++) for(unsigned x=0;x<1152;x++) {
++   uint32_t px=0xff000000u|(y*255/(logical_h-1))<<8|(x<1125 ? x*255/1124 : 0x5a)|0x40u<<16;
 +   memcpy(source_buf+y*fp+x*4,&px,4);
 +  }
-+  page_fixture(0,fp,0,0,1125,2436);
-+  assert(fuxi_gpu_map(0,7,(uintptr_t)source_buf,2436*fp,&times)==1);
++  page_fixture(0,fp,0,0,1125,logical_h);
++  assert(fuxi_gpu_map(0,7,(uintptr_t)source_buf,logical_h*fp,&times)==1);
 +  /* 局部、未對齊 pitch、非整張都拒絕，交回 CPU。 */
-+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,0,1080,2400,&times) && fg_fit_refused==1);
-+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*4520,4520,0,0,0,0,1125,2436,&times) && fg_fit_refused==2);
-+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,1,1125,2436,&times) && fg_fit_refused==3 && !doorbells);
-+  assert(model_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,0,1125,2436,&times)==1);
++  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,logical_h*fp,fp,0,0,0,0,1080,2400,&times) && fg_fit_refused==1);
++  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,logical_h*4520,4520,0,0,0,0,1125,logical_h,&times) && fg_fit_refused==2);
++  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,logical_h*fp,fp,0,0,0,1,1125,logical_h,&times) && fg_fit_refused==3 && !doorbells);
++  assert(model_copy(0,7,(uintptr_t)source_buf,logical_h*fp,fp,0,0,0,0,1125,logical_h,&times)==1);
 +  assert(doorbells==1 && fg_cp_rects==2 && fg_fit_frames==1);
 +  double worst_u=0, worst_v=0;
 +  for(unsigned y=0;y<2400;y++) for(unsigned x=0;x<1080;x++) {
 +   uint32_t got; memcpy(&got,panel+y*4320+x*4,4);
 +   if(y<Y0 || y>=Y0+H) { assert(got==0x6b6b6b6bu); continue; }
 +   assert((got>>24)==0xff && ((got>>16)&255)==0x40); /* 寫過、恰好一次（總數＝畫面像素數） */
-+   double u=(x+0.5)*1125.0/1080-0.5, v=(y-Y0+0.5)*2436.0/H-0.5;
-+   double du=(got&255)-u*255/1124, dv=((got>>8)&255)-v*255/2435;
++   double u=(x+0.5)*1125.0/1080-0.5, v=(y-Y0+0.5)*(double)logical_h/H-0.5;
++   double du=(got&255)-u*255/1124, dv=((got>>8)&255)-v*255/(logical_h-1);
 +   if(du<0)du=-du; if(dv<0)dv=-dv;
 +   if(du>worst_u)worst_u=du; if(dv>worst_v)worst_v=dv;
 +  }
 +  assert(worst_u<1.6 && worst_v<1.6);
 +  for(unsigned i=0;i<64;i++) assert(panel[4320*2400+i]==0x6b);
 +  assert(fuxi_gpu_unmap(0,&times));
-+  printf("PASS: fit %u two-pass bilinear 1125x2436 -> 1080x%u at y %u, taps inside the picture, gradient error u %.2f v %.2f LSB\n",fit,H,Y0,worst_u,worst_v);
++  printf("PASS: fit %u two-pass bilinear 1125x%u -> 1080x%u at y %u, taps inside the picture, gradient error u %.2f v %.2f LSB\n",fit,logical_h,H,Y0,worst_u,worst_v);
 + }
 + fit_model=0;
   printf("PASS: %u pixel-exact copies, cropped phases, noncontiguous 16K/4K mappings, full panel, hot cache, blocks/hints, exact clean ranges, one submit/frame, %u wraps, async busy/deadline/quarantine\n",checks,wrap_count);
   free(source_buf);free(panel);return 0;
  }
-@@ -486,7 +557,7 @@ def main():
+@@ -486,7 +559,7 @@ def main():
              assert a + n <= b or b + m <= a, 'overlapping platform mappings'
      functions = ''.join(function(probe, n) for n in ('g3_parity', 'g3_pkt7', 'g4_pkt4', 'g4_reg', 'g4_event', 'g4_wfi', 'g4_setup', 'g4_end'))
      functions += function((ROOT / 'xnu/fuxi-adreno/fuxi_gpu_scanout.inc').read_text(), 'fg_scanout_target')
@@ -17795,7 +17797,7 @@ index 0000000..d1f81f9
 +                    '-I' + str(root / 'xnu/fuxi-inject'), str(cfile), '-o', str(binary)], check=True)
 +    subprocess.run([str(binary)], check=True)
 diff --git a/tools/test-fuxi-gpu-scanout.py b/tools/test-fuxi-gpu-scanout.py
-index 411992c..7739bf7 100644
+index 411992c..1c721f2 100644
 --- a/tools/test-fuxi-gpu-scanout.py
 +++ b/tools/test-fuxi-gpu-scanout.py
 @@ -23,6 +23,12 @@ def module(name, path):
@@ -17803,7 +17805,7 @@ index 411992c..7739bf7 100644
  
  PREFIX = r'''
 +#define FUXI_FIT_SRC_W 1125u
-+#define FUXI_FIT_SRC_H 2436u
++static inline unsigned fuxi_fit_source_h(unsigned fit) { return fit == 3 ? 2500u : 2436u; }
 +static unsigned fitMode;
 +static unsigned fuxi_display_fit(void) {return fitMode;}
 +static unsigned fuxi_fit_y0(unsigned fit) {return fit==1?31u:0u;}
@@ -21836,7 +21838,7 @@ index 0000000..bb75103
 +if __name__ == '__main__':
 +    main()
 diff --git a/tools/test-fuxi-touch.py b/tools/test-fuxi-touch.py
-index 865e756..b6516e3 100644
+index 865e756..68a29aa 100644
 --- a/tools/test-fuxi-touch.py
 +++ b/tools/test-fuxi-touch.py
 @@ -16,7 +16,7 @@ SRC = ROOT / 'xnu/fuxi-h1'
@@ -21848,7 +21850,7 @@ index 865e756..b6516e3 100644
                        re.escape(name) + r'\([^;]*?\)\n\{', source, re.M)
      assert match, name
      depth, end = 1, match.end()
-@@ -325,8 +325,45 @@ static void randomized_sets() {
+@@ -325,8 +325,46 @@ static void randomized_sets() {
   ft_report(0);if(previous)check(0,previous);
   puts("PASS: 2,000 randomized full contact sets, ID uniqueness, masks, lifts and bounded coordinates");
  }
@@ -21866,10 +21868,11 @@ index 865e756..b6516e3 100644
 + assert(sweet_touch_at_edge(540,5,0,-31,1080,2338) && sweet_touch_at_edge(540,2395,0,-31,1080,2338));
 + assert(sweet_touch_at_edge(47,1200,0,-31,1080,2338) && !sweet_touch_at_edge(48,1200,0,-31,1080,2338) && sweet_touch_at_edge(1079-47,1200,0,-31,1080,2338));
 + // 觸控對應的邏輯座標與畫面取樣位置（GPU 兩趟雙線性：v=(row+0.5)*2435/H+0.5）相差不到 1.6 個邏輯像素。
-+ for(int mode=1;mode<=2;mode++){
++ for(int mode=1;mode<=3;mode++){
++  int logical_h=mode==3?2500:2436;
 +  int h=mode==1?2338:2400, y0=mode==1?31:0;
 +  for(int y=y0;y<y0+h;y++){
-+   double ly=sweet_touch_axis(y,-y0,h)/65536.0*2436, v=(y-y0+0.5)*2435.0/h+0.5;
++   double ly=sweet_touch_axis(y,-y0,h)/65536.0*logical_h, v=(y-y0+0.5)*(logical_h-1)/h+0.5;
 +   assert(ly>v-1.6 && ly<v+1.6);
 +  }
 +  for(int x=0;x<1080;x++){
@@ -21895,7 +21898,7 @@ index 865e756..b6516e3 100644
   assert(!live && !lock_depth);
  }
  '''
-@@ -381,10 +418,12 @@ def main():
+@@ -381,10 +419,12 @@ def main():
      touch = (SRC / 'fuxi_touch.c').read_text()
      state = touch[touch.index('static struct {'):touch.index('} ft;') + len('} ft;')]
      methods = ''.join(function(hid, name) for name in (
@@ -25276,14 +25279,14 @@ index 0000000..dde4495
 +if __name__ == '__main__':
 +    main()
 diff --git a/xnu/fuxi-adreno/fuxi_adreno.c b/xnu/fuxi-adreno/fuxi_adreno.c
-index 68c788b..0ecca59 100644
+index 68c788b..7891671 100644
 --- a/xnu/fuxi-adreno/fuxi_adreno.c
 +++ b/xnu/fuxi-adreno/fuxi_adreno.c
 @@ -565,6 +565,25 @@ static uint64_t fg_dpu_page_pa(uintptr_t va)
  }
  static void fg_dpu_clean(uintptr_t va, unsigned bytes) { CleanPoC_DcacheRegion_Force(va, bytes); }
  static int fg_abi_live_for_scanout(void);
-+/* /chosen fuxi,fit：只接受 1（等比）或 2（填滿）；缺少、長度不是 4 或其他值都當 0（原本的置中裁切）。
++/* /chosen fuxi,fit：1（等比）、2（填滿）、3（等比全螢幕）；缺少、長度不是 4 或其他值都當 0（原本的置中裁切）。
 + * 第一次呼叫讀 ADT 後快取；SweetFramebuffer 啟動時就會先讀一次。 */
 +static unsigned fg_fit_cached = ~0u;
 +unsigned fuxi_display_fit(void)
@@ -25296,7 +25299,7 @@ index 68c788b..0ecca59 100644
 +     SecureDTGetProperty(chosen, "fuxi,fit", &prop, &bytes) == kSuccess && prop && bytes == 4) {
 +  const uint8_t *p = (const uint8_t *)prop;
 +  unsigned v = p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
-+  if (v == 1 || v == 2) fit = v;
++  if (v >= 1 && v <= 3) fit = v;
 + }
 + __atomic_store_n(&fg_fit_cached, fit, __ATOMIC_RELEASE);
 + return fit;
@@ -25316,16 +25319,16 @@ index 68c788b..0ecca59 100644
 + * 奇偶兩趟彼此差 0.05 列以內（tools/test-fuxi-adreno.py）。
 + * 參考：mesa a6xx.xml 的 TPL1_A2D_SRC_TEXTURE_INFO FILTER（bit 16）；Turnip tu6_blit_image 的
 + * r2d 縮放路徑同樣用整數座標、SRC／DEST 的 BR 都是起點+寬-1。實機取樣規則由 fg_fit_probe 核對。 */
-+static void fg_rect_fit(unsigned src, unsigned dst, unsigned pitch, unsigned top, unsigned rows)
++static void fg_rect_fit(unsigned src, unsigned dst, unsigned pitch, unsigned top, unsigned rows, unsigned source_h)
 +{
 + unsigned sx = (src & 63)/4, dx = (dst & 63)/4;
 + g3_emit(g4_pkt4(G4_SP_SRC_INFO, 5));
-+ g3_emit(0x00500430u | 1u<<16); g3_emit((FUXI_FIT_SRC_W+sx) | FUXI_FIT_SRC_H<<15);
++ g3_emit(0x00500430u | 1u<<16); g3_emit((FUXI_FIT_SRC_W+sx) | source_h<<15);
 + g3_emit(src & ~63u); g3_emit(0); g3_emit((pitch/64) << 9);
 + g3_emit(g4_pkt4(G4_RB_DST_INFO, 4));
 + g3_emit(0x430); g3_emit(dst & ~63u); g3_emit(0); g3_emit(4320*2/64);
 + g3_emit(g4_pkt4(G4_GRAS_SRC_X, 6));
-+ g3_emit(sx<<8); g3_emit((sx+FUXI_FIT_SRC_W-1)<<8); g3_emit(top<<8); g3_emit((top+FUXI_FIT_SRC_H-2)<<8);
++ g3_emit(sx<<8); g3_emit((sx+FUXI_FIT_SRC_W-1)<<8); g3_emit(top<<8); g3_emit((top+source_h-2)<<8);
 + g3_emit(dx); g3_emit((dx+1079) | (rows-1)<<16);
 + g4_event(63); g3_emit(g3_pkt7(0x2c, 1)); g3_emit(3); g4_wfi();
 +}
@@ -25340,7 +25343,7 @@ index 68c788b..0ecca59 100644
 + unsigned fit = fuxi_display_fit();
 + if (fit) {
 +  /* 等比／填滿：只接 CA 的整張 1125x2436 邏輯畫面（來源 pitch 64 對齊）；局部或其他尺寸交回 CPU 最近鄰退路。 */
-+  if (dx || dy || width != FUXI_FIT_SRC_W || height != FUXI_FIT_SRC_H ||
++  if (dx || dy || width != FUXI_FIT_SRC_W || height != fuxi_fit_source_h(fit) ||
 +      (source & 3) || (pitch & 63) || pitch > 131008 || ((uint64_t)sx+width)*4 > pitch ||
 +      length+(source&4095) > FG_SOURCE_BYTES ||
 +      ((uint64_t)sy+height-1)*pitch+((uint64_t)sx+width)*4 > length) { fg_fit_refused++; return 0; }
@@ -25365,16 +25368,16 @@ index 68c788b..0ecca59 100644
 +  for (unsigned k = 0; k < 2; k++)
 +   fg_rect_fit((inl ? FG_INL_SRC_VA : FG_SOURCE_VA)+slot*FG_SOURCE_BYTES+(source&4095)+sy*pitch+sx*4,
 +       (inl ? FG_INL_FB_VA : G4_FB_VA)+(fg_scanout_double_active ? fg_scanout_copy*0xa00000u : 0)+(fuxi_fit_y0(fit)+k)*4320,
-+       pitch, k, fuxi_fit_h(fit)/2);
++       pitch, k, fuxi_fit_h(fit)/2, height);
 +  if (!(++fg_fit_frames % 600) || fg_fit_frames == 1)
-+   printf("FUXI GPU FIT: mode %u frames %u refused %u (bilinear 1125x2436 -> 1080x%u at y %u, two passes)\n",
-+       fit, fg_fit_frames, fg_fit_refused, fuxi_fit_h(fit), fuxi_fit_y0(fit));
++   printf("FUXI GPU FIT: mode %u frames %u refused %u (bilinear 1125x%u -> 1080x%u at y %u, two passes)\n",
++       fit, fg_fit_frames, fg_fit_refused, height, fuxi_fit_h(fit), fuxi_fit_y0(fit));
 + } else
   for (unsigned y = 0; y < stride && y < height; y++)
    fg_rect((inl ? FG_INL_SRC_VA : FG_SOURCE_VA)+slot*FG_SOURCE_BYTES+(source&4095)+(sy+y)*pitch+sx*4,
        (inl ? FG_INL_FB_VA : G4_FB_VA)+(fg_scanout_double_active ? fg_scanout_copy*0xa00000u : 0)+(dy+y)*4320+dx*4, pitch, width, (height-1-y)/stride+1, stride);
 diff --git a/xnu/fuxi-adreno/fuxi_adreno.h b/xnu/fuxi-adreno/fuxi_adreno.h
-index 2abb3d2..11f84fe 100644
+index 2abb3d2..d5ed6f8 100644
 --- a/xnu/fuxi-adreno/fuxi_adreno.h
 +++ b/xnu/fuxi-adreno/fuxi_adreno.h
 @@ -95,4 +95,12 @@ int fuxi_gpu_poll(struct fg_times *t);
@@ -25382,19 +25385,19 @@ index 2abb3d2..11f84fe 100644
      unsigned pitch, unsigned sx, unsigned sy, unsigned dx, unsigned dy,
      unsigned width, unsigned height, struct fg_times *t);
 +/* /chosen fuxi,fit（u32，預設 0）：0 維持置中裁切（面板只顯示 1125x2436 中間的 1080x2400），
-+ * 1 等比縮放成 1080x2338、上下各留黑邊，2 填滿 1080x2400（縱向多壓 1.5%）。
++ * 1 等比縮放成 1080x2338、上下各留黑邊，2 填滿 1080x2400，3 將 1125x2500 兩軸均縮為 0.96。
 + * 開啟時 fuxi_gpu_copy 只接 CA 的整張 1125x2436（GPU 2D 引擎雙線性兩趟），SweetFramebuffer 的 CPU 退路用最近鄰。 */
 +#define FUXI_FIT_SRC_W 1125u
-+#define FUXI_FIT_SRC_H 2436u
++static inline unsigned fuxi_fit_source_h(unsigned fit) { return fit == 3 ? 2500u : 2436u; }
 +unsigned fuxi_display_fit(void);
 +static inline unsigned fuxi_fit_y0(unsigned fit) { return fit == 1 ? 31u : 0u; }
 +static inline unsigned fuxi_fit_h(unsigned fit) { return fit == 1 ? 2338u : 2400u; }
  #endif
 diff --git a/xnu/fuxi-adreno/fuxi_gpu_scanout.inc b/xnu/fuxi-adreno/fuxi_gpu_scanout.inc
-index 5d17fe5..08485af 100644
+index 5d17fe5..95986ec 100644
 --- a/xnu/fuxi-adreno/fuxi_gpu_scanout.inc
 +++ b/xnu/fuxi-adreno/fuxi_gpu_scanout.inc
-@@ -114,6 +114,67 @@ static unsigned fg_scanout_target(void)
+@@ -114,6 +114,68 @@ static unsigned fg_scanout_target(void)
  int fuxi_gpu_scanout_fifo(void) { return fg_scanout_fifo; }
  static unsigned fg_scanout_pa(unsigned buffer) { return buffer >= 3 ? FG_DPU_IOVA + (buffer - 3)*FG_DD_SLOT_BYTES : 0xb8000000u + buffer*0xa00000u; }
  static uintptr_t fg_scanout_pixels_at(unsigned buffer) { return buffer == 2 ? fg_scanout_pixels_c : buffer ? fg_scanout_pixels_b : fg_scanout_pixels; }
@@ -25410,14 +25413,14 @@ index 5d17fe5..08485af 100644
 + }
 +}
 +/* 雙線性參考：位置以 1/256 來源像素為單位，像素 i 的中心在 i+0.5；超出畫面就夾到邊緣。 */
-+static unsigned fg_fit_texel(const uint8_t *src, unsigned pitch, int u256, int v256, unsigned ch, unsigned nearest)
++static unsigned fg_fit_texel(const uint8_t *src, unsigned pitch, unsigned source_h, int u256, int v256, unsigned ch, unsigned nearest)
 +{
 + int a = u256 - 128, b = v256 - 128;
 + int x0 = a < 0 ? 0 : a >> 8, y0 = b < 0 ? 0 : b >> 8, fx = a < 0 ? 0 : a & 255, fy = b < 0 ? 0 : b & 255;
 + if (nearest) { x0 = u256 >> 8; y0 = v256 >> 8; fx = fy = 0; }
 + if (x0 > (int)FUXI_FIT_SRC_W-1) { x0 = FUXI_FIT_SRC_W-1; fx = 0; }
-+ if (y0 > (int)FUXI_FIT_SRC_H-1) { y0 = FUXI_FIT_SRC_H-1; fy = 0; }
-+ int x1 = x0 + 1 > (int)FUXI_FIT_SRC_W-1 ? x0 : x0 + 1, y1 = y0 + 1 > (int)FUXI_FIT_SRC_H-1 ? y0 : y0 + 1;
++ if (y0 > (int)source_h-1) { y0 = source_h-1; fy = 0; }
++ int x1 = x0 + 1 > (int)FUXI_FIT_SRC_W-1 ? x0 : x0 + 1, y1 = y0 + 1 > (int)source_h-1 ? y0 : y0 + 1;
 + unsigned p00 = src[(uint64_t)y0*pitch + x0*4u + ch], p10 = src[(uint64_t)y0*pitch + x1*4u + ch];
 + unsigned p01 = src[(uint64_t)y1*pitch + x0*4u + ch], p11 = src[(uint64_t)y1*pitch + x1*4u + ch];
 + return ((p00*(256u-fx) + p10*fx)*(256u-fy) + (p01*(256u-fx) + p11*fx)*fy + 32768u) >> 16;
@@ -25431,6 +25434,7 @@ index 5d17fe5..08485af 100644
 + unsigned n = ++fg_fit_probe_n;
 + if ((n != 1 && n != 120 && n != 1200 && n != 6000) || !fg_scanout_source) return;
 + uint64_t began = mach_absolute_time(), ns, sum[3] = {0, 0, 0};
++ unsigned source_h = fuxi_fit_source_h(fit);
 + unsigned h = fuxi_fit_h(fit), y0 = fuxi_fit_y0(fit), m = h/2, worst[3] = {0, 0, 0}, bars = 0;
 + const uint8_t *src = (const uint8_t *)(fg_scanout_source + (uint64_t)fg_scanout_sy*fg_scanout_pitch + fg_scanout_sx*4u);
 + const volatile uint32_t *dst = (const volatile uint32_t *)fg_scanout_pixels_at(buffer);
@@ -25438,13 +25442,13 @@ index 5d17fe5..08485af 100644
 + for (unsigned gy = 0; gy < 24u; gy++) for (unsigned gx = 0; gx < 16u; gx++) {
 +  unsigned x = gx*1079u/15u, r = gy*(h-1)/23u, k = r & 1u, j = r >> 1;
 +  uint32_t got = dst[(y0+r)*1080u + x];
-+  int u0 = (int)(((2u*x+1u)*FUXI_FIT_SRC_W*128u)/1080u), v0 = (int)(k*256u + ((2u*j+1u)*(FUXI_FIT_SRC_H-1u)*128u)/m);
-+  int u1 = (int)(128u + x*(FUXI_FIT_SRC_W-1u)*256u/1079u), v1 = (int)(k*256u + 128u + j*(FUXI_FIT_SRC_H-2u)*256u/(m-1u));
++  int u0 = (int)(((2u*x+1u)*FUXI_FIT_SRC_W*128u)/1080u), v0 = (int)(k*256u + ((2u*j+1u)*(source_h-1u)*128u)/m);
++  int u1 = (int)(128u + x*(FUXI_FIT_SRC_W-1u)*256u/1079u), v1 = (int)(k*256u + 128u + j*(source_h-2u)*256u/(m-1u));
 +  unsigned e[3] = {0, 0, 0};
 +  for (unsigned ch = 0; ch < 4u; ch++) {
 +   int g = (int)((got >> (8u*ch)) & 255u);
-+   int ref[3] = {(int)fg_fit_texel(src, fg_scanout_pitch, u0, v0, ch, 0), (int)fg_fit_texel(src, fg_scanout_pitch, u1, v1, ch, 0),
-+                 (int)fg_fit_texel(src, fg_scanout_pitch, u0, v0, ch, 1)};
++   int ref[3] = {(int)fg_fit_texel(src, fg_scanout_pitch, source_h, u0, v0, ch, 0), (int)fg_fit_texel(src, fg_scanout_pitch, source_h, u1, v1, ch, 0),
++                 (int)fg_fit_texel(src, fg_scanout_pitch, source_h, u0, v0, ch, 1)};
 +   for (unsigned i = 0; i < 3u; i++) e[i] += (unsigned)(g > ref[i] ? g - ref[i] : ref[i] - g);
 +  }
 +  for (unsigned i = 0; i < 3u; i++) { sum[i] += e[i]; if (e[i] > worst[i]) worst[i] = e[i]; }
@@ -25462,7 +25466,7 @@ index 5d17fe5..08485af 100644
  static int fg_scanout_acquire(unsigned publication);
  static int fg_scanout_stop(const char *reason);
  
-@@ -1801,16 +1862,27 @@ uncertain:
+@@ -1801,16 +1863,27 @@ uncertain:
   * command is on the link. A waiting level goes out right before the next START (animated screens) or from a short thread call
   * (static screens); a newer level replaces one not sent yet. The AppleARMBacklight service (FuxiDsiBacklight.cpp) only stores the
   * level here and never touches the hardware. Needs fuxigpuscanout=1 (ownership) and fuxipanel120=1 (only then is the DSI0 window
@@ -25493,7 +25497,7 @@ index 5d17fe5..08485af 100644
  static uint64_t fg_bl_ticks_max;
  static thread_call_data_t fg_bl_call;
  /* The two FIFO words of one DCS long write: header (flags 0xc0 = long packet + last of the batch, data type 0x39, 3 bytes), then
-@@ -1820,18 +1892,22 @@ static void fg_bl_words(unsigned level, uint32_t words[2])
+@@ -1820,18 +1893,22 @@ static void fg_bl_words(unsigned level, uint32_t words[2])
   words[0] = 3u | (0x39u << 16) | (0xc0u << 24);
   words[1] = 0x51u | (((level >> 8) & 0xffu) << 8) | ((level & 0xffu) << 16) | (0xffu << 24);
  }
@@ -25518,7 +25522,7 @@ index 5d17fe5..08485af 100644
  /* 1 sent, 0 not sent (a stale DMA-done that would not clear; registers restored), 2 uncertain (triggered without a clean
   * completion; registers restored), -1 MMIO failure. trigger/dma/irq/length are the values read before. */
  static int fg_bl_send(unsigned level, unsigned trigger, unsigned dma, unsigned irq, unsigned length)
-@@ -1859,8 +1935,12 @@ static int fg_bl_send(unsigned level, unsigned trigger, unsigned dma, unsigned i
+@@ -1859,8 +1936,12 @@ static int fg_bl_send(unsigned level, unsigned trigger, unsigned dma, unsigned i
    __asm__ volatile("dsb sy" ::: "memory");
    if (!fg_scanout_write(FG_SCAN_DSI+0x090, 1)) return -1;
    triggered = 1;
@@ -25532,7 +25536,7 @@ index 5d17fe5..08485af 100644
    result = done && !(status & (1u << 24)) ? 1 : 2;
    if (result == 1) {
     int idle = fg_bl_poll(0x008, 0x1f, 0, 0, FG_BL_DONE_US, &status);
-@@ -1882,6 +1962,33 @@ static int fg_bl_send(unsigned level, unsigned trigger, unsigned dma, unsigned i
+@@ -1882,6 +1963,33 @@ static int fg_bl_send(unsigned level, unsigned trigger, unsigned dma, unsigned i
   __asm__ volatile("dsb sy" ::: "memory");
   return triggered ? result : 0;
  }
@@ -25566,7 +25570,7 @@ index 5d17fe5..08485af 100644
  /* Under FG_GUARD. 1: nothing waiting, or sent; 0: deferred (the level keeps waiting); -1: scanout stopped. via: 0 START, 1 timer. */
  static int fg_bl_flush(unsigned via)
  {
-@@ -1914,6 +2021,12 @@ static int fg_bl_flush(unsigned via)
+@@ -1914,6 +2022,12 @@ static int fg_bl_flush(unsigned via)
       !fg_scanout_read(FG_SCAN_DSI+0x084, &trigger) || !fg_scanout_read(FG_SCAN_DSI+0x110, &irq) ||
       !fg_scanout_read(FG_SCAN_DSI+0x15c, &tpg) || !fg_scanout_read(FG_SCAN_DSI+0x04c, &length))
    return fg_scanout_stop("backlight setup MMIO");
@@ -25579,7 +25583,7 @@ index 5d17fe5..08485af 100644
   /* The inherited command engine, an idle TPG and no pending error, as fg_panel120_switch requires. */
   if (!idle || (ctrl & 7) != 5 || tpg || (irq & (1u << 24))) {
    if (fg_bl_defer[FG_BL_D_DSI]++ < 4)
-@@ -1931,14 +2044,25 @@ static int fg_bl_flush(unsigned via)
+@@ -1931,14 +2045,25 @@ static int fg_bl_flush(unsigned via)
   if (!r) { fg_bl_defer[FG_BL_D_DSI]++; return 0; }
   if (r == 2) {
    unsigned after = 0;
@@ -25611,7 +25615,7 @@ index 5d17fe5..08485af 100644
   /* Sent: clear the request unless a newer level arrived meanwhile (it stays pending for the next window). */
   (void)__atomic_compare_exchange_n(&fg_bl_want, &want, want & ~FG_BL_PENDING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
   if (ticks > fg_bl_ticks_max) fg_bl_ticks_max = ticks;
-@@ -2124,6 +2248,7 @@ static int fg_scanout_acquire(unsigned publication)
+@@ -2124,6 +2249,7 @@ static int fg_scanout_acquire(unsigned publication)
   if (fg_scanout_double_requested && !fg_scanout_double_initialized) {
    fg_scanout_pixels_b = fuxi_gpu_nc_pointer(0xb8a00000u, 4320u*2400);
    if (!fg_scanout_pixels || !fg_scanout_pixels_b) return fg_scanout_stop("double buffer mapping");
@@ -25619,7 +25623,7 @@ index 5d17fe5..08485af 100644
    for (unsigned i = 0; i < 1080u*2400; i++)
     ((volatile uint32_t *)fg_scanout_pixels_b)[i] = ((const volatile uint32_t *)fg_scanout_pixels)[i];
    if (fg_scanout_triple_requested) {
-@@ -2553,6 +2678,12 @@ void fuxi_gpu_scanout_release(void)
+@@ -2553,6 +2679,12 @@ void fuxi_gpu_scanout_release(void)
   */
  static int fg_scanout_verify(void)
  {
@@ -43428,7 +43432,7 @@ index 0000000..8491c6b
 +
 +#endif
 diff --git a/xnu/fuxi-h1/SweetHID.cpp b/xnu/fuxi-h1/SweetHID.cpp
-index 5ed63a3..cadfd8a 100644
+index 5ed63a3..776de23 100644
 --- a/xnu/fuxi-h1/SweetHID.cpp
 +++ b/xnu/fuxi-h1/SweetHID.cpp
 @@ -33,6 +33,7 @@
@@ -43473,7 +43477,7 @@ index 5ed63a3..cadfd8a 100644
  	fOffY = (fLogicalH - 2400) / 2;
 +	/*
 +	 * /chosen fuxi,fit（預設 0＝置中裁切）：GPU／CPU 拷貝改把整幅 1125x2436 縮進面板。
-+	 * 1 等比 0.96（1080x2338，y 從 31 起，上下黑邊），2 填滿 1080x2400。
++	 * 1 等比 0.96（1080x2338，y 從 31 起，上下黑邊），2 填滿 1080x2400，3 將 1125x2500 等比縮放到相同觸控範圍。
 +	 * 幾何與 fuxi_adreno.h 的 FUXI_FIT_* 相同；觸控對應到這個畫面矩形。
 +	 */
 +	DTEntry chosen;
@@ -43484,14 +43488,14 @@ index 5ed63a3..cadfd8a 100644
 +	    SecureDTGetProperty(chosen, "fuxi,fit", &fit, &fitBytes) == kSuccess && fit && fitBytes == sizeof(fitMode)) {
 +		memcpy(&fitMode, fit, sizeof(fitMode));
 +	}
-+	if (fitMode == 1 || fitMode == 2) {
++	if (fitMode >= 1 && fitMode <= 3) {
 +		fLogicalW = 1080;
 +		fLogicalH = fitMode == 1 ? 2338 : 2400;
 +		fOffX = 0;
 +		fOffY = fitMode == 1 ? -31 : 0;
 +	}
 +	IOLog("SWEET HID: touch picture %dx%d at %d,%d (fit %u)\n", fLogicalW, fLogicalH, -fOffX, -fOffY,
-+	    (fitMode == 1 || fitMode == 2) ? (unsigned)fitMode : 0u);
++	    (fitMode >= 1 && fitMode <= 3) ? (unsigned)fitMode : 0u);
  	/* The digitizer covers the main display (backboardd maps it 1:1). */
  	setProperty("DisplayIntegrated", kOSBooleanTrue);
  	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
@@ -45974,7 +45978,7 @@ index 0000000..8a1b9db
 +    return 0;
 +}
 diff --git a/xnu/fuxi-unixnu/SweetFramebuffer.cpp b/xnu/fuxi-unixnu/SweetFramebuffer.cpp
-index 8b38ece..4baf709 100644
+index 8b38ece..116a170 100644
 --- a/xnu/fuxi-unixnu/SweetFramebuffer.cpp
 +++ b/xnu/fuxi-unixnu/SweetFramebuffer.cpp
 @@ -32,7 +32,8 @@
@@ -46069,7 +46073,7 @@ index 8b38ece..4baf709 100644
  static void sweet_fb_te_configure(AppleCLCD *fb)
  {
   unsigned enabled = 0, offset = 7800; /* 7.3 ms transfer + 0.5 ms margin */
-@@ -594,6 +656,14 @@ AppleCLCD::start(IOService *provider)
+@@ -594,6 +656,17 @@ AppleCLCD::start(IOService *provider)
  		    fUnixnuDiff ? "enabled" : "unavailable");
  	}
  	if (fUnixnuIdle) IOLog("FUXI UNIXNU FB: demand timer enabled, software 60 Hz, panel power inherited\n");
@@ -46077,6 +46081,9 @@ index 8b38ece..4baf709 100644
 +	fFit = (fLogicalW == SWEET_FB_LOGICAL_W && fLogicalH == SWEET_FB_LOGICAL_H && fWidth == 1080 && fHeight == 2400 &&
 +	    fRowBytes >= 1080 * 4) ? fuxi_display_fit() : 0;
 +	if (fFit) {
++		fLogicalH = fuxi_fit_source_h(fFit);
++		fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++		if (fFit == 3) IOLog("FUXI UNIXNU FB: panel-aspect canvas 1125x2500\n");
 +		for (int32_t x = 0; x < 1080; x++) fFitCol[x] = (uint16_t)sweet_fit_src(x, (int32_t)fLogicalW, 1080);
 +		IOLog("FUXI UNIXNU FB: fit %u picture 1080x%u at 0,%u from %ux%u (GPU bilinear full frames, CPU nearest)\n",
 +		    fFit, fuxi_fit_h(fFit), fuxi_fit_y0(fFit), fLogicalW, fLogicalH);
@@ -46084,7 +46091,7 @@ index 8b38ece..4baf709 100644
  	sweet_fb_te_configure(this);
  #endif
  	uint32_t timerOptions = sweet_fb_timer_options();
-@@ -631,6 +701,9 @@ AppleCLCD::start(IOService *provider)
+@@ -631,6 +704,9 @@ AppleCLCD::start(IOService *provider)
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
  	setProperty("external", false);
@@ -46094,7 +46101,7 @@ index 8b38ece..4baf709 100644
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  #if defined(FUXI)
  	int backlight = 0;
-@@ -653,10 +726,10 @@ AppleCLCD::start(IOService *provider)
+@@ -653,10 +729,10 @@ AppleCLCD::start(IOService *provider)
   PE_parse_boot_argn("fuxigpuscanoutlog", &log, sizeof(log));
   int quiet = 0;
   PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet));
@@ -46107,7 +46114,7 @@ index 8b38ece..4baf709 100644
   if (fScanout) { sweet_console_muted = 1; fConsolePaused = true; }
   fuxi_gpu_scanout_configure(fPixels, fScanout, check);
   uint32_t nc = 0;
-@@ -1292,8 +1365,18 @@ AppleCLCD::present(const SwapRecord &record)
+@@ -1292,8 +1368,18 @@ AppleCLCD::present(const SwapRecord &record)
  			dx = dy = 0;
  		}
  		/* Logical (presented) display coordinates -> panel coordinates. */
@@ -46128,7 +46135,7 @@ index 8b38ece..4baf709 100644
  		if (dx < 0) {
  			sx -= dx;
  			w += dx;
-@@ -1310,11 +1393,11 @@ AppleCLCD::present(const SwapRecord &record)
+@@ -1310,11 +1396,11 @@ AppleCLCD::present(const SwapRecord &record)
  		if (h > (int32_t)s->height - sy) {
  			h = (int32_t)s->height - sy;
  		}
@@ -46144,7 +46151,7 @@ index 8b38ece..4baf709 100644
  		}
  		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
  		    (uint64_t)(sx + w) * 4;
-@@ -1327,21 +1410,21 @@ AppleCLCD::present(const SwapRecord &record)
+@@ -1327,21 +1413,21 @@ AppleCLCD::present(const SwapRecord &record)
  #if defined(FUXI)
              /* Keep CPU replay complete too if a full composed crop is available. */
              if (fuxi_gpu_scanout_double() && (mask & (mask-1)) == 0 && sx >= dx && sy >= dy &&
@@ -46173,7 +46180,7 @@ index 8b38ece..4baf709 100644
  			if ((mask & (mask-1)) == 0)
  				copied = sweet_surface_gpu_copy(s, src, sx, sy, dx, dy, w, h);
              if (copied == 3 || (copied < 0 && fScanout)) {
-@@ -1376,7 +1459,7 @@ AppleCLCD::present(const SwapRecord &record)
+@@ -1376,7 +1462,7 @@ AppleCLCD::present(const SwapRecord &record)
  #endif
  			bool diffCopied = false;
  #if defined(FUXI)
@@ -46182,7 +46189,7 @@ index 8b38ece..4baf709 100644
  			    s->pixelFormat == SWEET_FB_FORMAT_BGRA && (mask & (mask - 1)) == 0 &&
  			    dx == 0 && dy == 0 && w == (int32_t)fWidth && h == (int32_t)fHeight) {
  				uint64_t offset = (uint64_t)s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4;
-@@ -1397,7 +1480,10 @@ AppleCLCD::present(const SwapRecord &record)
+@@ -1397,7 +1483,10 @@ AppleCLCD::present(const SwapRecord &record)
  			if (copied != 2 && !diffCopied) {
  				fShadowValid = false;
  #if defined(FUXI)
@@ -50920,7 +50927,7 @@ index b0dd408..42a807e 100644
   			sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
   			    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
 diff --git a/xnu/patches/0098-fuxi-native-adreno-abi.patch b/xnu/patches/0098-fuxi-native-adreno-abi.patch
-index 0ca2838..8042807 100644
+index 0ca2838..7e7bff7 100644
 --- a/xnu/patches/0098-fuxi-native-adreno-abi.patch
 +++ b/xnu/patches/0098-fuxi-native-adreno-abi.patch
 @@ -554,7 +554,7 @@
@@ -50936,7 +50943,7 @@ index 0ca2838..8042807 100644
  +}
  +static void fg_dpu_clean(uintptr_t va, unsigned bytes) { CleanPoC_DcacheRegion_Force(va, bytes); }
  +static int fg_abi_live_for_scanout(void);
-++/* /chosen fuxi,fit：只接受 1（等比）或 2（填滿）；缺少、長度不是 4 或其他值都當 0（原本的置中裁切）。
+++/* /chosen fuxi,fit：1（等比）、2（填滿）、3（等比全螢幕）；缺少、長度不是 4 或其他值都當 0（原本的置中裁切）。
 ++ * 第一次呼叫讀 ADT 後快取；SweetFramebuffer 啟動時就會先讀一次。 */
 ++static unsigned fg_fit_cached = ~0u;
 ++unsigned fuxi_display_fit(void)
@@ -50949,7 +50956,7 @@ index 0ca2838..8042807 100644
 ++     SecureDTGetProperty(chosen, "fuxi,fit", &prop, &bytes) == kSuccess && prop && bytes == 4) {
 ++  const uint8_t *p = (const uint8_t *)prop;
 ++  unsigned v = p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
-++  if (v == 1 || v == 2) fit = v;
+++  if (v >= 1 && v <= 3) fit = v;
 ++ }
 ++ __atomic_store_n(&fg_fit_cached, fit, __ATOMIC_RELEASE);
 ++ return fit;
@@ -51010,16 +51017,16 @@ index 0ca2838..8042807 100644
 ++ * 奇偶兩趟彼此差 0.05 列以內（tools/test-fuxi-adreno.py）。
 ++ * 參考：mesa a6xx.xml 的 TPL1_A2D_SRC_TEXTURE_INFO FILTER（bit 16）；Turnip tu6_blit_image 的
 ++ * r2d 縮放路徑同樣用整數座標、SRC／DEST 的 BR 都是起點+寬-1。實機取樣規則由 fg_fit_probe 核對。 */
-++static void fg_rect_fit(unsigned src, unsigned dst, unsigned pitch, unsigned top, unsigned rows)
+++static void fg_rect_fit(unsigned src, unsigned dst, unsigned pitch, unsigned top, unsigned rows, unsigned source_h)
 ++{
 ++ unsigned sx = (src & 63)/4, dx = (dst & 63)/4;
 ++ g3_emit(g4_pkt4(G4_SP_SRC_INFO, 5));
-++ g3_emit(0x00500430u | 1u<<16); g3_emit((FUXI_FIT_SRC_W+sx) | FUXI_FIT_SRC_H<<15);
+++ g3_emit(0x00500430u | 1u<<16); g3_emit((FUXI_FIT_SRC_W+sx) | source_h<<15);
 ++ g3_emit(src & ~63u); g3_emit(0); g3_emit((pitch/64) << 9);
 ++ g3_emit(g4_pkt4(G4_RB_DST_INFO, 4));
 ++ g3_emit(0x430); g3_emit(dst & ~63u); g3_emit(0); g3_emit(4320*2/64);
 ++ g3_emit(g4_pkt4(G4_GRAS_SRC_X, 6));
-++ g3_emit(sx<<8); g3_emit((sx+FUXI_FIT_SRC_W-1)<<8); g3_emit(top<<8); g3_emit((top+FUXI_FIT_SRC_H-2)<<8);
+++ g3_emit(sx<<8); g3_emit((sx+FUXI_FIT_SRC_W-1)<<8); g3_emit(top<<8); g3_emit((top+source_h-2)<<8);
 ++ g3_emit(dx); g3_emit((dx+1079) | (rows-1)<<16);
 ++ g4_event(63); g3_emit(g3_pkt7(0x2c, 1)); g3_emit(3); g4_wfi();
 ++}
@@ -51050,7 +51057,7 @@ index 0ca2838..8042807 100644
 ++ unsigned fit = fuxi_display_fit();
 ++ if (fit) {
 ++  /* 等比／填滿：只接 CA 的整張 1125x2436 邏輯畫面（來源 pitch 64 對齊）；局部或其他尺寸交回 CPU 最近鄰退路。 */
-++  if (dx || dy || width != FUXI_FIT_SRC_W || height != FUXI_FIT_SRC_H ||
+++  if (dx || dy || width != FUXI_FIT_SRC_W || height != fuxi_fit_source_h(fit) ||
 ++      (source & 3) || (pitch & 63) || pitch > 131008 || ((uint64_t)sx+width)*4 > pitch ||
 ++      length+(source&4095) > FG_SOURCE_BYTES ||
 ++      ((uint64_t)sy+height-1)*pitch+((uint64_t)sx+width)*4 > length) { fg_fit_refused++; return 0; }
@@ -51075,10 +51082,10 @@ index 0ca2838..8042807 100644
 ++  for (unsigned k = 0; k < 2; k++)
 ++   fg_rect_fit((inl ? FG_INL_SRC_VA : FG_SOURCE_VA)+slot*FG_SOURCE_BYTES+(source&4095)+sy*pitch+sx*4,
 ++       (inl ? FG_INL_FB_VA : G4_FB_VA)+(fg_scanout_double_active ? fg_scanout_copy*0xa00000u : 0)+(fuxi_fit_y0(fit)+k)*4320,
-++       pitch, k, fuxi_fit_h(fit)/2);
+++       pitch, k, fuxi_fit_h(fit)/2, height);
 ++  if (!(++fg_fit_frames % 600) || fg_fit_frames == 1)
-++   printf("FUXI GPU FIT: mode %u frames %u refused %u (bilinear 1125x2436 -> 1080x%u at y %u, two passes)\n",
-++       fit, fg_fit_frames, fg_fit_refused, fuxi_fit_h(fit), fuxi_fit_y0(fit));
+++   printf("FUXI GPU FIT: mode %u frames %u refused %u (bilinear 1125x%u -> 1080x%u at y %u, two passes)\n",
+++       fit, fg_fit_frames, fg_fit_refused, height, fuxi_fit_h(fit), fuxi_fit_y0(fit));
 ++ } else
    for (unsigned y = 0; y < stride && y < height; y++)
  -  fg_rect(FG_SOURCE_VA+slot*FG_SOURCE_BYTES+(source&4095)+(sy+y)*pitch+sx*4,
@@ -51098,10 +51105,10 @@ index 0ca2838..8042807 100644
       unsigned pitch, unsigned sx, unsigned sy, unsigned dx, unsigned dy,
 +     unsigned width, unsigned height, struct fg_times *t);
 ++/* /chosen fuxi,fit（u32，預設 0）：0 維持置中裁切（面板只顯示 1125x2436 中間的 1080x2400），
-++ * 1 等比縮放成 1080x2338、上下各留黑邊，2 填滿 1080x2400（縱向多壓 1.5%）。
+++ * 1 等比縮放成 1080x2338、上下各留黑邊，2 填滿 1080x2400，3 將 1125x2500 兩軸均縮為 0.96。
 ++ * 開啟時 fuxi_gpu_copy 只接 CA 的整張 1125x2436（GPU 2D 引擎雙線性兩趟），SweetFramebuffer 的 CPU 退路用最近鄰。 */
 ++#define FUXI_FIT_SRC_W 1125u
-++#define FUXI_FIT_SRC_H 2436u
+++static inline unsigned fuxi_fit_source_h(unsigned fit) { return fit == 3 ? 2500u : 2436u; }
 ++unsigned fuxi_display_fit(void);
 ++static inline unsigned fuxi_fit_y0(unsigned fit) { return fit == 1 ? 31u : 0u; }
 ++static inline unsigned fuxi_fit_h(unsigned fit) { return fit == 1 ? 2338u : 2400u; }
@@ -51114,11 +51121,11 @@ index 0ca2838..8042807 100644
  --- a/bsd/dev/fuxi_gpu_scanout.inc
  +++ b/bsd/dev/fuxi_gpu_scanout.inc
 -@@ -0,0 +1,2575 @@
-+@@ -0,0 +1,2706 @@
++@@ -0,0 +1,2707 @@
  +/* SPDX-License-Identifier: MIT
  + * Copyright (c) 2026 NativeMetal contributors
  + * Ported from UniXNU drivers/NativeMetal/GpuScanoutClient.h (MIT).
-@@ -1745,6 +1818,67 @@
+@@ -1745,6 +1818,68 @@
  +int fuxi_gpu_scanout_fifo(void) { return fg_scanout_fifo; }
  +static unsigned fg_scanout_pa(unsigned buffer) { return buffer >= 3 ? FG_DPU_IOVA + (buffer - 3)*FG_DD_SLOT_BYTES : 0xb8000000u + buffer*0xa00000u; }
  +static uintptr_t fg_scanout_pixels_at(unsigned buffer) { return buffer == 2 ? fg_scanout_pixels_c : buffer ? fg_scanout_pixels_b : fg_scanout_pixels; }
@@ -51134,14 +51141,14 @@ index 0ca2838..8042807 100644
 ++ }
 ++}
 ++/* 雙線性參考：位置以 1/256 來源像素為單位，像素 i 的中心在 i+0.5；超出畫面就夾到邊緣。 */
-++static unsigned fg_fit_texel(const uint8_t *src, unsigned pitch, int u256, int v256, unsigned ch, unsigned nearest)
+++static unsigned fg_fit_texel(const uint8_t *src, unsigned pitch, unsigned source_h, int u256, int v256, unsigned ch, unsigned nearest)
 ++{
 ++ int a = u256 - 128, b = v256 - 128;
 ++ int x0 = a < 0 ? 0 : a >> 8, y0 = b < 0 ? 0 : b >> 8, fx = a < 0 ? 0 : a & 255, fy = b < 0 ? 0 : b & 255;
 ++ if (nearest) { x0 = u256 >> 8; y0 = v256 >> 8; fx = fy = 0; }
 ++ if (x0 > (int)FUXI_FIT_SRC_W-1) { x0 = FUXI_FIT_SRC_W-1; fx = 0; }
-++ if (y0 > (int)FUXI_FIT_SRC_H-1) { y0 = FUXI_FIT_SRC_H-1; fy = 0; }
-++ int x1 = x0 + 1 > (int)FUXI_FIT_SRC_W-1 ? x0 : x0 + 1, y1 = y0 + 1 > (int)FUXI_FIT_SRC_H-1 ? y0 : y0 + 1;
+++ if (y0 > (int)source_h-1) { y0 = source_h-1; fy = 0; }
+++ int x1 = x0 + 1 > (int)FUXI_FIT_SRC_W-1 ? x0 : x0 + 1, y1 = y0 + 1 > (int)source_h-1 ? y0 : y0 + 1;
 ++ unsigned p00 = src[(uint64_t)y0*pitch + x0*4u + ch], p10 = src[(uint64_t)y0*pitch + x1*4u + ch];
 ++ unsigned p01 = src[(uint64_t)y1*pitch + x0*4u + ch], p11 = src[(uint64_t)y1*pitch + x1*4u + ch];
 ++ return ((p00*(256u-fx) + p10*fx)*(256u-fy) + (p01*(256u-fx) + p11*fx)*fy + 32768u) >> 16;
@@ -51155,6 +51162,7 @@ index 0ca2838..8042807 100644
 ++ unsigned n = ++fg_fit_probe_n;
 ++ if ((n != 1 && n != 120 && n != 1200 && n != 6000) || !fg_scanout_source) return;
 ++ uint64_t began = mach_absolute_time(), ns, sum[3] = {0, 0, 0};
+++ unsigned source_h = fuxi_fit_source_h(fit);
 ++ unsigned h = fuxi_fit_h(fit), y0 = fuxi_fit_y0(fit), m = h/2, worst[3] = {0, 0, 0}, bars = 0;
 ++ const uint8_t *src = (const uint8_t *)(fg_scanout_source + (uint64_t)fg_scanout_sy*fg_scanout_pitch + fg_scanout_sx*4u);
 ++ const volatile uint32_t *dst = (const volatile uint32_t *)fg_scanout_pixels_at(buffer);
@@ -51162,13 +51170,13 @@ index 0ca2838..8042807 100644
 ++ for (unsigned gy = 0; gy < 24u; gy++) for (unsigned gx = 0; gx < 16u; gx++) {
 ++  unsigned x = gx*1079u/15u, r = gy*(h-1)/23u, k = r & 1u, j = r >> 1;
 ++  uint32_t got = dst[(y0+r)*1080u + x];
-++  int u0 = (int)(((2u*x+1u)*FUXI_FIT_SRC_W*128u)/1080u), v0 = (int)(k*256u + ((2u*j+1u)*(FUXI_FIT_SRC_H-1u)*128u)/m);
-++  int u1 = (int)(128u + x*(FUXI_FIT_SRC_W-1u)*256u/1079u), v1 = (int)(k*256u + 128u + j*(FUXI_FIT_SRC_H-2u)*256u/(m-1u));
+++  int u0 = (int)(((2u*x+1u)*FUXI_FIT_SRC_W*128u)/1080u), v0 = (int)(k*256u + ((2u*j+1u)*(source_h-1u)*128u)/m);
+++  int u1 = (int)(128u + x*(FUXI_FIT_SRC_W-1u)*256u/1079u), v1 = (int)(k*256u + 128u + j*(source_h-2u)*256u/(m-1u));
 ++  unsigned e[3] = {0, 0, 0};
 ++  for (unsigned ch = 0; ch < 4u; ch++) {
 ++   int g = (int)((got >> (8u*ch)) & 255u);
-++   int ref[3] = {(int)fg_fit_texel(src, fg_scanout_pitch, u0, v0, ch, 0), (int)fg_fit_texel(src, fg_scanout_pitch, u1, v1, ch, 0),
-++                 (int)fg_fit_texel(src, fg_scanout_pitch, u0, v0, ch, 1)};
+++   int ref[3] = {(int)fg_fit_texel(src, fg_scanout_pitch, source_h, u0, v0, ch, 0), (int)fg_fit_texel(src, fg_scanout_pitch, source_h, u1, v1, ch, 0),
+++                 (int)fg_fit_texel(src, fg_scanout_pitch, source_h, u0, v0, ch, 1)};
 ++   for (unsigned i = 0; i < 3u; i++) e[i] += (unsigned)(g > ref[i] ? g - ref[i] : ref[i] - g);
 ++  }
 ++  for (unsigned i = 0; i < 3u; i++) { sum[i] += e[i]; if (e[i] > worst[i]) worst[i] = e[i]; }
@@ -51186,7 +51194,7 @@ index 0ca2838..8042807 100644
  +static int fg_scanout_acquire(unsigned publication);
  +static int fg_scanout_stop(const char *reason);
  +
-@@ -3432,16 +3566,27 @@
+@@ -3432,16 +3567,27 @@
  + * command is on the link. A waiting level goes out right before the next START (animated screens) or from a short thread call
  + * (static screens); a newer level replaces one not sent yet. The AppleARMBacklight service (FuxiDsiBacklight.cpp) only stores the
  + * level here and never touches the hardware. Needs fuxigpuscanout=1 (ownership) and fuxipanel120=1 (only then is the DSI0 window
@@ -51217,7 +51225,7 @@ index 0ca2838..8042807 100644
  +static uint64_t fg_bl_ticks_max;
  +static thread_call_data_t fg_bl_call;
  +/* The two FIFO words of one DCS long write: header (flags 0xc0 = long packet + last of the batch, data type 0x39, 3 bytes), then
-@@ -3451,18 +3596,22 @@
+@@ -3451,18 +3597,22 @@
  + words[0] = 3u | (0x39u << 16) | (0xc0u << 24);
  + words[1] = 0x51u | (((level >> 8) & 0xffu) << 8) | ((level & 0xffu) << 16) | (0xffu << 24);
  +}
@@ -51242,7 +51250,7 @@ index 0ca2838..8042807 100644
  +/* 1 sent, 0 not sent (a stale DMA-done that would not clear; registers restored), 2 uncertain (triggered without a clean
  + * completion; registers restored), -1 MMIO failure. trigger/dma/irq/length are the values read before. */
  +static int fg_bl_send(unsigned level, unsigned trigger, unsigned dma, unsigned irq, unsigned length)
-@@ -3490,8 +3639,12 @@
+@@ -3490,8 +3640,12 @@
  +  __asm__ volatile("dsb sy" ::: "memory");
  +  if (!fg_scanout_write(FG_SCAN_DSI+0x090, 1)) return -1;
  +  triggered = 1;
@@ -51256,7 +51264,7 @@ index 0ca2838..8042807 100644
  +  result = done && !(status & (1u << 24)) ? 1 : 2;
  +  if (result == 1) {
  +   int idle = fg_bl_poll(0x008, 0x1f, 0, 0, FG_BL_DONE_US, &status);
-@@ -3513,6 +3666,33 @@
+@@ -3513,6 +3667,33 @@
  + __asm__ volatile("dsb sy" ::: "memory");
  + return triggered ? result : 0;
  +}
@@ -51290,7 +51298,7 @@ index 0ca2838..8042807 100644
  +/* Under FG_GUARD. 1: nothing waiting, or sent; 0: deferred (the level keeps waiting); -1: scanout stopped. via: 0 START, 1 timer. */
  +static int fg_bl_flush(unsigned via)
  +{
-@@ -3545,6 +3725,12 @@
+@@ -3545,6 +3726,12 @@
  +     !fg_scanout_read(FG_SCAN_DSI+0x084, &trigger) || !fg_scanout_read(FG_SCAN_DSI+0x110, &irq) ||
  +     !fg_scanout_read(FG_SCAN_DSI+0x15c, &tpg) || !fg_scanout_read(FG_SCAN_DSI+0x04c, &length))
  +  return fg_scanout_stop("backlight setup MMIO");
@@ -51303,7 +51311,7 @@ index 0ca2838..8042807 100644
  + /* The inherited command engine, an idle TPG and no pending error, as fg_panel120_switch requires. */
  + if (!idle || (ctrl & 7) != 5 || tpg || (irq & (1u << 24))) {
  +  if (fg_bl_defer[FG_BL_D_DSI]++ < 4)
-@@ -3562,14 +3748,25 @@
+@@ -3562,14 +3749,25 @@
  + if (!r) { fg_bl_defer[FG_BL_D_DSI]++; return 0; }
  + if (r == 2) {
  +  unsigned after = 0;
@@ -51335,7 +51343,7 @@ index 0ca2838..8042807 100644
  + /* Sent: clear the request unless a newer level arrived meanwhile (it stays pending for the next window). */
  + (void)__atomic_compare_exchange_n(&fg_bl_want, &want, want & ~FG_BL_PENDING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
  + if (ticks > fg_bl_ticks_max) fg_bl_ticks_max = ticks;
-@@ -3755,6 +3952,7 @@
+@@ -3755,6 +3953,7 @@
  + if (fg_scanout_double_requested && !fg_scanout_double_initialized) {
  +  fg_scanout_pixels_b = fuxi_gpu_nc_pointer(0xb8a00000u, 4320u*2400);
  +  if (!fg_scanout_pixels || !fg_scanout_pixels_b) return fg_scanout_stop("double buffer mapping");
@@ -51343,7 +51351,7 @@ index 0ca2838..8042807 100644
  +  for (unsigned i = 0; i < 1080u*2400; i++)
  +   ((volatile uint32_t *)fg_scanout_pixels_b)[i] = ((const volatile uint32_t *)fg_scanout_pixels)[i];
  +  if (fg_scanout_triple_requested) {
-@@ -4184,6 +4382,12 @@
+@@ -4184,6 +4383,12 @@
  + */
  +static int fg_scanout_verify(void)
  +{
@@ -54478,7 +54486,7 @@ index d21bf85..f635b87 100644
 ++	return 0;
 ++}
 diff --git a/xnu/patches/0103-fuxi-kernel-h1.patch b/xnu/patches/0103-fuxi-kernel-h1.patch
-index 39be642..4705156 100644
+index 39be642..8a34a8c 100644
 --- a/xnu/patches/0103-fuxi-kernel-h1.patch
 +++ b/xnu/patches/0103-fuxi-kernel-h1.patch
 @@ -65,7 +65,7 @@
@@ -54820,7 +54828,7 @@ index 39be642..4705156 100644
 + 	fOffY = (fLogicalH - 2400) / 2;
 ++	/*
 ++	 * /chosen fuxi,fit（預設 0＝置中裁切）：GPU／CPU 拷貝改把整幅 1125x2436 縮進面板。
-++	 * 1 等比 0.96（1080x2338，y 從 31 起，上下黑邊），2 填滿 1080x2400。
+++	 * 1 等比 0.96（1080x2338，y 從 31 起，上下黑邊），2 填滿 1080x2400，3 將 1125x2500 等比縮放到相同觸控範圍。
 ++	 * 幾何與 fuxi_adreno.h 的 FUXI_FIT_* 相同；觸控對應到這個畫面矩形。
 ++	 */
 ++	DTEntry chosen;
@@ -54831,14 +54839,14 @@ index 39be642..4705156 100644
 ++	    SecureDTGetProperty(chosen, "fuxi,fit", &fit, &fitBytes) == kSuccess && fit && fitBytes == sizeof(fitMode)) {
 ++		memcpy(&fitMode, fit, sizeof(fitMode));
 ++	}
-++	if (fitMode == 1 || fitMode == 2) {
+++	if (fitMode >= 1 && fitMode <= 3) {
 ++		fLogicalW = 1080;
 ++		fLogicalH = fitMode == 1 ? 2338 : 2400;
 ++		fOffX = 0;
 ++		fOffY = fitMode == 1 ? -31 : 0;
 ++	}
 ++	IOLog("SWEET HID: touch picture %dx%d at %d,%d (fit %u)\n", fLogicalW, fLogicalH, -fOffX, -fOffY,
-++	    (fitMode == 1 || fitMode == 2) ? (unsigned)fitMode : 0u);
+++	    (fitMode >= 1 && fitMode <= 3) ? (unsigned)fitMode : 0u);
 + 	/* The digitizer covers the main display (backboardd maps it 1:1). */
   	setProperty("DisplayIntegrated", kOSBooleanTrue);
   	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
@@ -55896,7 +55904,7 @@ index 179f5df..375b1a9 100644
  +bool     fuxi_wifi_sta_heard(unsigned index, struct fuxi_wifi_sta_bss *bss);
  +void     fuxi_wifi_sta_state(struct fuxi_wifi_sta_state *state);
 diff --git a/xnu/patches/0106-fuxi-unixnu.patch b/xnu/patches/0106-fuxi-unixnu.patch
-index d95faff..373e72e 100644
+index d95faff..f73327c 100644
 --- a/xnu/patches/0106-fuxi-unixnu.patch
 +++ b/xnu/patches/0106-fuxi-unixnu.patch
 @@ -42,7 +42,19 @@
@@ -56504,11 +56512,11 @@ index d95faff..373e72e 100644
   
   bool
 -@@ -214,7 +572,33 @@
-+@@ -214,7 +634,41 @@
++@@ -214,7 +634,44 @@
   		OSSafeReleaseNULL(fWorkLoop);
   		return false;
   	}
-@@ -847,6 +1262,14 @@
+@@ -847,6 +1262,17 @@
  +		    fUnixnuDiff ? "enabled" : "unavailable");
  +	}
  +	if (fUnixnuIdle) IOLog("FUXI UNIXNU FB: demand timer enabled, software 60 Hz, panel power inherited\n");
@@ -56516,6 +56524,9 @@ index d95faff..373e72e 100644
 ++	fFit = (fLogicalW == SWEET_FB_LOGICAL_W && fLogicalH == SWEET_FB_LOGICAL_H && fWidth == 1080 && fHeight == 2400 &&
 ++	    fRowBytes >= 1080 * 4) ? fuxi_display_fit() : 0;
 ++	if (fFit) {
+++		fLogicalH = fuxi_fit_source_h(fFit);
+++		fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+++		if (fFit == 3) IOLog("FUXI UNIXNU FB: panel-aspect canvas 1125x2500\n");
 ++		for (int32_t x = 0; x < 1080; x++) fFitCol[x] = (uint16_t)sweet_fit_src(x, (int32_t)fLogicalW, 1080);
 ++		IOLog("FUXI UNIXNU FB: fit %u picture 1080x%u at 0,%u from %ux%u (GPU bilinear full frames, CPU nearest)\n",
 ++		    fFit, fuxi_fit_h(fFit), fuxi_fit_y0(fFit), fLogicalW, fLogicalH);
@@ -56523,16 +56534,16 @@ index d95faff..373e72e 100644
  +	sweet_fb_te_configure(this);
  +#endif
  +	uint32_t timerOptions = sweet_fb_timer_options();
-@@ -855,7 +1278,7 @@
+@@ -855,7 +1281,7 @@
   	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
   		IOLog("SWEET FB: no vsync timer\n");
   		return false;
 -@@ -227,11 +611,20 @@
-+@@ -227,40 +681,174 @@
++@@ -227,40 +684,174 @@
   	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
   	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
   #if defined(FUXI)
-@@ -878,9 +1301,12 @@
+@@ -878,9 +1304,12 @@
   #else
   	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
   #endif
@@ -56546,7 +56557,7 @@ index d95faff..373e72e 100644
   	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  +#if defined(FUXI)
  +	int backlight = 0;
-@@ -904,10 +1330,10 @@
+@@ -904,10 +1333,10 @@
  + PE_parse_boot_argn("fuxigpuscanoutlog", &log, sizeof(log));
  + int quiet = 0;
  + PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet));
@@ -56559,66 +56570,66 @@ index d95faff..373e72e 100644
  + if (fScanout) { sweet_console_muted = 1; fConsolePaused = true; }
  + fuxi_gpu_scanout_configure(fPixels, fScanout, check);
  + uint32_t nc = 0;
-@@ -1035,7 +1461,7 @@
+@@ -1035,7 +1464,7 @@
   #else
   	(void)fb;
   	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
 -@@ -272,44 +787,34 @@
-+@@ -272,44 +860,34 @@
++@@ -272,44 +863,34 @@
   {
   	AppleCLCD *fb = (AppleCLCD *)owner;
   	uint64_t now = mach_absolute_time();
-@@ -1098,7 +1524,7 @@
+@@ -1098,7 +1527,7 @@
   	if (fb->fPowerOff) {
   		/* Fade out: halve every channel each vsync, then black, then idle. */
   		uint32_t step = fb->fFadeStep;
 -@@ -319,14 +824,22 @@
-+@@ -319,14 +897,22 @@
++@@ -319,14 +900,22 @@
   		IOLockUnlock(fb->fLock);
   #if defined(FUXI)
   		if (step == 0) {
-@@ -1126,7 +1552,7 @@
+@@ -1126,7 +1555,7 @@
   		}
   #else
   		if (step <= 6) {
 -@@ -341,20 +854,13 @@
-+@@ -341,20 +927,13 @@
++@@ -341,20 +930,13 @@
   		sweet_fb_rearm(fb, sender);
   		return;
   	}
-@@ -1154,7 +1580,7 @@
+@@ -1154,7 +1583,7 @@
   	sweet_fb_rearm(fb, sender);
   }
   
 -@@ -388,38 +894,356 @@
-+@@ -388,38 +967,356 @@
++@@ -388,38 +970,356 @@
   static uint32_t sweet_fb_swaps_logged;
   static uint64_t sweet_fb_swap_count;
   
-@@ -1537,7 +1963,7 @@
+@@ -1537,7 +1966,7 @@
   
   	if (!fConsolePaused) {
   		int quiet = 0;
 -@@ -442,7 +1266,7 @@
-+@@ -442,7 +1339,7 @@
++@@ -442,7 +1342,7 @@
   		if (!(mask & (1u << layer)) || id == 0) {
   			continue;
   		}
-@@ -1546,7 +1972,7 @@
+@@ -1546,7 +1975,7 @@
   		if (sweet_fb_swaps_logged < 16) {
   			sweet_fb_swaps_logged++;
   			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
 -@@ -451,6 +1275,7 @@
-+@@ -451,6 +1348,7 @@
++@@ -451,6 +1351,7 @@
   			    get32(a, 12), dx, dy, w, h);
   		}
   		if (s == NULL || s == fSurface) {
-@@ -1554,27 +1980,65 @@
+@@ -1554,27 +1983,65 @@
   			OSSafeReleaseNULL(s);
   			continue;
   		}
 -@@ -500,35 +1325,262 @@
-+@@ -467,8 +1365,18 @@
++@@ -467,8 +1368,18 @@
 + 			dx = dy = 0;
 + 		}
 + 		/* Logical (presented) display coordinates -> panel coordinates. */
@@ -56639,7 +56650,7 @@ index d95faff..373e72e 100644
 + 		if (dx < 0) {
 + 			sx -= dx;
 + 			w += dx;
-+@@ -485,11 +1393,11 @@
++@@ -485,11 +1396,11 @@
 + 		if (h > (int32_t)s->height - sy) {
 + 			h = (int32_t)s->height - sy;
 + 		}
@@ -56656,7 +56667,7 @@ index d95faff..373e72e 100644
 + 		}
 + 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
 + 		    (uint64_t)(sx + w) * 4;
-+@@ -500,35 +1408,265 @@
++@@ -500,35 +1411,265 @@
   		if (src != 0 && bpe == 4) {
   			int copied = 0;
   #if defined(FUXI)
@@ -56687,7 +56698,7 @@ index d95faff..373e72e 100644
   			if ((mask & (mask-1)) == 0)
   				copied = sweet_surface_gpu_copy(s, src, sx, sy, dx, dy, w, h);
  +            if (copied == 3 || (copied < 0 && fScanout)) {
-@@ -1613,7 +2077,7 @@
+@@ -1613,7 +2080,7 @@
  -				    (size_t)w * 4);
  +			bool diffCopied = false;
  +#if defined(FUXI)
@@ -56696,7 +56707,7 @@ index d95faff..373e72e 100644
  +			    s->pixelFormat == SWEET_FB_FORMAT_BGRA && (mask & (mask - 1)) == 0 &&
  +			    dx == 0 && dy == 0 && w == (int32_t)fWidth && h == (int32_t)fHeight) {
  +				uint64_t offset = (uint64_t)s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4;
-@@ -1634,7 +2098,10 @@
+@@ -1634,7 +2101,10 @@
  +			if (copied != 2 && !diffCopied) {
  +				fShadowValid = false;
  +#if defined(FUXI)
@@ -56708,84 +56719,84 @@ index d95faff..373e72e 100644
  +					uint64_t offset = (uint64_t)s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4;
  +					uint64_t dest = (uint64_t)dy * fRowBytes + (uint64_t)dx * 4;
  +					fuxi_unixnu_copy_pixels((volatile void *)(fPixels + dest),
-@@ -1825,7 +2292,7 @@
+@@ -1825,7 +2295,7 @@
   	fStatCopy += took;
   	fStatCopyMax = took > fStatCopyMax ? took : fStatCopyMax;
   	if (++fStatFrames >= 600) {
 -@@ -538,15 +1590,47 @@
-+@@ -538,15 +1676,47 @@
++@@ -538,15 +1679,47 @@
   		absolutetime_to_nanoseconds(t1 - fStatStart, &span_ns);
   		IOLockLock(fLock);
   		uint32_t swaps = fStatSwaps, dropped = fStatDropped;
-@@ -1876,7 +2343,7 @@
+@@ -1876,7 +2346,7 @@
   		sweet_surface_gpu_stats(&split);
   		uint64_t ticks[] = {split.pin, split.lookup, split.map, split.clean,
   		    split.submit, split.wait, split.unmap, split.cpu};
 -@@ -557,13 +1641,21 @@
-+@@ -557,13 +1727,21 @@
++@@ -557,13 +1730,21 @@
   			absolutetime_to_nanoseconds(ticks[i], &ns);
   			us[i] = attempts ? ns / 1000 / attempts : 0;
   		}
-@@ -1901,7 +2368,7 @@
+@@ -1901,7 +2371,7 @@
   		fGpuBusyTicks = fGpuFailed = 0;
   		fGpuFrames = fCpuFrames = 0;
   		fGpuTime = fCpuTime = 0;
 -@@ -571,6 +1663,33 @@
-+@@ -571,6 +1749,33 @@
++@@ -571,6 +1752,33 @@
   		fStatCopy = fStatCopyMax = 0;
   		fStatStart = t1;
   	}
-@@ -1935,7 +2402,7 @@
+@@ -1935,7 +2405,7 @@
   #endif
   }
   
 -@@ -620,6 +1739,7 @@
-+@@ -620,6 +1825,7 @@
++@@ -620,6 +1828,7 @@
   	IOLockLock(fFB->fLock);
   	old = fPort;
   	fPort = port;
-@@ -1943,7 +2410,7 @@
+@@ -1943,7 +2413,7 @@
   	IOLockUnlock(fFB->fLock);
   	if (old != MACH_PORT_NULL) {
   		releaseNotificationPort(old);
 -@@ -643,6 +1763,40 @@
-+@@ -643,6 +1849,40 @@
++@@ -643,6 +1852,40 @@
   }
   
   static uint64_t sweet_fb_logged;        /* selectors already logged (< 64) */
-@@ -1984,7 +2451,7 @@
+@@ -1984,7 +2454,7 @@
   
   IOReturn
   IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 -@@ -660,7 +1814,7 @@
-+@@ -660,7 +1900,7 @@
++@@ -660,7 +1903,7 @@
   		break;
   	case kSweetFBSwapBegin:
   		IOLockLock(fFB->fLock);
-@@ -1993,7 +2460,7 @@
+@@ -1993,7 +2463,7 @@
   		IOLockUnlock(fFB->fLock);
   		outCount = 1;
   		break;
 -@@ -672,7 +1826,7 @@
-+@@ -672,7 +1912,7 @@
++@@ -672,7 +1915,7 @@
   			break;
   		}
   		memcpy(rec, args->structureInput, sizeof(rec));
-@@ -2002,7 +2469,7 @@
+@@ -2002,7 +2472,7 @@
   		break;
   	}
   	case kSweetFBGetID:
 -@@ -698,6 +1852,7 @@
-+@@ -698,6 +1938,7 @@
++@@ -698,6 +1941,7 @@
   			IOLockLock(fFB->fLock);
   			fFunc[type] = args->scalarInput[0];
   			fRefcon[type] = args->scalarInput[1];
-@@ -2010,7 +2477,7 @@
+@@ -2010,7 +2480,7 @@
   			IOLockUnlock(fFB->fLock);
   			char name[32];
   			proc_selfname(name, sizeof(name));
 -@@ -707,19 +1862,13 @@
-+@@ -707,19 +1948,13 @@
++@@ -707,19 +1951,13 @@
   		break;
   	case kSweetFBRequestPowerChange:
   		if (args->scalarInputCount >= 1) {

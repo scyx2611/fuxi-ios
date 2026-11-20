@@ -844,6 +844,8 @@
 - **主機測試**：`work/localbuild/display-fit-1120/` 保存 adreno、gpu-scanout、unixnu、touch、h1、unixnu-port2、mfb-align 測試輸出。Adreno 測試重播兩種實際封包與 1,022 個舊複製案例；unixnu 驗全畫面及局部損傷、觸控測試驗邊緣及黑邊夾限。實驗主機的 SCM 反組譯輔助程式使用本機 LLVM 21。核心建置另通過 43 個 workflow 測試，ISA 禁用指令 0。
 - **驗證紀錄**：等比模式已啟動 SpringBoard。第 120、1200 張各抽查 384 點，雙線性參考的通道絕對差總和 11、3，最近鄰 435、206；兩次黑邊抽查皆無非黑點。使用者確認鍵盤及介面左右均完整，並回報上下各多出一道粗黑邊。證據 `work/Codex-Xiaomi13-GPU-20261109/native-hw000-fit-uniform-hap6-1120/boot.log`。
   - 填滿模式第 1200 張的 384 點誤差總和為 8（雙線性）、338（角點對齊）、382（最近鄰）。使用者確認黑邊消失且兩側點按正常。全高截圖中時間與右側圖示中心都是 y=80，舊裁切版已驗收的位置是 63.5。舊版右側圖示 x=841..977，填滿版 x=829..959。證據 `work/Codex-Xiaomi13-GPU-20261109/native-hw000-fit-fill-hap6-1120/framebuffer.png` 與同目錄 boot.log。
+  - 趟 42 直接輸出面板原生 1080×2400。實機回報與截圖顯示 UIKit 紅色診斷條、注音鍵盤右端裁切。第 2420–2427 行：backboardd 匯入 row=4320、1080×2400 的 BGRA IOSurface 時被拒絕（stage 7、HostMemory），重啟後退回 CPU 合成。此時 SCANOUT 仍記錄 GPU 完成搬運。USB 紀錄在 `native-hw000-canvas1080-sb360x86-1120/boot.log`，mtd 在 `work/adsp-battery/fuxilog/20261120-124047/console.txt`。
+  - 趟 43 等比全螢幕使用 `--display-fit aspect`（ADT 值 3），UIKit 保有 375 pt 寬度，兩軸同為 0.96。第 2461 行 CA 完整表面 1125×2500、stride=4608，第 2467 行送入 1080×2400；第 2683 行調整原生 FixedSplit，4147 行 Metal 累計 120 格。USB 最後一筆 backboardd Metal 統計為 4863 格／0 failures，回收的 mtd 記到 8967 格／0 failures，沒有 runtime-failure 或 strikes 退回 CPU。第 1200 張的 384 點雙線性誤差總和 8，最近鄰 284。使用者在設定頁驗收狀態欄、鍵盤邊緣點按與滑動。第 43 趟截圖中間跨畫面更新，僅頂部右側圖示可量，x=908、y=61.5。見 B-015。
 - **參考來源**：既有 `fg_rect`、SweetFramebuffer、SweetHID、Turnip 的 r2d 矩形及 Mesa a6xx 的 FILTER 欄位。依現行雙／三緩衝路徑選用 GPU 縮放，未變更 DPU QSEED 設定。
 - **結論／未完成**：填滿模式的全寬畫面、無黑邊及邊緣觸點已經使用者驗收。狀態欄依 U-001 續校，震動已有反應、手感仍需調整。
 - **出處**：本機核心產物 `work/Codex-Xiaomi13-GPU-20261109/kernel-local-display-fit-1120-9g-artifact/`，原始建置輸入、43 項 PASS 與 ISA 稽核分別在 INPUTS.txt、logs/tests.txt、ISA.txt。

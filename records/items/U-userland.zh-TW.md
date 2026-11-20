@@ -29,6 +29,7 @@
 - **主機測試**：`work/localbuild/verify-sb-shape.py --self-test` 檢查 plain arm64 `MH_DYLIB`、ad hoc 簽署逐頁雜湊與負測試。
 - **驗證紀錄**：2026-11-16 起多個版本進入日常 `chain-v6`～`v9`。11 月 18 日使用者指出高度 127 的版本偏低。使用原廠 Android 的圖示高度作基準，把 `fuxi,sbshape` 改成 `300103`。設定頁截圖的時間和電池中心從 87.5 px 移到 63.5 px，使用者在實體面板確認與鏡頭對齊。包含 Wi-Fi 修正的日常版見 B-012。
   - 2026-11-20 全寬填滿 1080×2400 後，300×103 的時間、右側圖示同在 y=80。使用者希望上移對齊前鏡頭，兩側再往外。趟 38 以 `--display-fit fill --statusbar-width 360 --statusbar-height 86` 暫時開機，SpringBoard 回報 provider 360×86，使用者實機確認位置可以並要求合併日常。該趟結束的頂部 200 列截到純桌布，無法由該張量出圖示中心。原始量測、日常候選及回退見 G-050、B-014。
+  - 趟 45 的 1125×2500 等比版亦選中原來的 FixedSplit，沿用 360×86。兩張頂部截圖量得時間中心 (198.5,61.5)，Wi-Fi 與電池群中心 (908,61.5)。見 B-015。
 - **參考來源**：核心補丁 `0118`（`fuxi,inject`）。
 - **結論／未完成**：已穩定作為所有 SpringBoard／userland 注入功能的宿主函式庫。
 - **出處**：`harness: userland/fuxi-shape/FuxiShape.c`、`ws: work/statusbar-fix/stage-shape.sh`、`harness: 696a008`、`6dc5750`、`e8fc9db`、`4add383`。（2026-11-18 主代理分配範圍與來源，Gemini 依原始檔撰寫，主代理核對欄位、提交時間與路徑）

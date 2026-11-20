@@ -64,7 +64,7 @@
 
 <!-- INDEX:BEGIN -->
 
-共 419 項紀錄；目錄涵蓋 360 筆提交、246 份補丁、200 個開關、207 份測試、618 個檔案。
+共 420 項紀錄；目錄涵蓋 362 筆提交、246 份補丁、200 個開關、207 份測試、618 個檔案。
 
 ### S：上游繼承補丁（iOS 16、XNU 27 與 GPU 建置）（117 項）
 
@@ -408,7 +408,7 @@
 | [U-022](items/U-userland.zh-TW.md#u-022-bluetoothd-os_log-轉錄到-consolefuxibt-oslog) | bluetoothd os_log 轉錄到 console（fuxi,bt-oslog） | 已實機驗證（os_log 趟 2 無 crash，轉錄出 VSC stall 的原因） | ADT `/chosen fuxi,bt-oslog`（u32，預設 0）：bit 0 default／error／fault（每程序最多 4000 行），bit 1 info、bit 2 debug（合計最多 1500 行）。需要核心 0118 的注入位元 64（bluetoothd）及 `sweetnull` 含 bluetoothd；loader 產生器 `--bt-oslog <1..7>`，要求 `--bt-native` 與 `--stderr-log` 含 bluetoothd。 |
 | [U-023](items/U-userland.zh-TW.md#u-023-bluetoothd-相容修補關藍牙閃退與單實例-ble-廣播fuxibt-fix) | bluetoothd 相容修補：關藍牙閃退與單實例 BLE 廣播（fuxi,bt-fix） | 已實機驗證（趟 32／33：設定頁關→開兩次無閃退，電源循環後 Windows SDP 成功）。11-20 10:01 已併入日常 boot_a（B-013，`--bt-fix 3`，不帶 `--bt-oslog`）。 | ADT `/chosen fuxi,bt-fix`（u32，預設 0）：bit 0 補 H4 傳輸表的 PrepareTerminate；bit 1 讓 bluetoothd 讀到 `SupportsMultipleAdvertising=false`。需要核心 0118 的注入位元 64（bluetoothd）。loader 產生器 `--bt-fix <1..3>`，要求 `--bt-native` 與含 ` bluetoothd gets ` 的核心，並把 `fuxi,inject` 加上 64；不綁 `--bt-oslog`／`--stderr-log`。 |
 
-### B：開機鏈、部署與雙系統選單（14 項）
+### B：開機鏈、部署與雙系統選單（15 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -426,6 +426,7 @@
 | [B-012](items/B-boot.zh-TW.md#b-012-日常-a-槽整合-wi-fi-修正與前置鏡頭對齊) | 日常 a 槽整合 Wi-Fi 修正與前置鏡頭對齊 | 日常 a 槽已寫入並讀回。10 秒自動進 Android 已在常駐版驗證。 | 從 B-011 保留 10 秒倒數。ADT 採用 `fuxi,sbshape=300103`、`fuxi,wifi-ux=2047`、`fuxi,inject=30`、`fuxi,wifi-sb=3`。 |
 | [B-013](items/B-boot.zh-TW.md#b-013-日常-a-槽整合原生藍牙關藍牙修補與-safari-影片前置) | 日常 a 槽整合原生藍牙、關藍牙修補與 Safari 影片前置 | 日常 a 槽已寫入並讀回，10 秒自動進 Android 在常駐版通過。10:47 確認使用者從常駐選單進 iOS（第 174 次開機）、在設定頁關→開藍牙 5 輪、回 Android，都通過。 | 保留 B-012 的倒數、狀態欄高度 103 與 Wi-Fi 開關。新增原生藍牙：`fuxi,bt=5`、`--bt-native`（`sweetnoexec` 不再擋 bluetoothd）、IBS、`bt-optional`、`bt-pad`、`bt-mask`、`bt-txmask`、3.2 Mbaud、`bt-nolog`、控制器身分節點，以及 U-023 的 `fuxi,bt-fix=3`、`fuxiprivs=1`、disp0 `fuxi,mfb-align=1`。`fuxi,inject` 從 30 改為 126。不帶 `fuxi,bt-oslog`、`fuxi,bt-link-log`、點擊腳本或 bluetoothd stderr。 |
 | [B-014](items/B-boot.zh-TW.md#b-014-日常版全寬填滿與前鏡頭狀態欄間距) | 日常版全寬填滿與前鏡頭狀態欄間距 | 日常 iOS payload 已暫時開機；校正版已寫入常駐 boot_a，寫後整區讀回及選單倒數回 Android 通過。 | B-013 的完整指令加 `--display-fit fill --statusbar-width 360`，並將 `--statusbar-height 103` 改為 `86`。日常維持 mode 2 震動，命令列仍為原來的 604 bytes。 |
+| [B-015](items/B-boot.zh-TW.md#b-015-以面板比例排版的日常版) | 以面板比例排版的日常版 | 日常 payload 暫時開機通過，鍵盤、狀態欄與滑動已實機驗收。已安裝至 boot_a，整區讀回與常駐選單回 Android 均通過。 | `--display-fit aspect` 設定 ADT `/chosen fuxi,fit=3` 及 disp0 的 `canvas-height=2500`。保留 B-014 的狀態欄 360×86、震動 mode 2、Wi-Fi、藍牙與原 604-byte 命令列。 |
 
 ### T：工具、建置與流程（60 項）
 

@@ -460,8 +460,8 @@ def asset_report(path, bdf, native_ath12k=False):
                                      row['status'] != 'missing_manifest_entry' for row in rows))}
 
 
-# /chosen fuxi,fit：1 等比 1080x2338（上下黑邊），2 填滿 1080x2400；不帶就是 0（置中裁切）。
-DISPLAY_FIT = {'uniform': 1, 'fill': 2}
+# /chosen fuxi,fit：1 等比 1080x2338（上下黑邊），2 填滿 1080x2400，3 等比全螢幕 1125x2500；不帶就是 0（置中裁切）。
+DISPLAY_FIT = {'uniform': 1, 'fill': 2, 'aspect': 3}
 
 
 def statusbar_shape(current, width=None, height=None):
@@ -832,6 +832,8 @@ def build(args, report, tree, source_inputs):
         kernel_bytes = kernel.read_bytes()
         require(b'fuxi,fit' in kernel_bytes and b'FUXI GPU FIT: probe' in kernel_bytes and
                 b'SWEET HID: touch picture' in kernel_bytes, 'artifact lacks the fuxi,fit display scaling')
+        if args.display_fit == 'aspect':
+            require(b'panel-aspect canvas 1125x2500' in kernel_bytes, 'artifact lacks the 1125x2500 canvas')
         chosen.props.append(('fuxi,fit', 0, struct.pack('<I', DISPLAY_FIT[args.display_fit])))
         report['display_fit'] = args.display_fit
     if args.haptic_fast_apid:
@@ -1165,6 +1167,15 @@ def build(args, report, tree, source_inputs):
                 for node in bus.children if node.name == 'disp0']
     for display in displays:
         display.props = [prop for prop in display.props if prop[0] != 'fuxi,mfb-align']
+    if args.display_fit == 'aspect':
+        # 375 pt 寬供 UIKit 選用原狀態欄與鍵盤；兩軸都是 24/25。保留 ADT 屬性旗標。
+        require(len(displays) == 1, 'panel-aspect layout needs one /arm-io/disp0 node')
+        panel = displays[0]
+        for key, expected in [('canvas-width', 1125), ('canvas-height', 2436)]:
+            require([v for k, _, v in panel.props if k == key] == [struct.pack('<I', expected)],
+                    'unexpected source display ' + key)
+        panel.props = [(k, flags, struct.pack('<I', 2500) if k == 'canvas-height' else v)
+                       for k, flags, v in panel.props]
     if args.mfb_align:
         require(len(displays) == 1, '--mfb-align needs one /arm-io/disp0 node')
         require(b'fuxi,mfb-align' in kernel.read_bytes(), 'artifact lacks the fuxi,mfb-align switch')
@@ -1959,7 +1970,7 @@ def main():
                         help='/product artwork-display-gamut sRGB: MobileGestalt answers no deep colour, so WebKit, '
                              'MaterialKit and CA stay on 8-bit BGRA instead of b3a8/w30r surfaces (mkadt-fuxi.py)')
     parser.add_argument('--display-fit', choices=tuple(DISPLAY_FIT),
-                        help='ADT /chosen fuxi,fit: show the whole 1125x2436 picture instead of the centred '
+                        help='aspect: lay out at 1125x2500 and scale both axes by 0.96; uniform/fill: show the whole 1125x2436 picture instead of the centred '
                              '1080x2400 crop; uniform scales 0.96 with black bars, fill scales 0.96x0.985 '
                              '(needs the fuxi,fit kernel, fuxigpuscanout=1 and fuxiscandouble=1)')
     parser.add_argument('--mlo', type=int, choices=(0, 1, 2), default=0)

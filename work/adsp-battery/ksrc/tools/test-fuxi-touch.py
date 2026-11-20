@@ -339,10 +339,11 @@ static void fit_mapping() {
  assert(sweet_touch_at_edge(540,5,0,-31,1080,2338) && sweet_touch_at_edge(540,2395,0,-31,1080,2338));
  assert(sweet_touch_at_edge(47,1200,0,-31,1080,2338) && !sweet_touch_at_edge(48,1200,0,-31,1080,2338) && sweet_touch_at_edge(1079-47,1200,0,-31,1080,2338));
  // 觸控對應的邏輯座標與畫面取樣位置（GPU 兩趟雙線性：v=(row+0.5)*2435/H+0.5）相差不到 1.6 個邏輯像素。
- for(int mode=1;mode<=2;mode++){
+ for(int mode=1;mode<=3;mode++){
+  int logical_h=mode==3?2500:2436;
   int h=mode==1?2338:2400, y0=mode==1?31:0;
   for(int y=y0;y<y0+h;y++){
-   double ly=sweet_touch_axis(y,-y0,h)/65536.0*2436, v=(y-y0+0.5)*2435.0/h+0.5;
+   double ly=sweet_touch_axis(y,-y0,h)/65536.0*logical_h, v=(y-y0+0.5)*(logical_h-1)/h+0.5;
    assert(ly>v-1.6 && ly<v+1.6);
   }
   for(int x=0;x<1080;x++){

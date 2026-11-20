@@ -660,6 +660,9 @@ AppleCLCD::start(IOService *provider)
 	fFit = (fLogicalW == SWEET_FB_LOGICAL_W && fLogicalH == SWEET_FB_LOGICAL_H && fWidth == 1080 && fHeight == 2400 &&
 	    fRowBytes >= 1080 * 4) ? fuxi_display_fit() : 0;
 	if (fFit) {
+		fLogicalH = fuxi_fit_source_h(fFit);
+		fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+		if (fFit == 3) IOLog("FUXI UNIXNU FB: panel-aspect canvas 1125x2500\n");
 		for (int32_t x = 0; x < 1080; x++) fFitCol[x] = (uint16_t)sweet_fit_src(x, (int32_t)fLogicalW, 1080);
 		IOLog("FUXI UNIXNU FB: fit %u picture 1080x%u at 0,%u from %ux%u (GPU bilinear full frames, CPU nearest)\n",
 		    fFit, fuxi_fit_h(fFit), fuxi_fit_y0(fFit), fLogicalW, fLogicalH);

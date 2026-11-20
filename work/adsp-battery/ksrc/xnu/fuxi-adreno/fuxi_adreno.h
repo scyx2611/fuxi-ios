@@ -96,10 +96,10 @@ int fuxi_gpu_copy(unsigned slot, uint64_t generation, uintptr_t source, uint64_t
     unsigned pitch, unsigned sx, unsigned sy, unsigned dx, unsigned dy,
     unsigned width, unsigned height, struct fg_times *t);
 /* /chosen fuxi,fit（u32，預設 0）：0 維持置中裁切（面板只顯示 1125x2436 中間的 1080x2400），
- * 1 等比縮放成 1080x2338、上下各留黑邊，2 填滿 1080x2400（縱向多壓 1.5%）。
+ * 1 等比縮放成 1080x2338、上下各留黑邊，2 填滿 1080x2400，3 將 1125x2500 兩軸均縮為 0.96。
  * 開啟時 fuxi_gpu_copy 只接 CA 的整張 1125x2436（GPU 2D 引擎雙線性兩趟），SweetFramebuffer 的 CPU 退路用最近鄰。 */
 #define FUXI_FIT_SRC_W 1125u
-#define FUXI_FIT_SRC_H 2436u
+static inline unsigned fuxi_fit_source_h(unsigned fit) { return fit == 3 ? 2500u : 2436u; }
 unsigned fuxi_display_fit(void);
 static inline unsigned fuxi_fit_y0(unsigned fit) { return fit == 1 ? 31u : 0u; }
 static inline unsigned fuxi_fit_h(unsigned fit) { return fit == 1 ? 2338u : 2400u; }

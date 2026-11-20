@@ -43,7 +43,7 @@ static int fg_scanout_verify(void) {return !verifyBad;}
 /* /chosen fuxi,fit 的主機模型：fit_model 就是 ADT 值。 */
 static unsigned fit_model; static unsigned fuxi_display_fit(void) {return fit_model;}
 #define FUXI_FIT_SRC_W 1125u
-#define FUXI_FIT_SRC_H 2436u
+static inline unsigned fuxi_fit_source_h(unsigned fit) { return fit == 3 ? 2500u : 2436u; }
 static inline unsigned fuxi_fit_y0(unsigned fit) { return fit == 1 ? 31u : 0u; }
 static inline unsigned fuxi_fit_h(unsigned fit) { return fit == 1 ? 2338u : 2400u; }
 static uint32_t fg_fit_frames, fg_fit_refused;
@@ -499,35 +499,37 @@ int main(void)
  assert(clean_bytes==640);
  /* /chosen fuxi,fit：CA 的整張 1125x2436（pitch 4608）兩趟雙線性縮進面板。來源是水平／垂直漸層，
   * 輸出要接近理想中心對應 ((p+0.5)*src/dst-0.5) 的漸層值；畫面外列不動、畫面每點剛好寫一次。 */
- for(unsigned fit=1;fit<=2;fit++) {
+ for(unsigned fit=1;fit<=3;fit++) {
   reset(); fit_model=fit; fg_fit_frames=fg_fit_refused=0;
+  unsigned logical_h = fit == 3 ? 2500 : 2436;
+  if (fit == 3) assert(1125u * 2400 == logical_h * 1080u);
   unsigned fp=4608, H=fit==1?2338:2400, Y0=fit==1?31:0;
-  for(unsigned y=0;y<2436;y++) for(unsigned x=0;x<1152;x++) {
-   uint32_t px=0xff000000u|(y*255/2435)<<8|(x<1125 ? x*255/1124 : 0x5a)|0x40u<<16;
+  for(unsigned y=0;y<logical_h;y++) for(unsigned x=0;x<1152;x++) {
+   uint32_t px=0xff000000u|(y*255/(logical_h-1))<<8|(x<1125 ? x*255/1124 : 0x5a)|0x40u<<16;
    memcpy(source_buf+y*fp+x*4,&px,4);
   }
-  page_fixture(0,fp,0,0,1125,2436);
-  assert(fuxi_gpu_map(0,7,(uintptr_t)source_buf,2436*fp,&times)==1);
+  page_fixture(0,fp,0,0,1125,logical_h);
+  assert(fuxi_gpu_map(0,7,(uintptr_t)source_buf,logical_h*fp,&times)==1);
   /* 局部、未對齊 pitch、非整張都拒絕，交回 CPU。 */
-  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,0,1080,2400,&times) && fg_fit_refused==1);
-  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*4520,4520,0,0,0,0,1125,2436,&times) && fg_fit_refused==2);
-  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,1,1125,2436,&times) && fg_fit_refused==3 && !doorbells);
-  assert(model_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,0,1125,2436,&times)==1);
+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,logical_h*fp,fp,0,0,0,0,1080,2400,&times) && fg_fit_refused==1);
+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,logical_h*4520,4520,0,0,0,0,1125,logical_h,&times) && fg_fit_refused==2);
+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,logical_h*fp,fp,0,0,0,1,1125,logical_h,&times) && fg_fit_refused==3 && !doorbells);
+  assert(model_copy(0,7,(uintptr_t)source_buf,logical_h*fp,fp,0,0,0,0,1125,logical_h,&times)==1);
   assert(doorbells==1 && fg_cp_rects==2 && fg_fit_frames==1);
   double worst_u=0, worst_v=0;
   for(unsigned y=0;y<2400;y++) for(unsigned x=0;x<1080;x++) {
    uint32_t got; memcpy(&got,panel+y*4320+x*4,4);
    if(y<Y0 || y>=Y0+H) { assert(got==0x6b6b6b6bu); continue; }
    assert((got>>24)==0xff && ((got>>16)&255)==0x40); /* 寫過、恰好一次（總數＝畫面像素數） */
-   double u=(x+0.5)*1125.0/1080-0.5, v=(y-Y0+0.5)*2436.0/H-0.5;
-   double du=(got&255)-u*255/1124, dv=((got>>8)&255)-v*255/2435;
+   double u=(x+0.5)*1125.0/1080-0.5, v=(y-Y0+0.5)*(double)logical_h/H-0.5;
+   double du=(got&255)-u*255/1124, dv=((got>>8)&255)-v*255/(logical_h-1);
    if(du<0)du=-du; if(dv<0)dv=-dv;
    if(du>worst_u)worst_u=du; if(dv>worst_v)worst_v=dv;
   }
   assert(worst_u<1.6 && worst_v<1.6);
   for(unsigned i=0;i<64;i++) assert(panel[4320*2400+i]==0x6b);
   assert(fuxi_gpu_unmap(0,&times));
-  printf("PASS: fit %u two-pass bilinear 1125x2436 -> 1080x%u at y %u, taps inside the picture, gradient error u %.2f v %.2f LSB\n",fit,H,Y0,worst_u,worst_v);
+  printf("PASS: fit %u two-pass bilinear 1125x%u -> 1080x%u at y %u, taps inside the picture, gradient error u %.2f v %.2f LSB\n",fit,logical_h,H,Y0,worst_u,worst_v);
  }
  fit_model=0;
  printf("PASS: %u pixel-exact copies, cropped phases, noncontiguous 16K/4K mappings, full panel, hot cache, blocks/hints, exact clean ranges, one submit/frame, %u wraps, async busy/deadline/quarantine\n",checks,wrap_count);

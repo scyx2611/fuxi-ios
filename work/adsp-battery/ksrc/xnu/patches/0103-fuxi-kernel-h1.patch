@@ -1644,7 +1644,7 @@
  	fOffY = (fLogicalH - 2400) / 2;
 +	/*
 +	 * /chosen fuxi,fit（預設 0＝置中裁切）：GPU／CPU 拷貝改把整幅 1125x2436 縮進面板。
-+	 * 1 等比 0.96（1080x2338，y 從 31 起，上下黑邊），2 填滿 1080x2400。
++	 * 1 等比 0.96（1080x2338，y 從 31 起，上下黑邊），2 填滿 1080x2400，3 將 1125x2500 等比縮放到相同觸控範圍。
 +	 * 幾何與 fuxi_adreno.h 的 FUXI_FIT_* 相同；觸控對應到這個畫面矩形。
 +	 */
 +	DTEntry chosen;
@@ -1655,14 +1655,14 @@
 +	    SecureDTGetProperty(chosen, "fuxi,fit", &fit, &fitBytes) == kSuccess && fit && fitBytes == sizeof(fitMode)) {
 +		memcpy(&fitMode, fit, sizeof(fitMode));
 +	}
-+	if (fitMode == 1 || fitMode == 2) {
++	if (fitMode >= 1 && fitMode <= 3) {
 +		fLogicalW = 1080;
 +		fLogicalH = fitMode == 1 ? 2338 : 2400;
 +		fOffX = 0;
 +		fOffY = fitMode == 1 ? -31 : 0;
 +	}
 +	IOLog("SWEET HID: touch picture %dx%d at %d,%d (fit %u)\n", fLogicalW, fLogicalH, -fOffX, -fOffY,
-+	    (fitMode == 1 || fitMode == 2) ? (unsigned)fitMode : 0u);
++	    (fitMode >= 1 && fitMode <= 3) ? (unsigned)fitMode : 0u);
  	/* The digitizer covers the main display (backboardd maps it 1:1). */
  	setProperty("DisplayIntegrated", kOSBooleanTrue);
  	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */

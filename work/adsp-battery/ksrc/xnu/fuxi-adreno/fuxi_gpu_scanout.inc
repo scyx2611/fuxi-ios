@@ -126,14 +126,14 @@ static void fg_fit_clear_bars(uintptr_t pixels)
  }
 }
 /* 雙線性參考：位置以 1/256 來源像素為單位，像素 i 的中心在 i+0.5；超出畫面就夾到邊緣。 */
-static unsigned fg_fit_texel(const uint8_t *src, unsigned pitch, int u256, int v256, unsigned ch, unsigned nearest)
+static unsigned fg_fit_texel(const uint8_t *src, unsigned pitch, unsigned source_h, int u256, int v256, unsigned ch, unsigned nearest)
 {
  int a = u256 - 128, b = v256 - 128;
  int x0 = a < 0 ? 0 : a >> 8, y0 = b < 0 ? 0 : b >> 8, fx = a < 0 ? 0 : a & 255, fy = b < 0 ? 0 : b & 255;
  if (nearest) { x0 = u256 >> 8; y0 = v256 >> 8; fx = fy = 0; }
  if (x0 > (int)FUXI_FIT_SRC_W-1) { x0 = FUXI_FIT_SRC_W-1; fx = 0; }
- if (y0 > (int)FUXI_FIT_SRC_H-1) { y0 = FUXI_FIT_SRC_H-1; fy = 0; }
- int x1 = x0 + 1 > (int)FUXI_FIT_SRC_W-1 ? x0 : x0 + 1, y1 = y0 + 1 > (int)FUXI_FIT_SRC_H-1 ? y0 : y0 + 1;
+ if (y0 > (int)source_h-1) { y0 = source_h-1; fy = 0; }
+ int x1 = x0 + 1 > (int)FUXI_FIT_SRC_W-1 ? x0 : x0 + 1, y1 = y0 + 1 > (int)source_h-1 ? y0 : y0 + 1;
  unsigned p00 = src[(uint64_t)y0*pitch + x0*4u + ch], p10 = src[(uint64_t)y0*pitch + x1*4u + ch];
  unsigned p01 = src[(uint64_t)y1*pitch + x0*4u + ch], p11 = src[(uint64_t)y1*pitch + x1*4u + ch];
  return ((p00*(256u-fx) + p10*fx)*(256u-fy) + (p01*(256u-fx) + p11*fx)*fy + 32768u) >> 16;
@@ -147,6 +147,7 @@ static void fg_fit_probe(unsigned fit, unsigned buffer)
  unsigned n = ++fg_fit_probe_n;
  if ((n != 1 && n != 120 && n != 1200 && n != 6000) || !fg_scanout_source) return;
  uint64_t began = mach_absolute_time(), ns, sum[3] = {0, 0, 0};
+ unsigned source_h = fuxi_fit_source_h(fit);
  unsigned h = fuxi_fit_h(fit), y0 = fuxi_fit_y0(fit), m = h/2, worst[3] = {0, 0, 0}, bars = 0;
  const uint8_t *src = (const uint8_t *)(fg_scanout_source + (uint64_t)fg_scanout_sy*fg_scanout_pitch + fg_scanout_sx*4u);
  const volatile uint32_t *dst = (const volatile uint32_t *)fg_scanout_pixels_at(buffer);
@@ -154,13 +155,13 @@ static void fg_fit_probe(unsigned fit, unsigned buffer)
  for (unsigned gy = 0; gy < 24u; gy++) for (unsigned gx = 0; gx < 16u; gx++) {
   unsigned x = gx*1079u/15u, r = gy*(h-1)/23u, k = r & 1u, j = r >> 1;
   uint32_t got = dst[(y0+r)*1080u + x];
-  int u0 = (int)(((2u*x+1u)*FUXI_FIT_SRC_W*128u)/1080u), v0 = (int)(k*256u + ((2u*j+1u)*(FUXI_FIT_SRC_H-1u)*128u)/m);
-  int u1 = (int)(128u + x*(FUXI_FIT_SRC_W-1u)*256u/1079u), v1 = (int)(k*256u + 128u + j*(FUXI_FIT_SRC_H-2u)*256u/(m-1u));
+  int u0 = (int)(((2u*x+1u)*FUXI_FIT_SRC_W*128u)/1080u), v0 = (int)(k*256u + ((2u*j+1u)*(source_h-1u)*128u)/m);
+  int u1 = (int)(128u + x*(FUXI_FIT_SRC_W-1u)*256u/1079u), v1 = (int)(k*256u + 128u + j*(source_h-2u)*256u/(m-1u));
   unsigned e[3] = {0, 0, 0};
   for (unsigned ch = 0; ch < 4u; ch++) {
    int g = (int)((got >> (8u*ch)) & 255u);
-   int ref[3] = {(int)fg_fit_texel(src, fg_scanout_pitch, u0, v0, ch, 0), (int)fg_fit_texel(src, fg_scanout_pitch, u1, v1, ch, 0),
-                 (int)fg_fit_texel(src, fg_scanout_pitch, u0, v0, ch, 1)};
+   int ref[3] = {(int)fg_fit_texel(src, fg_scanout_pitch, source_h, u0, v0, ch, 0), (int)fg_fit_texel(src, fg_scanout_pitch, source_h, u1, v1, ch, 0),
+                 (int)fg_fit_texel(src, fg_scanout_pitch, source_h, u0, v0, ch, 1)};
    for (unsigned i = 0; i < 3u; i++) e[i] += (unsigned)(g > ref[i] ? g - ref[i] : ref[i] - g);
   }
   for (unsigned i = 0; i < 3u; i++) { sum[i] += e[i]; if (e[i] > worst[i]) worst[i] = e[i]; }

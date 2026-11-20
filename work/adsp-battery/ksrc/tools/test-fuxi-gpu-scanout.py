@@ -24,7 +24,7 @@ def module(name, path):
 
 PREFIX = r'''
 #define FUXI_FIT_SRC_W 1125u
-#define FUXI_FIT_SRC_H 2436u
+static inline unsigned fuxi_fit_source_h(unsigned fit) { return fit == 3 ? 2500u : 2436u; }
 static unsigned fitMode;
 static unsigned fuxi_display_fit(void) {return fitMode;}
 static unsigned fuxi_fit_y0(unsigned fit) {return fit==1?31u:0u;}

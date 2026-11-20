@@ -384,3 +384,19 @@
 - **參考來源**：B-013 的日常部署、U-001 的 FixedSplit 避讓區與 G-050 的全寬顯示。
 - **結論／未完成**：常駐 boot_a 與 Android 路徑已驗；同一 iOS payload 的 SpringBoard 與間距在趟 39 的 RAM 試開驗證。升級後從實體按鍵選 iOS 的路徑未另測。
 - **出處**：`work/dualboot/menu-daily-fit-20261120/report.json`、`work/Codex-Xiaomi13-GPU-20261109/native-hw000-daily-fit-sb360x86-1120/`。
+
+### B-015 以面板比例排版的日常版
+
+- **日期**：2026-11-20
+- **狀態**：日常 payload 暫時開機通過，鍵盤、狀態欄與滑動已實機驗收。已安裝至 boot_a，整區讀回與常駐選單回 Android 均通過。
+- **開關**：`--display-fit aspect` 設定 ADT `/chosen fuxi,fit=3` 及 disp0 的 `canvas-height=2500`。保留 B-014 的狀態欄 360×86、震動 mode 2、Wi-Fi、藍牙與原 604-byte 命令列。
+- **問題／現象**：B-014 填滿時，垂直與水平縮放率相差 2.63%。直接改成面板像素尺寸的趟 42 出現紅色狀態欄、注音鍵盤右端被裁、Metal 退回 CPU。
+- **根因**：360 pt 寬無法套用日常的 UIKit 狀態欄及鍵盤排版；另在匯入 1080×2400 顯示表面時出現 HostMemory 拒絕，見 G-050。
+- **做法**：保留 375 pt 寬度，邏輯畫布加高 64 列到 1125×2500。Adreno 對 CA 表面的寬高皆乘以 24/25，觸控以整個 1080×2400 面板回報。
+- **復現**：在 B-014 乾淨核心與 harness 上分別套用 `3628125` 與 `f959f54`。執行 `work/localbuild/build-kernel.ps1 -Ram 9g -Tests -Name kernel-local-daily-aspect-1120-9g-artifact -Harness work/localbuild/display-fit-1120/harness -Ath12k work/adsp-battery/ath12k-objects-b2876c6`。依 B-014 的指令改用此核心、上述開關與 loader `native-daily-aspect-sb360x86-1120-loader`。完整指令見 `work/localbuild/native-canvas-1120/aspect-build.txt`。依 B-013 的選單建置命令使用 `chain-daily-aspect-1120`、`menu-daily-aspect-20261120` 及 10 秒預設 Android。
+- **主機測試**：本機 WSL 通過 41 個工作流程命令，ISA 禁用指令 0。Adreno 模型重播第三種縮放封包，檢查完整覆蓋、取樣與寫入邊界。另用 1125×2500 輸入重播 SweetFramebuffer 的 CPU 全畫面及局部更新。舊核心製作 aspect loader 的負測試依預期拒絕。乾淨 main 的產生器重建出相同 payload。選單通過 454 項斷言、FDT 重播與基底重連結核對。
+- **驗證紀錄**：趟 43 使用者驗收狀態欄、鍵盤兩側點按及滑動。在 mtd 最後一次回報中 backboardd 以 Metal 合成 8967 格，failures=0。12:47:11 回 Android。此趟全高截圖跨過鎖屏過場，右側圖示中心可量到 (908,61.5)。趟 44 全高擷取中斷；趟 45 改於兩個手勢標記各取頂部 200 列，兩圖皆見正常時間、Wi-Fi 與電池。時間 x=143..254、右群 x=843..973，兩者中心 y=61.5。與 B-014 比較，水平中心同為 198.5／908，整體上移 1.5 px。截圖在 `work/Codex-Xiaomi13-GPU-20261109/native-hw000-aspect-topshots-1120/`。
+  - 趟 46 RAM 選單 10 秒倒數回 Android，交接位址 0xa9210000、槽位與 boot 分區相同。趟 47 從 B-014 升級，12:58:03 全 boot_a 讀回相符。12:59:10 常駐倒數回 Android 通過，槽位 _a。整區 SHA-256 `6a6ef1acf343839504a714d0f089768df529feb833c363da4a3a2ed84b841f26`。升級目錄保存前版完整 `boot-a-previous-menu.img`，SHA-256 `f6b4acb161dfdab43bd9348f136139c626bd13adce4007a4d40972a1dae899e8`，與 B-014 整區相同。
+- **參考來源**：G-050 的 Adreno、SweetFramebuffer 與 SweetHID 路徑，U-001 的 FixedSplit 及 B-014 選單、回退流程。
+- **結論／未完成**：等比顯示、觸控、Metal 合成在日常 payload 的 RAM 試開驗收。寫入驗證涵蓋整區讀回與常駐 Android 自動交接；此次安裝後未另以按鍵從新選單進入 iOS。
+- **出處**：`work/Codex-Xiaomi13-GPU-20261109/native-hw000-daily-aspect-1120/`、`work/adsp-battery/fuxilog/20261120-124727/console.txt`、`work/dualboot/menu-daily-aspect-20261120/report.json`、`work/dualboot/daily-aspect-ram-android-20261120/report.json`、`work/dualboot/persistent-slot-a-upgrade-daily-aspect-20261120/report.json`。
