@@ -64,7 +64,7 @@
 
 <!-- INDEX:BEGIN -->
 
-共 417 項紀錄；目錄涵蓋 350 筆提交、244 份補丁、198 個開關、205 份測試、604 個檔案。
+共 419 項紀錄；目錄涵蓋 360 筆提交、246 份補丁、200 個開關、207 份測試、618 個檔案。
 
 ### S：上游繼承補丁（iOS 16、XNU 27 與 GPU 建置）（117 項）
 
@@ -242,7 +242,7 @@
 | [E-048](items/E-early.zh-TW.md#e-048-參考方案-raphael-wifi-port-planmdsm8150-wi-fi-移植紀律) | 參考方案 `RAPHAEL-WIFI-PORT-PLAN.md`（SM8150 Wi-Fi 移植紀律） | 結論：記錄 R35–R38 單變數輪次、BDF 選型與 15 項主機回歸檢查紀律 | `fuxi` |
 | [E-049](items/E-early.zh-TW.md#e-049-wcn7850-原廠韌體路線的-m5w17-主機模型) | WCN7850 原廠韌體路線的 M5–W17 主機模型 | 上游主機測試保留，後續實機延伸見 K-041～K-048，日常 ath12k 路線見 K-049 起。 | 早期模型依對應 docs-lanes 文件使用 WLAN 分階段實驗值。W17／P17 記於 wlan-p17.md 的 fuxiwlanmlo 選項。 |
 
-### G：GPU／顯示流暢度線（2026-11-08～11-15）（49 項）
+### G：GPU／顯示流暢度線（2026-11-08～11-15）（50 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -295,6 +295,7 @@
 | [G-047](items/G-gpu.zh-TW.md#g-047-kernel-perf-widepatchfuxiperf2-寬域調頻) | `kernel-perf-wide.patch`（`fuxiperf=2` 寬域調頻） | 工具/實驗：將 `fuxiperfmax=720`、`fuxiperfbudget=1000` 整合為單一 `fuxiperf=2` 節省 boot-args 長度；提出 CPU 時脈重測假說 | `fuxiperf=2`、`fuxiperfmax=720`、`fuxiperfbudget=1000`、`fuxiperfmax`、`fuxiperfbudget`、`fuxiperfbase=2400` |
 | [G-048](items/G-gpu.zh-TW.md#g-048-雙系統開機鏈-chain-v2-與-chain-v3-寫入-boot_b) | 雙系統開機鏈 `chain-v2` 與 `chain-v3` 寫入 `boot_b` | 修復：將 `fuxibacklight=4`、`fuxi,adsp=3` 與 `fuxi,log=1` 寫入 `boot_b`（修正亮度連滑停止並加入 `mtdblk` 獨立開機日誌） | `fuxibacklight=4`、`fuxi,adsp=3`、`fuxi,log=1` |
 | [G-049](items/G-gpu.zh-TW.md#g-049-未解決項目鎖定自訂-devicelost4-空檔重幀材質重用等) | 未解決項目（鎖定自訂 DeviceLost、4+ 空檔、重幀材質重用等） | 未完成。已錄到一次 `DeviceLost` 後的顯示程序重啟與保護性停用，首次錯誤的原因待查。 | 無 |
+| [G-050](items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) | 在 1080 寬面板顯示完整 1125 寬畫面並對齊觸控 | 兩種模式皆通過主機驗證；實機結果見下方。 | loader 的 `--display-fit uniform\|fill` 設定 ADT `/chosen fuxi,fit` 為 1 或 2。缺省值 0 沿用置中裁切。 |
 
 ### K：核心硬體適配（000 線，2026-11-14 起）（78 項）
 
@@ -407,7 +408,7 @@
 | [U-022](items/U-userland.zh-TW.md#u-022-bluetoothd-os_log-轉錄到-consolefuxibt-oslog) | bluetoothd os_log 轉錄到 console（fuxi,bt-oslog） | 已實機驗證（os_log 趟 2 無 crash，轉錄出 VSC stall 的原因） | ADT `/chosen fuxi,bt-oslog`（u32，預設 0）：bit 0 default／error／fault（每程序最多 4000 行），bit 1 info、bit 2 debug（合計最多 1500 行）。需要核心 0118 的注入位元 64（bluetoothd）及 `sweetnull` 含 bluetoothd；loader 產生器 `--bt-oslog <1..7>`，要求 `--bt-native` 與 `--stderr-log` 含 bluetoothd。 |
 | [U-023](items/U-userland.zh-TW.md#u-023-bluetoothd-相容修補關藍牙閃退與單實例-ble-廣播fuxibt-fix) | bluetoothd 相容修補：關藍牙閃退與單實例 BLE 廣播（fuxi,bt-fix） | 已實機驗證（趟 32／33：設定頁關→開兩次無閃退，電源循環後 Windows SDP 成功）。11-20 10:01 已併入日常 boot_a（B-013，`--bt-fix 3`，不帶 `--bt-oslog`）。 | ADT `/chosen fuxi,bt-fix`（u32，預設 0）：bit 0 補 H4 傳輸表的 PrepareTerminate；bit 1 讓 bluetoothd 讀到 `SupportsMultipleAdvertising=false`。需要核心 0118 的注入位元 64（bluetoothd）。loader 產生器 `--bt-fix <1..3>`，要求 `--bt-native` 與含 ` bluetoothd gets ` 的核心，並把 `fuxi,inject` 加上 64；不綁 `--bt-oslog`／`--stderr-log`。 |
 
-### B：開機鏈、部署與雙系統選單（13 項）
+### B：開機鏈、部署與雙系統選單（14 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -423,7 +424,8 @@
 | [B-010](items/B-boot.zh-TW.md#b-010-loader-安全核對) | loader 安全核對 | 日常使用中（每次上機前強制核對 iOS 映像 FIEMAP、pin 狀態與 loader ADT extents） | `verify-native-map.py`（無參數）；`verify-loader-safety.py <loader 目錄名>`；`verify-args-on-loader-payload.py <loader 目錄名>`；`check-pin-readonly.c`（`check-pin-readonly <檔案...>`） |
 | [B-011](items/B-boot.zh-TW.md#b-011-a-槽選單顯示倒數10-秒後自動進-android) | a 槽選單顯示倒數，10 秒後自動進 Android | 已寫入 a 槽，Android 自動交接與讀回通過 | dualboot/build.py 的 --timeout 預設 10 秒、0 等待手動選擇、1–60 秒自動倒數。--default 改初始焦點，逾時固定選 Android。 |
 | [B-012](items/B-boot.zh-TW.md#b-012-日常-a-槽整合-wi-fi-修正與前置鏡頭對齊) | 日常 a 槽整合 Wi-Fi 修正與前置鏡頭對齊 | 日常 a 槽已寫入並讀回。10 秒自動進 Android 已在常駐版驗證。 | 從 B-011 保留 10 秒倒數。ADT 採用 `fuxi,sbshape=300103`、`fuxi,wifi-ux=2047`、`fuxi,inject=30`、`fuxi,wifi-sb=3`。 |
-| [B-013](items/B-boot.zh-TW.md#b-013-日常-a-槽整合原生藍牙關藍牙修補與-safari-影片前置) | 日常 a 槽整合原生藍牙、關藍牙修補與 Safari 影片前置 | 日常 a 槽已寫入並讀回，10 秒自動進 Android 在常駐版通過。同一份 iOS payload 已暫時開機到 SpringBoard。常駐選單的 iOS 路徑待使用者手動選擇後驗證。 | 保留 B-012 的倒數、狀態欄高度 103 與 Wi-Fi 開關。新增原生藍牙：`fuxi,bt=5`、`--bt-native`（`sweetnoexec` 不再擋 bluetoothd）、IBS、`bt-optional`、`bt-pad`、`bt-mask`、`bt-txmask`、3.2 Mbaud、`bt-nolog`、控制器身分節點，以及 U-023 的 `fuxi,bt-fix=3`、`fuxiprivs=1`、disp0 `fuxi,mfb-align=1`。`fuxi,inject` 從 30 改為 126。不帶 `fuxi,bt-oslog`、`fuxi,bt-link-log`、點擊腳本或 bluetoothd stderr。 |
+| [B-013](items/B-boot.zh-TW.md#b-013-日常-a-槽整合原生藍牙關藍牙修補與-safari-影片前置) | 日常 a 槽整合原生藍牙、關藍牙修補與 Safari 影片前置 | 日常 a 槽已寫入並讀回，10 秒自動進 Android 在常駐版通過。10:47 確認使用者從常駐選單進 iOS（第 174 次開機）、在設定頁關→開藍牙 5 輪、回 Android，都通過。 | 保留 B-012 的倒數、狀態欄高度 103 與 Wi-Fi 開關。新增原生藍牙：`fuxi,bt=5`、`--bt-native`（`sweetnoexec` 不再擋 bluetoothd）、IBS、`bt-optional`、`bt-pad`、`bt-mask`、`bt-txmask`、3.2 Mbaud、`bt-nolog`、控制器身分節點，以及 U-023 的 `fuxi,bt-fix=3`、`fuxiprivs=1`、disp0 `fuxi,mfb-align=1`。`fuxi,inject` 從 30 改為 126。不帶 `fuxi,bt-oslog`、`fuxi,bt-link-log`、點擊腳本或 bluetoothd stderr。 |
+| [B-014](items/B-boot.zh-TW.md#b-014-日常版全寬填滿與前鏡頭狀態欄間距) | 日常版全寬填滿與前鏡頭狀態欄間距 | 日常 iOS payload 已暫時開機；校正版已寫入常駐 boot_a，寫後整區讀回及選單倒數回 Android 通過。 | B-013 的完整指令加 `--display-fit fill --statusbar-width 360`，並將 `--statusbar-height 103` 改為 `86`。日常維持 mode 2 震動，命令列仍為原來的 604 bytes。 |
 
 ### T：工具、建置與流程（60 項）
 

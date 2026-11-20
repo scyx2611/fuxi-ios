@@ -309,7 +309,7 @@
 ### B-013 日常 a 槽整合原生藍牙、關藍牙修補與 Safari 影片前置
 
 - **日期**：2026-11-20 09:43–10:01。
-- **狀態**：日常 a 槽已寫入並讀回，10 秒自動進 Android 在常駐版通過。同一份 iOS payload 已暫時開機到 SpringBoard。常駐選單的 iOS 路徑待使用者手動選擇後驗證。
+- **狀態**：日常 a 槽已寫入並讀回，10 秒自動進 Android 在常駐版通過。10:47 確認使用者從常駐選單進 iOS（第 174 次開機）、在設定頁關→開藍牙 5 輪、回 Android，都通過。
 - **開關**：保留 B-012 的倒數、狀態欄高度 103 與 Wi-Fi 開關。新增原生藍牙：`fuxi,bt=5`、`--bt-native`（`sweetnoexec` 不再擋 bluetoothd）、IBS、`bt-optional`、`bt-pad`、`bt-mask`、`bt-txmask`、3.2 Mbaud、`bt-nolog`、控制器身分節點，以及 U-023 的 `fuxi,bt-fix=3`、`fuxiprivs=1`、disp0 `fuxi,mfb-align=1`。`fuxi,inject` 從 30 改為 126。不帶 `fuxi,bt-oslog`、`fuxi,bt-link-log`、點擊腳本或 bluetoothd stderr。
 - **問題／現象**：K-077 的原生藍牙、U-023 的關藍牙修補和 Safari 非 DRM 影片前置（趟 22 的 `mfb-align`）都只在暫時開機的測試 loader。日常 boot_a 仍是 B-012，iOS 進去沒有藍牙。
 - **根因**：常駐選單內嵌的是 B-012 的 iOS payload，核心與 ADT 都還沒有這些開關。
@@ -337,7 +337,7 @@
   4. 暫時開機 payload：`-Loader native-daily-bt-1120-loader -Kernel kernel-local-bt-complete-1120-9g-artifact -Out native-hw000bt-daily-1120`。
   5. RAM 選單試開：`-DualBootCheck android -RestorePoint D:\xiaomi13\fuxi_Backup\dualboot-before-validation-20261118-014941 -Candidate work\dualboot\menu-daily-bt-20261120 -Out daily-bt-ram-android-20261120`。
   6. 寫入：`-UpgradePersistent -InstallReport persistent-slot-a-upgrade-wifi-sb103-20261118 -Out persistent-slot-a-upgrade-daily-bt-20261120`。
-  7. 常駐 iOS 驗證（待做）：`-ValidatePersistent -IosOnly -InstallReport persistent-slot-a-upgrade-daily-bt-20261120 -Out <名稱>`，要在 10 秒倒數內按音量鍵選 iOS。
+  7. 常駐 iOS 驗證：`-ValidatePersistent -IosOnly -InstallReport persistent-slot-a-upgrade-daily-bt-20261120 -Out persistent-slot-a-validate-daily-bt-20261120`，要在 10 秒倒數內按音量鍵選 iOS。10:23 這趟倒數到期自動進了 Android（前後都是第 173 次開機），判為 `No fresh installed iOS boot to SpringBoard`。使用者之後自己重開選 iOS、測完回 Android，再用 `-ResumeAfterIos persistent-slot-a-validate-daily-bt-20261120 -Out persistent-slot-a-validate-daily-bt-20261120-r2` 接續核對同一份開機前紀錄。
 - **主機測試**：選單 454 項斷言通過，`SAVED_FDT_REPLAY_OK`，基底重連結逐位元相同（`base_relink_identical`）。Android 核心 `f5acfde209dbc87f86ed5f0ecff1dc52d3b51638cc30932fd5cab38e7f71afee` 與 B-012 相同。產生器自測通過，修正前後同一組參數產生相同命令列。
 - **驗證紀錄**：
   - 趟 34（09:46:51 開機、09:57:37 回 Android 並釋鎖）的 boot.log 共 7397 行，SHA-256 `d41ec9d406c2994f360601b2a31a1f69fe5530a8fb6bcce3dfaff22f27ec1bf7`。
@@ -348,17 +348,39 @@
     - AegirPoster SIGABRT 59 次，是使用者操作鎖定畫面／桌布時的既有現象：同日手動那趟有 78 次，自動那幾趟 0 次。與這份 payload 無關。
     - 主機 TSENS 最高 48.5°C。上一趟的 mtd 紀錄先拉到 `work/adsp-battery/fuxilog/20261120-094631`（第 172 次開機）。
   - 09:58:45–10:00:02 RAM 選單試開，10 秒後自動進 Android，交接位址 `0xa9210000`，boot 分區與槽位未變。
+  - 10:47:01–10:47:07 接續核對：`INSTALLED_IOS_AND_RETURN_VERIFIED`，`ios_boot_number=174`，回程交接位址 `0xa9210000`。mtdblk 紀錄 42696 行，SHA-256 `c1bf885dda95ee84a0d397f390ddb2d79288fbb6f926a201336620f5db1202ee`。
+    - 第 908 行 `exec SpringBoard`，0 次 panic。第 987 行 `exec bluetoothd`，全程只執行 1 次，0 次 `CRASH bluetoothd`。
+    - 第 3377 行 `setup status=ok`（韌體 1399 ms），第 3391 行 `resident ready baud=3200000`。第 4564 行 Wi-Fi `join finished 0`。
+    - 關→開 5 輪：第 36812、37508、38319、39486、40887 行 `FUXI BT SK: disconnect unit=1 owner=85 caller=85 owner_exiting=0`，每次後面都接 `connect unit=1 pid=85`（最後一次在第 41552 行），共 6 條 link。
+    - 最後的 stats 為 `links=6`、`acl=1708/695`、`desync=0`、`wake_timeouts=0`。`dropped=67` 都發生在第 5 輪關閉後、`rings=0` 的期間，是主機斷線後控制器送來的事件，重新連線後不再增加。
+    - AegirPoster SIGABRT 66 次，仍是鎖定畫面／桌布的既有現象。`lskdd` 反覆重啟（已知，見 K-077）。
   - 10:00:23–10:01:42 寫入：`IOS_ROOT_EXTENTS_AND_PIN_OK`、`BOOT_A_READBACK_OK`、`UPGRADED_ANDROID_VERIFIED`。整份 boot_a 的 SHA-256 是 `56565b1ca60cc99d446ea55dc66653e3c053c1c861729e014f3f0bf65fdfb63d`，候選 `0c1a02c3a6a947731d943bc8dff51d779db01b734069be9b52d863d48569c124`。前一版回退映像 `boot-a-previous-menu.img` 的 SHA-256 是 `c69fbbf3c1fe60f9449d2bdbf17006ed22f4d5c8e17b3042f64b69af65e86fc2`。
 - **參考來源**：B-011／B-012 的部署流程、K-077、U-023 與 [雙系統驗證](../../dualboot/VALIDATION.zh-TW.md)。
 - **結論／未完成**：
   - 日常版已經有原生藍牙、關藍牙修補與 Safari 非 DRM 影片前置，安裝版 Android 回程通過。
-  - 待驗：
-    - 常駐選單的 iOS 路徑。
-    - 日常版設定頁關→開藍牙。日常版不收 bluetoothd stderr，看不到 `h4=patched` 那一行，只能看核心的 `CRASH` 與 `exec bluetoothd` 次數；趟 34 使用者有沒有切藍牙不確定。關→開本身由趟 32／33 以同核心、同 dylib、同 bt-fix 位元驗過。
-    - 日常版耳機自動回連、Safari 影片、長時間穩定性。
+  - 常駐選單的 iOS 路徑與日常版關→開藍牙（5 輪）已驗。日常版不收 bluetoothd stderr，判斷依核心的 `SK: disconnect … owner_exiting=0`、同 pid 重新 `connect`、`exec bluetoothd` 次數與 `CRASH`。
+  - 待驗：日常版耳機回連與聲音（ACL 有 1708／695 筆，但核心看不到是哪個裝置）、Safari 影片、長時間穩定性。
   - 要退回 B-012：用升級目錄內的 `boot-a-previous-menu.img`。
 - **出處**：
   - `work/Codex-Xiaomi13-GPU-20261109/native-hw000bt-daily-1120/boot.log`
   - `work/dualboot/menu-daily-bt-20261120/report.json`
   - `work/dualboot/daily-bt-ram-android-20261120/report.json`
   - `work/dualboot/persistent-slot-a-upgrade-daily-bt-20261120/report.json`（含回退映像）
+  - `work/dualboot/persistent-slot-a-validate-daily-bt-20261120/report.json`（倒數到期那趟）、`work/dualboot/persistent-slot-a-validate-daily-bt-20261120-r2/report.json` 與 `after-ios/previous-console.txt`
+
+### B-014 日常版全寬填滿與前鏡頭狀態欄間距
+
+- **日期**：2026-11-20
+- **狀態**：日常 iOS payload 已暫時開機；校正版已寫入常駐 boot_a，寫後整區讀回及選單倒數回 Android 通過。
+- **開關**：B-013 的完整指令加 `--display-fit fill --statusbar-width 360`，並將 `--statusbar-height 103` 改為 `86`。日常維持 mode 2 震動，命令列仍為原來的 604 bytes。
+- **問題／現象**：鍵盤左右被裁，等比模式上下有黑邊。填滿後狀態欄偏低，時間與電池偏內。
+- **根因**：舊狀態欄是為置中裁切座標調整。全寬填滿時，同一組尺寸使兩側中心落在面板 y=80。
+- **做法**：從 B-013 的確切 ksrc `231479a` 單獨移植顯示及觸控修改成 `b4361c6`，harness 從 `da0ac11` 套入 `a3fbb97`。與 B-013 私有 ADT 的 /chosen 除了 RTC 只差 `fuxi,fit` 和 `fuxi,sbshape`。Android 映像雜湊與 10 秒預設 Android 均沿用 B-013。
+- **復現**：依 B-013 第 1～3 步，用當次 RTC、核心 `kernel-local-daily-fit-1120-9g-artifact`、loader `native-daily-fit-sb360x86-1120-loader`、基底 `chain-daily-fit-1120` 與選單 `menu-daily-fit-20261120`，套用本條目開關。`build-kernel.ps1 -Ram 9g -Ath12k work/adsp-battery/ath12k-objects-b2876c6 -Tests`。此處本機使用裝有日常補丁的獨立 harness worktree，完整 loader 指令存於 `work/localbuild/display-fit-1120/daily-build.txt`。
+- **主機測試**：日常核心 41 個 workflow 命令通過。選單 454 項斷言、FDT 重播、基底逐位元重連結通過。
+- **驗證紀錄**：趟 38 使用者確認實體前鏡頭高度及兩側間距。日常 payload 趟 39 暫時開機進 SpringBoard，載入 360×86，Wi-Fi 加入成功、藍牙 3.2 Mbaud。與趟 37 相比，時間中心 (213,80) → (198.5,63)，右側圖示中心 (894,80) → (908,63)。舊版經使用者確認的垂直中心是 63.5。量測來源 `native-hw000-daily-fit-sb360x86-1120/framebuffer.png` 頂部 200 列。
+  - 趟 40 RAM 選單試開紀錄 `work/dualboot/daily-fit-ram-android-20261120/report.json`。候選 `2bc74cd7561d147f092e13d55e75adaed68992c276a9fa483880236512819e29`、交接位址 `0xa9210000`，槽位與 boot 分區未變。
+  - 趟 41 由 B-013 的安裝報告升級。12:20:35 iOS root extents 與 pin 核對成功；12:20:40 寫後完整 boot_a 讀回 `f6b4acb161dfdab43bd9348f136139c626bd13adce4007a4d40972a1dae899e8`。12:21:46 常駐選單倒數進 Android 通過。回退映像 `work/dualboot/persistent-slot-a-upgrade-daily-fit-20261120/boot-a-previous-menu.img`，SHA-256 `56565b1ca60cc99d446ea55dc66653e3c053c1c861729e014f3f0bf65fdfb63d`，與升級前完整 boot_a 相同。安裝報告在同目錄 report.json。
+- **參考來源**：B-013 的日常部署、U-001 的 FixedSplit 避讓區與 G-050 的全寬顯示。
+- **結論／未完成**：常駐 boot_a 與 Android 路徑已驗；同一 iOS payload 的 SpringBoard 與間距在趟 39 的 RAM 試開驗證。升級後從實體按鍵選 iOS 的路徑未另測。
+- **出處**：`work/dualboot/menu-daily-fit-20261120/report.json`、`work/Codex-Xiaomi13-GPU-20261109/native-hw000-daily-fit-sb360x86-1120/`。

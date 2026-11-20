@@ -4,7 +4,7 @@
 
 **2026-11-20 日常 a 槽已整合原生藍牙、關藍牙修補與 Safari 影片前置（B-013）。** `menu-daily-bt-20261120` 通過 454 項主機斷言，基底重連結逐位元相同，Android 核心與前版相同。09:58:45–10:00:02 RAM 試開，10 秒後自動進 Android；10:00:23–10:01:42 寫入並讀回整個 `boot_a`，再自動回 Android。交接位址 `0xa9210000`。前一版 `menu-daily-wifi-sb103-20261118` 的回退映像與雜湊在安裝報告。 [RAM 試開](../work/dualboot/daily-bt-ram-android-20261120/report.json) · [安裝與回退紀錄](../work/dualboot/persistent-slot-a-upgrade-daily-bt-20261120/report.json)
 
-同一份 iOS payload 已在 09:46:51–09:57:37 暫時開機（趟 34）：SpringBoard、藍牙 3.2 Mbaud 就緒、bluetoothd 只執行一次且 0 次閃退、Wi-Fi 自動加入。常駐選單的 iOS 路徑待使用者手動選擇後驗證。 [趟 34 實機紀錄](../work/Codex-Xiaomi13-GPU-20261109/native-hw000bt-daily-1120/boot.log)
+同一份 iOS payload 已在 09:46:51–09:57:37 暫時開機（趟 34）：SpringBoard、藍牙 3.2 Mbaud 就緒、bluetoothd 只執行一次且 0 次閃退、Wi-Fi 自動加入。10:47 接續核對確認使用者從常駐選單進 iOS（第 174 次開機）、SpringBoard、0 panic，設定頁關→開藍牙 5 輪 bluetoothd 同一個 pid、0 次閃退，再回 Android。 [常駐驗證](../work/dualboot/persistent-slot-a-validate-daily-bt-20261120-r2/report.json) · [趟 34 實機紀錄](../work/Codex-Xiaomi13-GPU-20261109/native-hw000bt-daily-1120/boot.log)
 
 以下是 2026-11-18 的前一版：
 

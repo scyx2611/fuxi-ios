@@ -831,6 +831,23 @@
 - **結論／未完成**：`DeviceLost` 後的 GPU 加速停用已定位至顯示程序的同次開機保護機制。較早的 `native-surfrow2-nowait-loader` 也曾留下相同的 Metal 錯誤與重生拒絕紀錄。11 月 18 日這一次的首個 GPU 錯誤仍待取得。
 - **出處**：`continuation.md:4291-4313`，`STOPLOSS-0043.zh-TW.md:47-55`，`xiaomi13-devicelost-lockscreen.md:1-18`。（2026-11-18 由 GPU 紀錄盤點逐項整理，Gemini 撰寫、主代理整合與抽查）
 
+### G-050 在 1080 寬面板顯示完整 1125 寬畫面並對齊觸控
+
+- **日期**：2026-11-20
+- **狀態**：兩種模式皆通過主機驗證；實機結果見下方。
+- **開關**：loader 的 `--display-fit uniform|fill` 設定 ADT `/chosen fuxi,fit` 為 1 或 2。缺省值 0 沿用置中裁切。
+- **問題／現象**：iOS 按 1125×2436 排版，置中裁到 1080×2400 時，軟體鍵盤左右合計少了 45 欄。
+- **根因**：面板與邏輯畫面的寬高比不同。等比顯示全寬後畫面高 2338，會留出 62 列。
+- **做法**：沿用日常 Adreno 2D 複製路徑，依奇偶列分兩趟雙線性縮放；DPU 繼續讀取面板大小的輸出。局部更新和 GPU 拒絕時，CPU 以最近鄰複製對應範圍。SweetHID 依同一畫面區域反算觸點。填滿模式兩軸分別縮至 96.00% 與 98.52%。
+- **復現**：核心 `73d4d60`，0117 同步檢查修正 `af92e2e`。在工作區執行 `work/localbuild/build-kernel.ps1 -Ram 9g -Name kernel-local-display-fit-1120-9g-artifact -Ath12k work/adsp-battery/ath12k-objects-b2876c6 -Tests`。兩個 loader 的完整指令在 `work/localbuild/display-fit-1120/{uniform,fill}-build.txt`；重新建置時先經 launcher 取得當次 RTC。兩者均沿用日常 sRGB、狀態欄 103 與 Bluetooth 修正；暫時開機用現有 HAL 的命令列開關，在 575 bytes 內容納 mode 6。
+  - 從 B-013 的 loader 產生指令重現實機 A/B 時，替換 `--artifact`、`--name`、`--rtc-calibration` 為本次值，移除 `--stderr-log Preferences`，將 `--haptic 2` 改成 `--haptic 6 --hal-haptics --haptic-rtp work/adsp-battery/android-haptic-waves-1118-2352/0_click_P_RTP.bin`，加入 `--display-fit uniform` 或 `fill`。狀態欄校正額外使用 `--statusbar-width 360 --statusbar-height 86`。日常版保留原 604-byte 命令列與 mode 2 震動，完整步驟見 B-014。
+- **主機測試**：`work/localbuild/display-fit-1120/` 保存 adreno、gpu-scanout、unixnu、touch、h1、unixnu-port2、mfb-align 測試輸出。Adreno 測試重播兩種實際封包與 1,022 個舊複製案例；unixnu 驗全畫面及局部損傷、觸控測試驗邊緣及黑邊夾限。實驗主機的 SCM 反組譯輔助程式使用本機 LLVM 21。核心建置另通過 43 個 workflow 測試，ISA 禁用指令 0。
+- **驗證紀錄**：等比模式已啟動 SpringBoard。第 120、1200 張各抽查 384 點，雙線性參考的通道絕對差總和 11、3，最近鄰 435、206；兩次黑邊抽查皆無非黑點。使用者確認鍵盤及介面左右均完整，並回報上下各多出一道粗黑邊。證據 `work/Codex-Xiaomi13-GPU-20261109/native-hw000-fit-uniform-hap6-1120/boot.log`。
+  - 填滿模式第 1200 張的 384 點誤差總和為 8（雙線性）、338（角點對齊）、382（最近鄰）。使用者確認黑邊消失且兩側點按正常。全高截圖中時間與右側圖示中心都是 y=80，舊裁切版已驗收的位置是 63.5。舊版右側圖示 x=841..977，填滿版 x=829..959。證據 `work/Codex-Xiaomi13-GPU-20261109/native-hw000-fit-fill-hap6-1120/framebuffer.png` 與同目錄 boot.log。
+- **參考來源**：既有 `fg_rect`、SweetFramebuffer、SweetHID、Turnip 的 r2d 矩形及 Mesa a6xx 的 FILTER 欄位。依現行雙／三緩衝路徑選用 GPU 縮放，未變更 DPU QSEED 設定。
+- **結論／未完成**：填滿模式的全寬畫面、無黑邊及邊緣觸點已經使用者驗收。狀態欄依 U-001 續校，震動已有反應、手感仍需調整。
+- **出處**：本機核心產物 `work/Codex-Xiaomi13-GPU-20261109/kernel-local-display-fit-1120-9g-artifact/`，原始建置輸入、43 項 PASS 與 ISA 稽核分別在 INPUTS.txt、logs/tests.txt、ISA.txt。
+
 ## 盤點附註（2026-11-18）
 
 > 整理 GPU 紀錄時記下的漏讀與疑點，原文照錄（編號已改成本紀錄庫的編號）。處理後請在對應項目更新，並刪掉這裡的條目。

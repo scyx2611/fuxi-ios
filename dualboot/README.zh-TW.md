@@ -1,6 +1,6 @@
 # 小米 13 雙系統引導選單
 
-2026-11-20 10:01 起，日常 a 槽使用 `menu-daily-bt-20261120`。這版在 B-012 的前置鏡頭對齊與 Wi-Fi 修正之外，加入原生藍牙、關藍牙閃退修補（U-023）與 Safari 非 DRM 影片前置（`fuxi,mfb-align`）。常駐選單的 iOS 路徑待手動驗證；前一版 `menu-daily-wifi-sb103-20261118` 的回退映像在 `work/dualboot/persistent-slot-a-upgrade-daily-bt-20261120/`。
+2026-11-20 10:01 起，日常 a 槽使用 `menu-daily-bt-20261120`。這版在 B-012 的前置鏡頭對齊與 Wi-Fi 修正之外，加入原生藍牙、關藍牙閃退修補（U-023）與 Safari 非 DRM 影片前置（`fuxi,mfb-align`）。10:47 已確認從常駐選單進 iOS、關→開藍牙 5 輪並回 Android；前一版 `menu-daily-wifi-sb103-20261118` 的回退映像在 `work/dualboot/persistent-slot-a-upgrade-daily-bt-20261120/`。
 
 2026-11-18 15:42 起，日常 a 槽使用 `menu-daily-wifi-sb103-20261118`，已整合前置鏡頭對齊及 Wi-Fi 修正。選單顯示倒數，10 秒內無按鍵即自動進 Android。按音量鍵可取消倒數、移動焦點，再短按電源鍵確認。 [安裝驗證](VALIDATION.zh-TW.md)
 

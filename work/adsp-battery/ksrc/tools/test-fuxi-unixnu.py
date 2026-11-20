@@ -19,7 +19,7 @@ TE_OBSERVER = re.search(r'struct fg_te_observer \{.*?\};',
 
 
 def function(source, name):
-    match = re.search(r'^(?:static (?:inline )?)?(?:int|void|bool|uint32_t|uint64_t|IOReturn)\s*\n?' +
+    match = re.search(r'^(?:static (?:inline )?)?(?:int|void|bool|uint32_t|uint64_t|int32_t|IOReturn)\s*\n?' +
                       re.escape(name) + r'\([^;]*?\)\s*\{', source, re.M)
     assert match, name
     depth, end = 1, match.end()
@@ -59,6 +59,9 @@ typedef uintptr_t vm_offset_t;
 typedef uint64_t addr64_t;
 typedef void *event_t;
 static bool fx_root=true;
+static bool fx_log_ok;
+static uint8_t fx_log_lun;
+static uint64_t fx_log_first;
 static int sweet_ufs_lock;
 static bool fx_write_allowed(uint64_t lba,uint64_t n) {return lba>=10 && n && lba+n<=100;}
 static bool fx_map(uint64_t lba,uint64_t *dev,uint64_t *run) {*dev=10+lba;*run=100-lba;return true;}
@@ -318,6 +321,8 @@ static void fuxi_gpu_present_due(const uint32_t *ids,unsigned n) {assert(n<=8);m
 static int scanCpuAcquire=1;
 static int fuxi_gpu_scanout_triple(void) {return scanTriple;}
 static int fuxi_gpu_scanout_double(void) {return scanDouble;}
+static unsigned fuxi_fit_y0(unsigned fit) {return fit==1?31u:0u;}
+static unsigned fuxi_fit_h(unsigned fit) {return fit==1?2338u:2400u;}
 static int fuxi_gpu_scanout_pending(void) {return scanBackReady;}
 static int scanRetryResult;
 static int fuxi_gpu_scanout_retry(void) {scanRetries++;if(scanRetryResult==1){scanBackReady=false;scanTimes.previous_start=scanTimes.start;scanTimes.start=mach_absolute_time();}return scanRetryResult;}
@@ -405,7 +410,8 @@ static SweetSurface *sweet_surface_copy(uint32_t id) {assert(id==1 || (id==2 && 
 static int sweet_console_muted=1;
 static unsigned surfaceCopies;
 static void (*duringCopy)();
-static int sweet_surface_gpu_copy(SweetSurface *,uintptr_t,int,int,int,int,int,int){surfaceCopies++;if(duringCopy)duringCopy();if(gpuMode==2){scanTimes.submitted=mach_absolute_time();scanTimes.fence=0;}return gpuMode;}
+static int lastCopy[6];
+static int sweet_surface_gpu_copy(SweetSurface *,uintptr_t,int a,int b,int c,int d,int e,int f){surfaceCopies++;lastCopy[0]=a;lastCopy[1]=b;lastCopy[2]=c;lastCopy[3]=d;lastCopy[4]=e;lastCopy[5]=f;if(duringCopy)duringCopy();if(gpuMode==2){scanTimes.submitted=mach_absolute_time();scanTimes.fence=0;}return gpuMode;}
 static int directMode,directOnStub;static unsigned directCalls,directLayerRefusals;
 static int sweet_surface_direct(SweetSurface *,uintptr_t,unsigned,unsigned,unsigned,unsigned){directCalls++;return directMode;}
 static int fuxi_gpu_scanout_direct_on(){return directOnStub;}
@@ -1011,6 +1017,52 @@ int main(void) {
  staged.stageStats(1);assert(!staged.fStageN[0]);scanOwned=previousOwned;
  puts("PASS: stage stamps, exact avg/max us, missing/reversed samples, callbacks, 600-shown cadence and window reset");
  }
+ // /chosen fuxi,fit：邏輯座標不扣置中位移，GPU 只收整張 1125x2436；CPU 退路以最近鄰縮放進面板，
+ // 等比模式整張畫面塗黑上下黑邊，局部更新只動對應的面板矩形。
+ {
+  static uint32_t fitPanel[1080u*2400u],fitSource[1152u*2436u];
+  AppleCLCD ff={};IOLock flock;OSArray fclients;IOTimerEventSource ftimer;
+  ff.fLock=&flock;ff.fClients=&fclients;ff.fVsync=&ftimer;ff.fTickAbs=100;ff.fNextTick=ticks+100;ff.fFlushTicks=1;
+  ff.fConsolePaused=true;ff.fWidth=1080;ff.fHeight=2400;ff.fRowBytes=4320;ff.fLogicalW=1125;ff.fLogicalH=2436;
+  ff.fOffX=22;ff.fOffY=18;ff.fPixels=(uintptr_t)fitPanel;
+  for(unsigned i=0;i<1152u*2436u;i++)fitSource[i]=0x9e3779b1u*i;
+  Memory fmem={sizeof(fitSource)};SweetSurface fs;fs.width=1125;fs.height=2436;fs.bytesPerRow=4608;
+  fs.address=(uintptr_t)fitSource;fs.memory=&fmem;
+  SweetSurface *savedInput=inputSurface;inputSurface=&fs;int savedGpu=gpuMode;gpuMode=0;
+  for(uint32_t mode=1;mode<=2;mode++){
+   ff.fFit=mode;for(int x=0;x<1080;x++)ff.fFitCol[x]=(uint16_t)sweet_fit_src(x,1125,1080);
+   memset(fitPanel,0x6b,sizeof(fitPanel));
+   uint8_t frec[SWEET_FB_SWAP_REC_SIZE]={};put32(frec,0x104,1);put32(frec,0x54,1);put32(frec,0xc4+8,1125);put32(frec,0xc4+12,2436);
+   unsigned copies=surfaceCopies;offer(ff,frec);ff.vsyncFired(&ff,&ftimer);
+   assert(surfaceCopies==copies+1 && !lastCopy[0] && !lastCopy[1] && !lastCopy[2] && !lastCopy[3] && lastCopy[4]==1125 && lastCopy[5]==2436);
+   int y0=mode==1?31:0,ph=mode==1?2338:2400;
+   for(int y=0;y<2400;y++)for(int x=0;x<1080;x++){
+    uint32_t want=(y<y0||y>=y0+ph)?0xff000000u:fitSource[sweet_fit_src(y-y0,2436,ph)*1152+sweet_fit_src(x,1125,1080)];
+    assert(fitPanel[y*1080+x]==want);
+   }
+   for(unsigned i=0;i<1152u*2436u;i++)fitSource[i]^=0x00ff00ffu;
+   put32(frec,0x64,100);put32(frec,0x64+4,200);put32(frec,0xc4,100);put32(frec,0xc4+4,200);put32(frec,0xc4+8,50);put32(frec,0xc4+12,40);
+   offer(ff,frec);ff.vsyncFired(&ff,&ftimer);
+   assert(lastCopy[2]==100 && lastCopy[3]==200 && lastCopy[4]==50 && lastCopy[5]==40);
+   unsigned changed=0;
+   for(int y=0;y<2400;y++)for(int x=0;x<1080;x++){
+    if(y<y0||y>=y0+ph){assert(fitPanel[y*1080+x]==0xff000000u);continue;}
+    int lx=sweet_fit_src(x,1125,1080),ly=sweet_fit_src(y-y0,2436,ph);
+    bool inside=lx>=100&&lx<150&&ly>=200&&ly<240;
+    uint32_t now=fitSource[ly*1152+lx];
+    assert(fitPanel[y*1080+x]==(inside?now:now^0x00ff00ffu));changed+=inside;
+   }
+   assert(changed>=48*38 && changed<=48*39+48);
+   for(unsigned i=0;i<1152u*2436u;i++)fitSource[i]^=0x00ff00ffu;
+  }
+  // 面板欄對應：首末欄、單調、每個面板欄落在 [first(a), first(a+1)) 的邏輯欄 a。
+  assert(sweet_fit_src(0,1125,1080)==0 && sweet_fit_src(1079,1125,1080)==1124 && sweet_fit_first(1125,1125,1080)==1080);
+  for(int a=0;a<1125;a++)for(int x=sweet_fit_first(a,1125,1080);x<sweet_fit_first(a+1,1125,1080);x++)assert(sweet_fit_src(x,1125,1080)==a);
+  for(int a=0;a<2436;a++)for(int y=sweet_fit_first(a,2436,2338);y<sweet_fit_first(a+1,2436,2338);y++)assert(sweet_fit_src(y,2436,2338)==a);
+  IOLockLock(ff.fLock);ff.stopRecords();IOLockUnlock(ff.fLock);
+  inputSurface=savedInput;gpuMode=savedGpu;
+  puts("PASS: fit present keeps logical coordinates, GPU gets the whole 1125x2436, CPU nearest fallback, letterbox bars, partial damage");
+ }
  puts("PASS: actual framebuffer present/tick/swap: demand wake/idle, GPU retirement/fallback, blanking and shadow invalidation");
 }
 '''
@@ -1086,8 +1138,9 @@ def main():
             selected.append(line)
     source = ''.join(selected)
     constants = source[source.index('#define REG_CAP'):source.index('/*\n * Fuxi root')]
+    constants += re.search(r'^#define FX_LOG_AREA_BLOCKS .*$', source, re.M)[0] + '\n'
     funcs = ''.join(function(source, n) for n in (
-        'fuxi_ufs_poison', 'fuxi_ufs_check_idle', 'ufs_scsi', 'ufs_read_blocks',
+        'fx_log_write_allowed', 'fuxi_ufs_poison', 'fuxi_ufs_check_idle', 'ufs_scsi', 'ufs_read_blocks',
         'ufs_write_blocks', 'ufs_take_over_host', 'sweet_ufs_strategy'))
     # Replace only the ARM store barrier in the host model. Cache/MMIO/clock are modeled above.
     funcs = re.sub(r'__asm__ volatile\("dsb sy" ::: "memory"\);', '(void)0;', funcs)
@@ -1116,7 +1169,7 @@ def main():
         declaration = declaration.replace(': public IOMobileFramebuffer', '').replace(
             'OSDeclareDefaultStructors(AppleCLCD);', 'public:')
         methods = ''.join(function(display, name) for name in (
-            'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
+            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
             'AppleCLCD::presentWantedLocked', 'AppleCLCD::wakePresentLocked', 'sweet_fb_rearm',
             'AppleCLCD::vsyncFired', 'AppleCLCD::scanoutLog', 'get32', 'AppleCLCD::observeRecord', 'AppleCLCD::recordDone', 'AppleCLCD::consumeRecord', 'AppleCLCD::retireEarly', 'AppleCLCD::releaseRecord',
             'AppleCLCD::swapWait', 'AppleCLCD::stopRecords',

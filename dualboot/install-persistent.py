@@ -35,7 +35,11 @@ DAILY_WIFI_PAYLOAD = "784efe595e6e889814d9b88494197313e2aff8fd680dd0d36c500f1d40
 # payload 已在 RAM 試開到 SpringBoard、藍牙 3.2 Mbaud 就緒、Wi-Fi 自動加入（native-hw000bt-daily-1120）。
 DAILY_BT_PIN = "0c1a02c3a6a947731d943bc8dff51d779db01b734069be9b52d863d48569c124"
 DAILY_BT_PAYLOAD = "6d8a0b7c450bea4928817c26cb7fd2874264ca304923526ca11db902275b8734"
-DAILY_PAYLOADS = {DAILY_WIFI_PIN: DAILY_WIFI_PAYLOAD, DAILY_BT_PIN: DAILY_BT_PAYLOAD}
+# B-014 全寬日常版：填滿與 360×86 狀態欄，沿用 B-013 的其他選項。
+DAILY_FIT_PIN = "2bc74cd7561d147f092e13d55e75adaed68992c276a9fa483880236512819e29"
+DAILY_FIT_PAYLOAD = "11ae7cec2a23f31265060e9912ce745d18de254a3fafc8c28d27cf34e7a9e159"
+DAILY_PAYLOADS = {DAILY_WIFI_PIN: DAILY_WIFI_PAYLOAD, DAILY_BT_PIN: DAILY_BT_PAYLOAD,
+                  DAILY_FIT_PIN: DAILY_FIT_PAYLOAD}
 # 只有已在 RAM 試開驗過 Android 交接的映像可以寫入：雜湊 → (產物, RAM 試開紀錄)。
 VERIFIED_IMAGES = {
     PIN:
@@ -48,10 +52,12 @@ VERIFIED_IMAGES = {
         (DUALBOOT / "menu-daily-wifi-sb103-20261118", DUALBOOT / "daily-wifi-sb103-ram-android-20261118"),
     DAILY_BT_PIN:
         (DUALBOOT / "menu-daily-bt-20261120", DUALBOOT / "daily-bt-ram-android-20261120"),
+    DAILY_FIT_PIN:
+        (DUALBOOT / "menu-daily-fit-20261120", DUALBOOT / "daily-fit-ram-android-20261120"),
 }
 FIRST_INSTALL = "persistent-slot-a-20261118"
 UPGRADE_PINS = {PIN: LAUNCHING_PIN, LAUNCHING_PIN: COUNTDOWN_PIN, COUNTDOWN_PIN: DAILY_WIFI_PIN,
-                DAILY_WIFI_PIN: DAILY_BT_PIN}
+                DAILY_WIFI_PIN: DAILY_BT_PIN, DAILY_BT_PIN: DAILY_FIT_PIN}
 # 保留手動選取 iOS／Recovery 與返回 Android 的操作時間。
 IOS_RETURN_SECONDS = 900
 RESUME_RETURN_SECONDS = 1800
@@ -127,7 +133,7 @@ def prepare_candidate(original, pin=PIN):
                trial["validation"]["kernel_code_address"] == "0xa9210000" and
                size == report["candidate"]["bytes"] and size < original.stat().st_size,
                "Only the verified RAM trial image may be installed")
-    if pin in (COUNTDOWN_PIN, DAILY_WIFI_PIN, DAILY_BT_PIN):
+    if pin == COUNTDOWN_PIN or pin in DAILY_PAYLOADS:
         phone.need(report["timeout_seconds"] == trial["validation"].get("configured_android_timeout_seconds") == 10,
                    "The RAM trial must use the 10-second Android countdown")
     sha = hashlib.sha256(image.read_bytes())

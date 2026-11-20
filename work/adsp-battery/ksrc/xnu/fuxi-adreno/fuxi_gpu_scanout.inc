@@ -114,6 +114,67 @@ static unsigned fg_scanout_target(void)
 int fuxi_gpu_scanout_fifo(void) { return fg_scanout_fifo; }
 static unsigned fg_scanout_pa(unsigned buffer) { return buffer >= 3 ? FG_DPU_IOVA + (buffer - 3)*FG_DD_SLOT_BYTES : 0xb8000000u + buffer*0xa00000u; }
 static uintptr_t fg_scanout_pixels_at(unsigned buffer) { return buffer == 2 ? fg_scanout_pixels_c : buffer ? fg_scanout_pixels_b : fg_scanout_pixels; }
+/* /chosen fuxi,fit=1：等比畫面上下的黑邊（列 [0,31) 與 [2369,2400)）。GPU 縮放只寫畫面矩形，
+ * 所以在雙緩衝初始化時先塗黑 A，B／C 從 A 複製；CPU 整張畫面也會重塗（SweetFramebuffer）。 */
+static void fg_fit_clear_bars(uintptr_t pixels)
+{
+ unsigned fit = fuxi_display_fit(), y0 = fuxi_fit_y0(fit), h = fuxi_fit_h(fit);
+ if (fit != 1 || !pixels) return;
+ for (unsigned y = 0; y < 2400u; y++) {
+  if (y == y0) y = y0 + h;
+  for (unsigned x = 0; x < 1080u; x++) ((volatile uint32_t *)pixels)[y*1080u + x] = 0xff000000u;
+ }
+}
+/* 雙線性參考：位置以 1/256 來源像素為單位，像素 i 的中心在 i+0.5；超出畫面就夾到邊緣。 */
+static unsigned fg_fit_texel(const uint8_t *src, unsigned pitch, int u256, int v256, unsigned ch, unsigned nearest)
+{
+ int a = u256 - 128, b = v256 - 128;
+ int x0 = a < 0 ? 0 : a >> 8, y0 = b < 0 ? 0 : b >> 8, fx = a < 0 ? 0 : a & 255, fy = b < 0 ? 0 : b & 255;
+ if (nearest) { x0 = u256 >> 8; y0 = v256 >> 8; fx = fy = 0; }
+ if (x0 > (int)FUXI_FIT_SRC_W-1) { x0 = FUXI_FIT_SRC_W-1; fx = 0; }
+ if (y0 > (int)FUXI_FIT_SRC_H-1) { y0 = FUXI_FIT_SRC_H-1; fy = 0; }
+ int x1 = x0 + 1 > (int)FUXI_FIT_SRC_W-1 ? x0 : x0 + 1, y1 = y0 + 1 > (int)FUXI_FIT_SRC_H-1 ? y0 : y0 + 1;
+ unsigned p00 = src[(uint64_t)y0*pitch + x0*4u + ch], p10 = src[(uint64_t)y0*pitch + x1*4u + ch];
+ unsigned p01 = src[(uint64_t)y1*pitch + x0*4u + ch], p11 = src[(uint64_t)y1*pitch + x1*4u + ch];
+ return ((p00*(256u-fx) + p10*fx)*(256u-fy) + (p01*(256u-fx) + p11*fx)*fy + 32768u) >> 16;
+}
+/* 實機核對 GPU 縮放的取樣規則：第 1、120、1200、6000 張縮放畫面，在 16x24 格點比較 GPU 輸出與
+ * h0（本設計：每趟像素中心對應，含 top 起點）、h1（角點對齊）、nearest（h0 位置取最近像素）三種 CPU 參考，
+ * 每點四個通道的絕對差加總與最大值；fit=1 再抽查 6 列黑邊。只讀、不寫、不判失敗。 */
+static unsigned fg_fit_probe_n;
+static void fg_fit_probe(unsigned fit, unsigned buffer)
+{
+ unsigned n = ++fg_fit_probe_n;
+ if ((n != 1 && n != 120 && n != 1200 && n != 6000) || !fg_scanout_source) return;
+ uint64_t began = mach_absolute_time(), ns, sum[3] = {0, 0, 0};
+ unsigned h = fuxi_fit_h(fit), y0 = fuxi_fit_y0(fit), m = h/2, worst[3] = {0, 0, 0}, bars = 0;
+ const uint8_t *src = (const uint8_t *)(fg_scanout_source + (uint64_t)fg_scanout_sy*fg_scanout_pitch + fg_scanout_sx*4u);
+ const volatile uint32_t *dst = (const volatile uint32_t *)fg_scanout_pixels_at(buffer);
+ __asm__ volatile("dsb sy" ::: "memory");
+ for (unsigned gy = 0; gy < 24u; gy++) for (unsigned gx = 0; gx < 16u; gx++) {
+  unsigned x = gx*1079u/15u, r = gy*(h-1)/23u, k = r & 1u, j = r >> 1;
+  uint32_t got = dst[(y0+r)*1080u + x];
+  int u0 = (int)(((2u*x+1u)*FUXI_FIT_SRC_W*128u)/1080u), v0 = (int)(k*256u + ((2u*j+1u)*(FUXI_FIT_SRC_H-1u)*128u)/m);
+  int u1 = (int)(128u + x*(FUXI_FIT_SRC_W-1u)*256u/1079u), v1 = (int)(k*256u + 128u + j*(FUXI_FIT_SRC_H-2u)*256u/(m-1u));
+  unsigned e[3] = {0, 0, 0};
+  for (unsigned ch = 0; ch < 4u; ch++) {
+   int g = (int)((got >> (8u*ch)) & 255u);
+   int ref[3] = {(int)fg_fit_texel(src, fg_scanout_pitch, u0, v0, ch, 0), (int)fg_fit_texel(src, fg_scanout_pitch, u1, v1, ch, 0),
+                 (int)fg_fit_texel(src, fg_scanout_pitch, u0, v0, ch, 1)};
+   for (unsigned i = 0; i < 3u; i++) e[i] += (unsigned)(g > ref[i] ? g - ref[i] : ref[i] - g);
+  }
+  for (unsigned i = 0; i < 3u; i++) { sum[i] += e[i]; if (e[i] > worst[i]) worst[i] = e[i]; }
+ }
+ if (fit == 1) {
+  static const unsigned rows[6] = {0, 15, 30, 2369, 2384, 2399};
+  for (unsigned i = 0; i < 6u; i++) for (unsigned gx = 0; gx < 16u; gx++)
+   bars += dst[rows[i]*1080u + gx*1079u/15u] != 0xff000000u;
+ }
+ absolutetime_to_nanoseconds(mach_absolute_time()-began, &ns);
+ printf("FUXI GPU FIT: probe frame=%u fit=%u buffer=%u points=384 h0_sum=%llu h0_max=%u h1_sum=%llu h1_max=%u nearest_sum=%llu nearest_max=%u bars_nonblack=%u probe_us=%llu\n",
+     n, fit, buffer, (unsigned long long)sum[0], worst[0], (unsigned long long)sum[1], worst[1],
+     (unsigned long long)sum[2], worst[2], bars, (unsigned long long)(ns/1000));
+}
 static int fg_scanout_acquire(unsigned publication);
 static int fg_scanout_stop(const char *reason);
 
@@ -2187,6 +2248,7 @@ static int fg_scanout_acquire(unsigned publication)
  if (fg_scanout_double_requested && !fg_scanout_double_initialized) {
   fg_scanout_pixels_b = fuxi_gpu_nc_pointer(0xb8a00000u, 4320u*2400);
   if (!fg_scanout_pixels || !fg_scanout_pixels_b) return fg_scanout_stop("double buffer mapping");
+  fg_fit_clear_bars(fg_scanout_pixels); /* B／C 從 A 複製，黑邊跟著過去 */
   for (unsigned i = 0; i < 1080u*2400; i++)
    ((volatile uint32_t *)fg_scanout_pixels_b)[i] = ((const volatile uint32_t *)fg_scanout_pixels)[i];
   if (fg_scanout_triple_requested) {
@@ -2616,6 +2678,12 @@ void fuxi_gpu_scanout_release(void)
  */
 static int fg_scanout_verify(void)
 {
+ unsigned fit = fuxi_display_fit();
+ if (fit) {
+  /* 縮放畫面沒有逐像素相同的對照；改成固定幾張的取樣比對，只記錄、不判失敗。 */
+  fg_fit_probe(fit, fg_scanout_double_active ? (fg_scanout_triple_requested ? fg_scanout_copy : fg_scanout_front ^ 1u) : 0);
+  return 1;
+ }
  if (!fg_scanout_checks || fg_scanout_checked >= fg_scanout_checks) return 1;
  uint64_t began = mach_absolute_time(), ns;
  unsigned mismatch = 0, first_x = 0, first_y = 0;

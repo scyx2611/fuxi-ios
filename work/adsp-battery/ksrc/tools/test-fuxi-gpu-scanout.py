@@ -23,6 +23,12 @@ def module(name, path):
 
 
 PREFIX = r'''
+#define FUXI_FIT_SRC_W 1125u
+#define FUXI_FIT_SRC_H 2436u
+static unsigned fitMode;
+static unsigned fuxi_display_fit(void) {return fitMode;}
+static unsigned fuxi_fit_y0(unsigned fit) {return fit==1?31u:0u;}
+static unsigned fuxi_fit_h(unsigned fit) {return fit==1?2338u:2400u;}
 static unsigned fg_abi_inline; static int fg_inl_usable(void) { return 0; }
 #include <assert.h>
 #include <stdint.h>
@@ -1915,7 +1921,7 @@ static int IOLog(const char *format,...) {va_list args;va_start(args,format);vsn
         declaration = source[source.index('class AppleCLCD :'):source.index('OSDefineMetaClassAndStructors(AppleCLCD')]
         declaration = declaration.replace(': public IOMobileFramebuffer', '').replace('OSDeclareDefaultStructors(AppleCLCD);', 'public:')
         methods = ''.join(display.function(source, n) for n in (
-            'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
+            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
             'AppleCLCD::presentWantedLocked', 'AppleCLCD::wakePresentLocked', 'sweet_fb_rearm',
             'AppleCLCD::vsyncFired', 'AppleCLCD::scanoutLog', 'get32', 'AppleCLCD::observeRecord', 'AppleCLCD::recordDone', 'AppleCLCD::consumeRecord', 'AppleCLCD::retireEarly', 'AppleCLCD::releaseRecord',
             'AppleCLCD::swapWait', 'AppleCLCD::stopRecords',

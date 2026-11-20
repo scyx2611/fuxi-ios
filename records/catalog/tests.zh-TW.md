@@ -9,7 +9,7 @@
 | `ksrc:tools/test-fuxi-adreno-abi-perf.py` |  | [S-100](../items/S-upstream.zh-TW.md#s-100-實作受閘控執行路徑代換測試路由與-nativeadreno-abi-效能除錯追蹤sweetexecswap) |
 | `ksrc:tools/test-fuxi-adreno-cache.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu)、[S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow) |
 | `ksrc:tools/test-fuxi-adreno-mapping.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu)、[S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow) |
-| `ksrc:tools/test-fuxi-adreno.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu) |
+| `ksrc:tools/test-fuxi-adreno.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu)、[G-050](../items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
 | `ksrc:tools/test-fuxi-adt-args.py` |  | [K-067](../items/K-kernel.zh-TW.md#k-067-國家碼相同電源狀態不重做計時adt-fuxiargsbit-34補丁-0121) |
 | `ksrc:tools/test-fuxi-arm64e.py` |  | [S-115](../items/S-upstream.zh-TW.md#s-115-實作實驗性原生-arm64e-核心建置與開機金鑰初始化fuxi_arm64e1)、[S-116](../items/S-upstream.zh-TW.md#s-116-調整-arm64e-核心下-fat-binary-評分以停用-user-jop-避免-fpac-panicfuxiarm64e) |
 | `ksrc:tools/test-fuxi-ath12k-link.py` | kernel-adsp-battery.yml | [K-074](../items/K-kernel.zh-TW.md#k-074-ath12k-接受韌體配置的-peer-id-0)、[K-050](../items/K-kernel.zh-TW.md#k-050-ath12k-模組連結與-ci)、[K-075](../items/K-kernel.zh-TW.md#k-075-ath12k-wmi-掃描優先級與首輪掃描時間) |
@@ -35,11 +35,12 @@
 | `ksrc:tools/test-fuxi-gpu-irq.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
 | `ksrc:tools/test-fuxi-gpu-k1.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
 | `ksrc:tools/test-fuxi-gpu-probe.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu) |
-| `ksrc:tools/test-fuxi-gpu-scanout.py` |  | [S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow) |
+| `ksrc:tools/test-fuxi-gpu-scanout.py` |  | [S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow)、[G-050](../items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
 | `ksrc:tools/test-fuxi-h1.py` |  | [S-103](../items/S-upstream.zh-TW.md#s-103-實作-fuxi-h1-amfi-相容層按鍵仲裁注入自動鎖屏ui-腳本導覽與-pmk8550-rtc-校時) |
 | `ksrc:tools/test-fuxi-haptic-fifo.py` | hw000-preparation.yml | [K-034](../items/K-kernel.zh-TW.md#k-034-震動-fifo-準備主機模型) |
 | `ksrc:tools/test-fuxi-haptic-pulse.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-032](../items/K-kernel.zh-TW.md#k-032-hap525-震動盤點與有界脈衝) |
 | `ksrc:tools/test-fuxi-haptic-runtime.py` | kernel-adsp-battery.yml | [K-033](../items/K-kernel.zh-TW.md#k-033-hap525-direct_play-震動執行期) |
+| `ksrc:tools/test-fuxi-haptic-shape.py` | kernel-adsp-battery.yml | [U-021](../items/U-userland.zh-TW.md#u-021-從-ios-hal-的-actuator-輸出驅動-hap525) |
 | `ksrc:tools/test-fuxi-haptic-survey.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-025](../items/K-kernel.zh-TW.md#k-025-pmic-唯讀盤點flashhaptics) |
 | `ksrc:tools/test-fuxi-hostimport.py` |  | [K-070](../items/K-kernel.zh-TW.md#k-070-nativeadreno-host-import-配額失敗回報-vulkan-oom) |
 | `ksrc:tools/test-fuxi-htc-prep.py` | hw000-preparation.yml | [K-040](../items/K-kernel.zh-TW.md#k-040-wlan-htc-協定準備主機模型) |
@@ -47,6 +48,7 @@
 | `ksrc:tools/test-fuxi-iig-cache.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-ios27.py` |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁)、[T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-iosurface.py` |  | [S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow) |
+| `ksrc:tools/test-fuxi-media-signal.py` | kernel-adsp-battery.yml | [K-077](../items/K-kernel.zh-TW.md#k-077-wcn7850-uartsk-與-skywalk-常駐收送) |
 | `ksrc:tools/test-fuxi-memory.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-mesa-ir3.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-metal-artifacts.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
@@ -126,11 +128,11 @@
 | `ksrc:tools/test-fuxi-torch-pulse.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-026](../items/K-kernel.zh-TW.md#k-026-手電筒有界脈衝診斷mode-2) |
 | `ksrc:tools/test-fuxi-torch-runtime.py` | kernel-adsp-battery.yml | [K-027](../items/K-kernel.zh-TW.md#k-027-手電筒租約控制mode-3與-springboard-放行) |
 | `ksrc:tools/test-fuxi-torch-steady.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-030](../items/K-kernel.zh-TW.md#k-030-手電筒常亮) |
-| `ksrc:tools/test-fuxi-touch.py` |  | [S-103](../items/S-upstream.zh-TW.md#s-103-實作-fuxi-h1-amfi-相容層按鍵仲裁注入自動鎖屏ui-腳本導覽與-pmk8550-rtc-校時) |
+| `ksrc:tools/test-fuxi-touch.py` |  | [S-103](../items/S-upstream.zh-TW.md#s-103-實作-fuxi-h1-amfi-相容層按鍵仲裁注入自動鎖屏ui-腳本導覽與-pmk8550-rtc-校時)、[G-050](../items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
 | `ksrc:tools/test-fuxi-turnip-hostimport.py` |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁)、[T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-turnip-submit.py` |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁)、[T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-unixnu-port2.py` |  | [S-106](../items/S-upstream.zh-TW.md#s-106-整合-unixnu-顯示ufs-安全策略120-hz-te-同步掃描輸出追蹤與-mtdblk-獨立紀錄fx_log)、[S-110](../items/S-upstream.zh-TW.md#s-110-移植-unixnu-union-lower-directory-查找資格修正fuxiuniondir) |
-| `ksrc:tools/test-fuxi-unixnu.py` |  | [S-106](../items/S-upstream.zh-TW.md#s-106-整合-unixnu-顯示ufs-安全策略120-hz-te-同步掃描輸出追蹤與-mtdblk-獨立紀錄fx_log) |
+| `ksrc:tools/test-fuxi-unixnu.py` |  | [S-106](../items/S-upstream.zh-TW.md#s-106-整合-unixnu-顯示ufs-安全策略120-hz-te-同步掃描輸出追蹤與-mtdblk-獨立紀錄fx_log)、[G-050](../items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
 | `ksrc:tools/test-fuxi-vk-smoke.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-vulkan.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-wifi-ios.py` |  | [S-104](../items/S-upstream.zh-TW.md#s-104-實作-ios-apple80211ionetworkstack-wi-fi-模擬與原生-wcn7850-站台對接層fuxiwifiios)、[K-053](../items/K-kernel.zh-TW.md#k-053-ios-station-後端電源與掃描) |

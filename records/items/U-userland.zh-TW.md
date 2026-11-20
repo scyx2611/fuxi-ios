@@ -28,6 +28,7 @@
   - 預期輸出：SpringBoard stderr（經 `sweetnull` 進核心紀錄）印出 `fuxi: SpringBoard: status-bar provider 300 x 98 px; display cut-out preserved` 與替換前後矩形座標。
 - **主機測試**：`work/localbuild/verify-sb-shape.py --self-test` 檢查 plain arm64 `MH_DYLIB`、ad hoc 簽署逐頁雜湊與負測試。
 - **驗證紀錄**：2026-11-16 起多個版本進入日常 `chain-v6`～`v9`。11 月 18 日使用者指出高度 127 的版本偏低。使用原廠 Android 的圖示高度作基準，把 `fuxi,sbshape` 改成 `300103`。設定頁截圖的時間和電池中心從 87.5 px 移到 63.5 px，使用者在實體面板確認與鏡頭對齊。包含 Wi-Fi 修正的日常版見 B-012。
+  - 2026-11-20 全寬填滿 1080×2400 後，300×103 的時間、右側圖示同在 y=80。使用者希望上移對齊前鏡頭，兩側再往外。趟 38 以 `--display-fit fill --statusbar-width 360 --statusbar-height 86` 暫時開機，SpringBoard 回報 provider 360×86，使用者實機確認位置可以並要求合併日常。該趟結束的頂部 200 列截到純桌布，無法由該張量出圖示中心。原始量測、日常候選及回退見 G-050、B-014。
 - **參考來源**：核心補丁 `0118`（`fuxi,inject`）。
 - **結論／未完成**：已穩定作為所有 SpringBoard／userland 注入功能的宿主函式庫。
 - **出處**：`harness: userland/fuxi-shape/FuxiShape.c`、`ws: work/statusbar-fix/stage-shape.sh`、`harness: 696a008`、`6dc5750`、`e8fc9db`、`4add383`。（2026-11-18 主代理分配範圍與來源，Gemini 依原始檔撰寫，主代理核對欄位、提交時間與路徑）
@@ -507,6 +508,7 @@
   - `native-actuator-haptic-offline-1118-loader` 已用 K-078 的核心離線封裝，boot SHA-256 為 `dc6cba54f05a5f5c48211c0acf34ceb67af267f808198f39f8e18de9e21cc46b`。本配方省略 `--haptic-ui-ms`，以 Actuator 訊號驗收原生震動。重包時補本輪 RTC 校時，試裝與還原仍由上述 launcher 執行。
 - **參考來源**：本機既有的 HackiOS 衍生 FuxiAudio、K-033 的 HAP525 執行期，以及 Apple 的 HAL callback 介面。 [AudioServerPlugIn DoIOOperation](https://developer.apple.com/documentation/coreaudio/audioserverplugindriverinterface/doiooperation)
 - **實機驗證**：`work/Codex-Xiaomi13-GPU-20261109/native-hw000bt5-native-pcm-hal-1118-2202/boot.log` 第 1350 行確認 HAL 載入，第 4013 行 SpringBoard 回報 `initialized=1`。第 5150–5153 行 Actuator 輸出 6 ms、振幅 17，核心回報 `amp=0x11..0x11`、`fault-mid=0`、`stop-rc=0`，HAL 停止時計數為一筆請求、零錯誤。實機試裝寫入紀錄在 `work/statusbar-fix/audio-hal-enable-1118-2200/`。
+- **2026-11-20 全寬顯示合測（G-050）**：沿用已安裝的 HAL，暫時 loader 帶 `fuxihalhaptic=1`、mode 6 及同機 376-byte RTP，命令列 575 bytes。趟 36 的 USB console 共留下 11 行 UI click，每行 `rc=0`。最後一次輸出的累計為 14 次播放、17 次合併抑制。趟 37 使用者確認有震動、手感仍需調整。新 ADT 版 HAL 與原本 PCM-drain 版均已在主機通過碼頁校驗及三項破壞負測試。
 - **結論／未完成**：試裝配置的原生震動路徑已能驅動馬達。使用者兩次回報所有場景都有震感，但手感像轉子拖尾；起振加強的 mode 4 實機亦未通過手感驗收。11-20 使用者回報「有些地方沒震、震感不像 iOS」，因此加了 mode 6 觸感整形（預設關，見上）。趟 30 實機已驗到短觸感改播原廠點按（VMAX 依 level 調整）、長觸感照舊走 DIRECT，這兩項通過；使用者手感驗收待做。
 - 11-19 14:50 實機，`native-av-muted-haptic-1119-pm-loader` 的 750 ms 長按後，Actuator 與 HAP525 都記錄同一筆 132 bytes PCM，核心回報 `polls=1 rc=0 peak=81 played=1 expired=0`。此趟無人在場評分手感，連續刻度另待驗證。持久紀錄 `work/adsp-battery/fuxilog/20261119-145858/console.txt` 第 4924、4927 行。
 - **同機 Android 基準**：`android-haptic-waves-1118-2352/report.json` 顯示 Xiaomi vibratorfeature HAL 開啟 event4，對應 PM8550B HAP525。四筆獨立 SPMI 紀錄（`work/adsp-battery/android-haptic-spmi-1118-2353/`）的點按、刻度、長按與開關均為 FIFO，rate code 10（24 kHz），先 320 再 56 bytes，每個 byte 均符合手機上的 0_click_P_RTP.bin。第一次 play enable 至 disable 為 16.023、16.160、16.112、16.027 ms。重播命令 `python -X utf8 work/adsp-battery/verify-haptic-rtp.py work/adsp-battery/android-haptic-waves-1118-2352/0_click_P_RTP.bin work/adsp-battery/android-haptic-spmi-1118-2353`。iOS HAL 現行 10 ms 峰值轉 DIRECT_PLAY 路徑會丟掉正負相位；同機 Android 波形與 iOS 回饋的實機比對是後續驗收依據。喇叭出聲另見 K-078。
@@ -639,5 +641,5 @@
   - 關藍牙閃退已解決，bit 1 也去掉了 `0xfd48` 的未知命令。
   - 仍待做：
     - Windows 端 BLE 掃描與 GATT 仍找不到手機（修補前就是如此）。
-    - 日常版已由 B-013 部署（不帶 `--bt-oslog`），但日常版的關→開還沒有在常駐選單進 iOS 後實測。
+    - 日常版已由 B-013 部署（不帶 `--bt-oslog`）；趟 35 從常駐選單進 iOS 後關→開 5 輪，bluetoothd 同一個 pid、0 次閃退。
 - **出處**：K-077 趟 18 第 15028 行（關藍牙閃退初次記錄，趟 16 第 11192 行也有）。

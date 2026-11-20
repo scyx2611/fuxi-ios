@@ -565,6 +565,25 @@ static uint64_t fg_dpu_page_pa(uintptr_t va)
 }
 static void fg_dpu_clean(uintptr_t va, unsigned bytes) { CleanPoC_DcacheRegion_Force(va, bytes); }
 static int fg_abi_live_for_scanout(void);
+/* /chosen fuxi,fit：只接受 1（等比）或 2（填滿）；缺少、長度不是 4 或其他值都當 0（原本的置中裁切）。
+ * 第一次呼叫讀 ADT 後快取；SweetFramebuffer 啟動時就會先讀一次。 */
+static unsigned fg_fit_cached = ~0u;
+unsigned fuxi_display_fit(void)
+{
+ unsigned fit = __atomic_load_n(&fg_fit_cached, __ATOMIC_ACQUIRE);
+ if (fit != ~0u) return fit;
+ DTEntry chosen; const void *prop = NULL; unsigned bytes = 0;
+ fit = 0;
+ if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+     SecureDTGetProperty(chosen, "fuxi,fit", &prop, &bytes) == kSuccess && prop && bytes == 4) {
+  const uint8_t *p = (const uint8_t *)prop;
+  unsigned v = p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
+  if (v == 1 || v == 2) fit = v;
+ }
+ __atomic_store_n(&fg_fit_cached, fit, __ATOMIC_RELEASE);
+ return fit;
+}
+static uint32_t fg_fit_frames, fg_fit_refused;
 #include "fuxi_gpu_scanout.inc"
 static int fg_abi_init(void);
 static thread_call_data_t fg_init_call;
@@ -770,6 +789,26 @@ static void fg_rect(unsigned src, unsigned dst, unsigned pitch,
  g3_emit(dx); g3_emit((dx+width-1) | (height-1)<<16);
  g4_event(63); g3_emit(g3_pkt7(0x2c, 1)); g3_emit(3); g4_wfi();
 }
+/* /chosen fuxi,fit：整張 1125x2436 以雙線性縮成 1080 寬、rows 列，只寫同一奇偶的目的地列。
+ * 目的地 pitch 4320 不是 64 的倍數，所以分兩趟（top 0／1），每趟目的地 pitch 8640；來源不交錯，
+ * 每趟讀整張畫面（來源 pitch 需 64 對齊，CA 實際是 4608）。第 top 趟的來源 Y 範圍 [top, top+2434]
+ * 對到 rows 列：兩趟合起來約等於 v=(row+0.5)*2435/H+0.5 的取樣，與理想中心對應差不到 0.53 列，
+ * 奇偶兩趟彼此差 0.05 列以內（tools/test-fuxi-adreno.py）。
+ * 參考：mesa a6xx.xml 的 TPL1_A2D_SRC_TEXTURE_INFO FILTER（bit 16）；Turnip tu6_blit_image 的
+ * r2d 縮放路徑同樣用整數座標、SRC／DEST 的 BR 都是起點+寬-1。實機取樣規則由 fg_fit_probe 核對。 */
+static void fg_rect_fit(unsigned src, unsigned dst, unsigned pitch, unsigned top, unsigned rows)
+{
+ unsigned sx = (src & 63)/4, dx = (dst & 63)/4;
+ g3_emit(g4_pkt4(G4_SP_SRC_INFO, 5));
+ g3_emit(0x00500430u | 1u<<16); g3_emit((FUXI_FIT_SRC_W+sx) | FUXI_FIT_SRC_H<<15);
+ g3_emit(src & ~63u); g3_emit(0); g3_emit((pitch/64) << 9);
+ g3_emit(g4_pkt4(G4_RB_DST_INFO, 4));
+ g3_emit(0x430); g3_emit(dst & ~63u); g3_emit(0); g3_emit(4320*2/64);
+ g3_emit(g4_pkt4(G4_GRAS_SRC_X, 6));
+ g3_emit(sx<<8); g3_emit((sx+FUXI_FIT_SRC_W-1)<<8); g3_emit(top<<8); g3_emit((top+FUXI_FIT_SRC_H-2)<<8);
+ g3_emit(dx); g3_emit((dx+1079) | (rows-1)<<16);
+ g4_event(63); g3_emit(g3_pkt7(0x2c, 1)); g3_emit(3); g4_wfi();
+}
 /* Use XNU's forced PoC clean (CVAC on generic ARM64), never invalidate CPU
  * rendered data. Merge touching cache-line intervals; typical full-width
  * 4352-byte surfaces have only 32 bytes padding and clean as ONE range. */
@@ -889,11 +928,18 @@ int fuxi_gpu_copy(unsigned slot, uint64_t generation, uintptr_t source, uint64_t
  unsigned inl = fg_abi_inline && fg_inl_usable(); /* the client root is installed and stays: queue the copy in it */
  if (!inl && fg_client_busy) fg_abi_present_wait = 1;
  if (!fuxi_gpu_ready() || fg_busy || (!inl && fg_client_busy) || slot >= FG_CACHE_SLOTS || fg_generation[slot] != generation) return 0;
- if (!width || !height || width > 1080 || height > 2400 || dx > 1080-width || dy > 2400-height ||
+ unsigned fit = fuxi_display_fit();
+ if (fit) {
+  /* 等比／填滿：只接 CA 的整張 1125x2436 邏輯畫面（來源 pitch 64 對齊）；局部或其他尺寸交回 CPU 最近鄰退路。 */
+  if (dx || dy || width != FUXI_FIT_SRC_W || height != FUXI_FIT_SRC_H ||
+      (source & 3) || (pitch & 63) || pitch > 131008 || ((uint64_t)sx+width)*4 > pitch ||
+      length+(source&4095) > FG_SOURCE_BYTES ||
+      ((uint64_t)sy+height-1)*pitch+((uint64_t)sx+width)*4 > length) { fg_fit_refused++; return 0; }
+ } else if (!width || !height || width > 1080 || height > 2400 || dx > 1080-width || dy > 2400-height ||
      (source & 3) || (pitch & 3) || pitch > 131008 || ((uint64_t)sx+width)*4 > pitch ||
      length+(source&4095) > FG_SOURCE_BYTES ||
      ((uint64_t)sy+height-1)*pitch+((uint64_t)sx+width)*4 > length) return 0;
- if (fg_scanout_double_active) {
+ if (!fit && fg_scanout_double_active) {
   /* CA supplies a complete surface; expand damage to the complete panel. */
   if (sx < dx || sy < dy) return 0;
   sx -= dx; sy -= dy; dx = dy = 0; width = 1080; height = 2400;
@@ -935,9 +981,18 @@ int fuxi_gpu_copy(unsigned slot, uint64_t generation, uintptr_t source, uint64_t
   fg_scanout_copy = fg_scanout_target();
  }
  g_wr(G3_FENCE_PA, FG_CP_STAMP, 0); g_wr(G3_FENCE_PA, FG_CP_STAMP+8, 0); g_wr(G3_FENCE_PA, FG_CP_STAMP+16, 0);
- fg_cp_pitch = pitch; fg_cp_rects = stride < height ? stride : height;
+ fg_cp_pitch = pitch; fg_cp_rects = fit ? 2 : stride < height ? stride : height;
  g4_wfi(); fg_cp_stamp(FG_CP_STAMP);
  g4_setup();
+ if (fit) {
+  for (unsigned k = 0; k < 2; k++)
+   fg_rect_fit((inl ? FG_INL_SRC_VA : FG_SOURCE_VA)+slot*FG_SOURCE_BYTES+(source&4095)+sy*pitch+sx*4,
+       (inl ? FG_INL_FB_VA : G4_FB_VA)+(fg_scanout_double_active ? fg_scanout_copy*0xa00000u : 0)+(fuxi_fit_y0(fit)+k)*4320,
+       pitch, k, fuxi_fit_h(fit)/2);
+  if (!(++fg_fit_frames % 600) || fg_fit_frames == 1)
+   printf("FUXI GPU FIT: mode %u frames %u refused %u (bilinear 1125x2436 -> 1080x%u at y %u, two passes)\n",
+       fit, fg_fit_frames, fg_fit_refused, fuxi_fit_h(fit), fuxi_fit_y0(fit));
+ } else
  for (unsigned y = 0; y < stride && y < height; y++)
   fg_rect((inl ? FG_INL_SRC_VA : FG_SOURCE_VA)+slot*FG_SOURCE_BYTES+(source&4095)+(sy+y)*pitch+sx*4,
       (inl ? FG_INL_FB_VA : G4_FB_VA)+(fg_scanout_double_active ? fg_scanout_copy*0xa00000u : 0)+(dy+y)*4320+dx*4, pitch, width, (height-1-y)/stride+1, stride);

@@ -460,6 +460,19 @@ def asset_report(path, bdf, native_ath12k=False):
                                      row['status'] != 'missing_manifest_entry' for row in rows))}
 
 
+# /chosen fuxi,fit：1 等比 1080x2338（上下黑邊），2 填滿 1080x2400；不帶就是 0（置中裁切）。
+DISPLAY_FIT = {'uniform': 1, 'fill': 2}
+
+
+def statusbar_shape(current, width=None, height=None):
+    """沿用 FixedSplit 的寬×1000＋高編碼；未指定的軸保留原值。"""
+    old_width, old_height = divmod(current, 1000)
+    width = old_width if width is None else width
+    height = old_height if height is None else height
+    require(30 <= width <= 627 and 30 <= height <= 150, 'statusbar shape outside FixedSplit bounds')
+    return width * 1000 + height
+
+
 def inspect(args):
     source, artifact = STORAGE / args.source, STORAGE / args.artifact
     pinned = sums(source / 'sha256.txt')
@@ -682,7 +695,7 @@ def build(args, report, tree, source_inputs):
     controlled = set(OFF_PROPS) | {'fuxi,tapcmd', 'fuxi,rtc-offset', 'fuxi,haptic-ui', 'fuxi,haptic-env',
                                    'fuxi,wifi-sb', 'fuxi,wifi-rssi', 'fuxi,haptic-amp', 'fuxi,wifi-ux', 'fuxi,args',
                                    'fuxi,audio-dma', 'fuxi,haptic-rtp', 'fuxi,haptic-rtp-vmax',
-                                   'fuxi,cs35l41-prot'}
+                                   'fuxi,cs35l41-prot', 'fuxi,fit'}
     chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name not in controlled]
     chosen.props.extend((name, 0, struct.pack('<I', 0)) for name in OFF_PROPS)
     require({name: (flags, value) for name, flags, value in chosen.props if name not in controlled} ==
@@ -698,13 +711,12 @@ def build(args, report, tree, source_inputs):
         tree.children.append(wlan)
     if args.tap_script:
         chosen.props.append(('fuxi,tapcmd', 0, args.tap_script.encode('ascii') + b'\0'))
-    if args.statusbar_height is not None:
-        # 狀態欄高度（ADT fuxi,sbshape＝寬×1000＋高）；只換高度、保留寬。實測時間中心 y ≈ 高度 − 39.5 px。
-        shape = struct.unpack('<I', chosen.prop('fuxi,sbshape'))[0]
-        require(30 <= args.statusbar_height <= 150 and 30 <= shape // 1000 <= 627, 'invalid statusbar height')
+    if args.statusbar_width is not None or args.statusbar_height is not None:
+        shape = statusbar_shape(struct.unpack('<I', chosen.prop('fuxi,sbshape'))[0],
+                                args.statusbar_width, args.statusbar_height)
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,sbshape']
-        chosen.props.append(('fuxi,sbshape', 0, struct.pack('<I', shape // 1000 * 1000 + args.statusbar_height)))
-        report['statusbar_shape'] = shape // 1000 * 1000 + args.statusbar_height
+        chosen.props.append(('fuxi,sbshape', 0, struct.pack('<I', shape)))
+        report['statusbar_shape'] = shape
     kernel = STORAGE / args.artifact / 'kernel.development.fuxi'
     if args.bt_exit_trace:
         require(b'fuxibtexittrace' in kernel.read_bytes(), 'artifact lacks the Bluetooth exit trace')
@@ -811,6 +823,17 @@ def build(args, report, tree, source_inputs):
         require(args.haptic == 5 and args.hal_haptics and b'fuxihapticpcm' in kernel.read_bytes(),
                 '--haptic-pcm requires the mode 5 kernel and Actuator PCM HAL')
         report['haptic_pcm'] = True
+    if args.display_fit:
+        # 畫面縮放：ADT /chosen fuxi,fit（1 等比、2 填滿）。核心的 GPU 縮放只在雙緩衝掃描下接整張畫面，
+        # 觸控（SweetHID）讀同一個屬性；命令列已滿，不放 boot-arg。
+        tokens = report['command_line'].split()
+        require('fuxigpuscanout=1' in tokens and 'fuxiscandouble=1' in tokens,
+                '--display-fit needs fuxigpuscanout=1 and fuxiscandouble=1')
+        kernel_bytes = kernel.read_bytes()
+        require(b'fuxi,fit' in kernel_bytes and b'FUXI GPU FIT: probe' in kernel_bytes and
+                b'SWEET HID: touch picture' in kernel_bytes, 'artifact lacks the fuxi,fit display scaling')
+        chosen.props.append(('fuxi,fit', 0, struct.pack('<I', DISPLAY_FIT[args.display_fit])))
+        report['display_fit'] = args.display_fit
     if args.haptic_fast_apid:
         require(args.haptic_pcm and b'fuxi,haptic-fast-apid' in kernel_bytes,
                 '--haptic-fast-apid requires the PCM HAL and haptic APID cache kernel')
@@ -1283,6 +1306,9 @@ def build(args, report, tree, source_inputs):
 
 
 def self_test():
+    require(statusbar_shape(300127, height=103) == 300103 and
+            statusbar_shape(300103, width=360) == 360103 and
+            statusbar_shape(300103, 360, 86) == 360086, 'statusbar shape overrides differ')
     ux_marker = b'FUXI WIFI IOS: ux options 0x%x\0fuxi,wifi-ux'
     ux_marker5 = ux_marker + b'\0FUXI WIFI IOS: ux options 0x%x (power-asked %u, pick-rate %u, keep-link %u, ' \
                              b'country %u, power-same %u)\n'
@@ -1792,8 +1818,10 @@ def main():
                         help='Fresh rtc-calibration.py capture; carried as ADT /chosen fuxi,rtc-offset')
     parser.add_argument('--tap-script', help='Isolated native iOS UI test; store commands in the ADT')
     parser.add_argument('--tap-delay', type=int, default=85, help='UI test delay in seconds, 30..300')
+    parser.add_argument('--statusbar-width', type=int, metavar='PX',
+                        help='Set the centred FixedSplit cutout width in 1125-wide logical pixels (30..627)')
     parser.add_argument('--statusbar-height', type=int, metavar='PX',
-                        help='Replace the height part of ADT fuxi,sbshape (time centre y is about height - 39.5 px)')
+                        help='Replace the height part of ADT fuxi,sbshape (in the centred crop, time centre y is about height - 39.5 px)')
     parser.add_argument('--with-adsp', action='store_true',
                         help='Combined test: ADT fuxi,adsp=3 (battery) and fuxi,pmic=3 (torch) alongside WLAN, opted in '
                              'with fuxi,adsp-wlan=1; needs a kernel with that opt-in and no fuxiadsp= on the command line')
@@ -1930,6 +1958,10 @@ def main():
     parser.add_argument('--display-gamut', choices=('sRGB',),
                         help='/product artwork-display-gamut sRGB: MobileGestalt answers no deep colour, so WebKit, '
                              'MaterialKit and CA stay on 8-bit BGRA instead of b3a8/w30r surfaces (mkadt-fuxi.py)')
+    parser.add_argument('--display-fit', choices=tuple(DISPLAY_FIT),
+                        help='ADT /chosen fuxi,fit: show the whole 1125x2436 picture instead of the centred '
+                             '1080x2400 crop; uniform scales 0.96 with black bars, fill scales 0.96x0.985 '
+                             '(needs the fuxi,fit kernel, fuxigpuscanout=1 and fuxiscandouble=1)')
     parser.add_argument('--mlo', type=int, choices=(0, 1, 2), default=0)
     parser.add_argument('--host-cap-secondary', action='store_true',
                         help='Add SECONDARY with fuxiwlancap=1; refuse inherited cap tokens and MLO overrides')

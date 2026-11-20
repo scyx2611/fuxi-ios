@@ -1,6 +1,6 @@
 # 由工作區 work/repo-export/export-fuxi-ios.py 產生，請勿手改
-harness HEAD da0ac11768b2a86f521231194a1a35fbf60c063a（branch codex/adsp-battery）
-workspace HEAD 51e2dd6dde121797431da00f0934f74fa0d95d4e（只匯出已提交內容）
+harness HEAD a3fbb975d6af4c9e974899375a1ab25227d5a1e1（branch codex/daily-fit-1120）
+workspace HEAD 41fb48513457aee1bec01cce10c8c490e8e4ce77（只匯出已提交內容）
 
 # 核心基底：本機建置（work/localbuild/fuxi-kernel-build.sh）從本倉庫歷史取這個 tree，不連上游
 kernel-base 979e2f08c704677bb75934ae96d4686ba9d1692b 73399c0c833e17e8a3f86f921e9f473a76cd7999 zgl97/ios-fuxi
@@ -20,7 +20,7 @@ ios-fuxi/ = bangprovn/ios-fuxi 27f6a31c8b27c6f9127f9cf27092968422579ccf（tree c
   tools/mkadt-fuxi.py
   tools/mkadt-fuxi27.py
   tools/test-fuxi-monitor-framebuffer.py
-work/adsp-battery/ksrc/ = zgl97/ios-fuxi 979e2f08c704677bb75934ae96d4686ba9d1692b（tree 73399c0c833e17e8a3f86f921e9f473a76cd7999）＋本機 commit，ksrc HEAD 231479a81a064522976e27ed6340f091391a551d（tree 125763eafe8bee8c2b2eee668d142a7aa6e66de4），相對基底 229 個檔案
+work/adsp-battery/ksrc/ = zgl97/ios-fuxi 979e2f08c704677bb75934ae96d4686ba9d1692b（tree 73399c0c833e17e8a3f86f921e9f473a76cd7999）＋本機 commit，ksrc HEAD b4361c66960b1d7926a1f2e4634139feec2ad07b（tree 77765d2cd9863b5175fa44e5c6f8c7bbd1d54dd4），相對基底 236 個檔案
   基底套 18 份核心補丁後與 ksrc HEAD 不同的檔案（都不在 xnu/、xnu27/、shim/）：tools/sync-abi-backend.py
 uefi-fuxi/Resources/Scripts/mkbootimg.py = ljhhkx529/uefi-fuxi 57969ab77d36a982261daef16592741ed4a1d811（AOSP，Apache-2.0，未修改）
 

@@ -16,7 +16,7 @@ SRC = ROOT / 'xnu/fuxi-h1'
 
 
 def function(source, name):
-    match = re.search(r'^(?:static |extern "C" )?(?:void|int|bool|uint64_t)\n' +
+    match = re.search(r'^(?:static |extern "C" )?(?:void|int|bool|uint64_t|IOFixed)\n' +
                       re.escape(name) + r'\([^;]*?\)\n\{', source, re.M)
     assert match, name
     depth, end = 1, match.end()
@@ -325,8 +325,45 @@ static void randomized_sets() {
  ft_report(0);if(previous)check(0,previous);
  puts("PASS: 2,000 randomized full contact sets, ID uniqueness, masks, lifts and bounded coordinates");
 }
+// /chosen fuxi,fit：置中裁切與舊公式逐點相同；等比／填滿對應到縮放後的畫面矩形。
+static void fit_mapping() {
+ for(int x=0;x<1080;x++)assert(sweet_touch_axis(x,22,1125)==(IOFixed)(((int64_t)(x+22)<<16)/1125));
+ for(int y=0;y<2400;y++)assert(sweet_touch_axis(y,18,2436)==(IOFixed)(((int64_t)(y+18)<<16)/2436));
+ for(int x=0;x<1080;x+=7)for(int y=0;y<2400;y+=3)
+  assert(sweet_touch_at_edge(x,y,22,18,1125,2436)==(x<48||x>1079-48||y<48||y>2399-48));
+ // 等比：1080x2338，y 從 31 起；黑邊夾到畫面邊緣，邊緣帶從畫面算起。
+ assert(sweet_touch_axis(0,-31,2338)==0 && sweet_touch_axis(31,-31,2338)==0);
+ assert(sweet_touch_axis(2368,-31,2338)==(IOFixed)((2337LL<<16)/2338) && sweet_touch_axis(2399,-31,2338)==sweet_touch_axis(2368,-31,2338));
+ assert(sweet_touch_at_edge(540,31+47,0,-31,1080,2338) && !sweet_touch_at_edge(540,31+48,0,-31,1080,2338));
+ assert(sweet_touch_at_edge(540,2368-47,0,-31,1080,2338) && !sweet_touch_at_edge(540,2368-48,0,-31,1080,2338));
+ assert(sweet_touch_at_edge(540,5,0,-31,1080,2338) && sweet_touch_at_edge(540,2395,0,-31,1080,2338));
+ assert(sweet_touch_at_edge(47,1200,0,-31,1080,2338) && !sweet_touch_at_edge(48,1200,0,-31,1080,2338) && sweet_touch_at_edge(1079-47,1200,0,-31,1080,2338));
+ // 觸控對應的邏輯座標與畫面取樣位置（GPU 兩趟雙線性：v=(row+0.5)*2435/H+0.5）相差不到 1.6 個邏輯像素。
+ for(int mode=1;mode<=2;mode++){
+  int h=mode==1?2338:2400, y0=mode==1?31:0;
+  for(int y=y0;y<y0+h;y++){
+   double ly=sweet_touch_axis(y,-y0,h)/65536.0*2436, v=(y-y0+0.5)*2435.0/h+0.5;
+   assert(ly>v-1.6 && ly<v+1.6);
+  }
+  for(int x=0;x<1080;x++){
+   double lx=sweet_touch_axis(x,0,1080)/65536.0*1125, u=(x+0.5)*1125.0/1080;
+   assert(lx>u-1.6 && lx<u+1.6);
+  }
+ }
+ // 完整事件路徑：等比設定下點上黑邊得到 Y=0，點右下角得到畫面最後一列。
+ reset();service.fLogicalW=1080;service.fLogicalH=2338;service.fOffX=0;service.fOffY=-31;
+ ft.x[0]=540;ft.y[0]=10;ft_report(1);check(1,0);
+ assert(field(child(0),kIOHIDEventFieldDigitizerY)==0);
+ assert(field(child(0),kIOHIDEventFieldDigitizerEventMask)&kIOHIDDigitizerEventFromEdgeTip);
+ ft.x[0]=1079;ft.y[0]=2399;ft_report(1);
+ assert(field(child(0),kIOHIDEventFieldDigitizerX)==(IOFixed)((1079LL<<16)/1080));
+ assert(field(child(0),kIOHIDEventFieldDigitizerY)==(IOFixed)((2337LL<<16)/2338));
+ ft_report(0);
+ service.fLogicalW=1125;service.fLogicalH=2436;service.fOffX=22;service.fOffY=18;
+ puts("PASS: fit crop identity, uniform/fill touch inverse, letterbox clamp and edge band");
+}
 int main() {
- batching();coordinates_edges_and_legacy();allocation_failures();fifo_tests();randomized_sets();
+ batching();coordinates_edges_and_legacy();allocation_failures();fifo_tests();randomized_sets();fit_mapping();
  assert(!live && !lock_depth);
 }
 '''
@@ -381,10 +418,12 @@ def main():
     touch = (SRC / 'fuxi_touch.c').read_text()
     state = touch[touch.index('static struct {'):touch.index('} ft;') + len('} ft;')]
     methods = ''.join(function(hid, name) for name in (
-        'SweetHIDTouch::touch', 'SweetHIDTouch::report',
+        'sweet_touch_axis', 'sweet_touch_at_edge', 'SweetHIDTouch::touch', 'SweetHIDTouch::report',
         'sweet_hid_touch', 'sweet_hid_touch_report'))
     driver = ''.join(function(touch, name) for name in (
         'ft_us', 'ft_contact_end', 'ft_report', 'ft_retry_report', 'ft_poll'))
+    assert 'SecureDTGetProperty(chosen, "fuxi,fit", &fit, &fitBytes)' in hid
+    assert hid.count('fLogicalH = fitMode == 1 ? 2338 : 2400;') == 1 and hid.count('fOffY = fitMode == 1 ? -31 : 0;') == 1
     assert 'unsigned batch;' in state
     assert 'PE_parse_boot_argn("fuxitbatch", &ft.batch, sizeof(ft.batch))' in touch
     assert 'ft.batch =' not in touch  # static-zero default; only boot parsing enables it

@@ -33,6 +33,7 @@
 #include <libkern/c++/OSSet.h>
 #include <libkern/c++/OSString.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 
 #include "IOHIDEventService.h"
 #include "IOHIDEventServiceUserClient.h"
@@ -374,6 +375,27 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
  * app-switcher gesture.
  */
 #define SWEET_TOUCH_EDGE_PX 48
+/*
+ * 面板像素 -> 畫面上 0..1 的 16.16 座標（單一軸）：畫面在面板上從 -off 開始、
+ * 長 size 個面板像素。等比模式（/chosen fuxi,fit=1）點到上下黑邊時夾到畫面邊緣。
+ * 置中裁切（off 22/18、size 1125/2436）永遠不會被夾，結果與原本逐位元相同。
+ */
+static IOFixed
+sweet_touch_axis(int p, int off, int size)
+{
+	int64_t v = (int64_t)p + off;
+	v = v < 0 ? 0 : (v > size - 1 ? size - 1 : v);
+	return (IOFixed)((v << 16) / size);
+}
+/* 邊緣接觸從可見畫面算起：整個面板扣掉黑邊。 */
+static bool
+sweet_touch_at_edge(int x, int y, int offX, int offY, int w, int h)
+{
+	int x0 = offX < 0 ? -offX : 0, y0 = offY < 0 ? -offY : 0;
+	int x1 = w - 1 - offX > 1079 ? 1079 : w - 1 - offX, y1 = h - 1 - offY > 2399 ? 2399 : h - 1 - offY;
+	return x < x0 + SWEET_TOUCH_EDGE_PX || x > x1 - SWEET_TOUCH_EDGE_PX ||
+	       y < y0 + SWEET_TOUCH_EDGE_PX || y > y1 - SWEET_TOUCH_EDGE_PX;
+}
 class SweetHIDTouch : public IOHIDEventService {
 	OSDeclareDefaultStructors(SweetHIDTouch);
 public:
@@ -462,6 +484,27 @@ SweetHIDTouch::start(IOService *provider)
 	fLogicalH = native ? 2400 : 2436;
 	fOffX = (fLogicalW - 1080) / 2;
 	fOffY = (fLogicalH - 2400) / 2;
+	/*
+	 * /chosen fuxi,fit（預設 0＝置中裁切）：GPU／CPU 拷貝改把整幅 1125x2436 縮進面板。
+	 * 1 等比 0.96（1080x2338，y 從 31 起，上下黑邊），2 填滿 1080x2400。
+	 * 幾何與 fuxi_adreno.h 的 FUXI_FIT_* 相同；觸控對應到這個畫面矩形。
+	 */
+	DTEntry chosen;
+	void const *fit = NULL;
+	unsigned int fitBytes = 0;
+	uint32_t fitMode = 0;
+	if (!native && SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+	    SecureDTGetProperty(chosen, "fuxi,fit", &fit, &fitBytes) == kSuccess && fit && fitBytes == sizeof(fitMode)) {
+		memcpy(&fitMode, fit, sizeof(fitMode));
+	}
+	if (fitMode == 1 || fitMode == 2) {
+		fLogicalW = 1080;
+		fLogicalH = fitMode == 1 ? 2338 : 2400;
+		fOffX = 0;
+		fOffY = fitMode == 1 ? -31 : 0;
+	}
+	IOLog("SWEET HID: touch picture %dx%d at %d,%d (fit %u)\n", fLogicalW, fLogicalH, -fOffX, -fOffY,
+	    (fitMode == 1 || fitMode == 2) ? (unsigned)fitMode : 0u);
 	/* The digitizer covers the main display (backboardd maps it 1:1). */
 	setProperty("DisplayIntegrated", kOSBooleanTrue);
 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
@@ -527,16 +570,15 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
 	IOLockLock(fLock);
 	bool was = fDown[finger];
 	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
+	IOFixed nx = sweet_touch_axis(x, fOffX, fLogicalW);
+	IOFixed ny = sweet_touch_axis(y, fOffY, fLogicalH);
 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
 	if (was == down && !moved) {
 		IOLockUnlock(fLock);
 		return;
 	}
 	if (!was && down) {
-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
+		fEdge[finger] = sweet_touch_at_edge(x, y, fOffX, fOffY, fLogicalW, fLogicalH);
 	}
 
 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
@@ -629,11 +671,9 @@ SweetHIDTouch::report(UInt32 mask, const int *x, const int *y)
 		int py = y[i] < 0 ? 0 : (y[i] > 2399 ? 2399 : y[i]);
 		old |= fDown[i] ? bit : 0;
 		/* A lift keeps the last reported position, not the leave payload. */
-		nx[i] = down ? (IOFixed)(((int64_t)(px + fOffX) << 16) / fLogicalW) : fX[i];
-		ny[i] = down ? (IOFixed)(((int64_t)(py + fOffY) << 16) / fLogicalH) : fY[i];
-		edge[i] = !fDown[i] && down ?
-		    px < SWEET_TOUCH_EDGE_PX || px > 1079 - SWEET_TOUCH_EDGE_PX ||
-		    py < SWEET_TOUCH_EDGE_PX || py > 2399 - SWEET_TOUCH_EDGE_PX : fEdge[i];
+		nx[i] = down ? sweet_touch_axis(px, fOffX, fLogicalW) : fX[i];
+		ny[i] = down ? sweet_touch_axis(py, fOffY, fLogicalH) : fY[i];
+		edge[i] = !fDown[i] && down ? sweet_touch_at_edge(px, py, fOffX, fOffY, fLogicalW, fLogicalH) : fEdge[i];
 		if (fDown[i] != down || (down && (nx[i] != fX[i] || ny[i] != fY[i]))) {
 			changed |= bit;
 		}

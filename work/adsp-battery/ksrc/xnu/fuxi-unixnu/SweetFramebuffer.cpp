@@ -190,6 +190,8 @@ public:
 	bool          fPowerOff;      /* RequestPowerChange(0) */
 #if defined(FUXI)
 	bool          fBacklightPowerNotifications;
+	uint32_t      fFit;           /* /chosen fuxi,fit：0 置中裁切，1 等比，2 填滿 */
+	uint16_t      fFitCol[1080];  /* 面板欄 -> 邏輯欄（CPU 最近鄰退路） */
 #endif
 	uint32_t      fFadeStep;      /* fade-out steps done while off */
 	uint64_t      fTickAbs;       /* vsync period, absolute time units */
@@ -412,6 +414,43 @@ static bool sweet_fb_refresh_wanted(uint32_t panel120, bool hzPresent, uint32_t 
  return panel120 == 1 && !(hzPresent && hz <= 60);
 }
 
+/* /chosen fuxi,fit 的 CPU 退路（GPU 只接整張畫面，局部更新或 GPU 拒絕時走這裡）：
+ * 面板像素 p 的中心對到邏輯像素 floor((p+0.5)*logical/panel)，與 GPU 雙線性同一個中心對應，取最近鄰。 */
+static inline int32_t sweet_fit_src(int32_t p, int32_t logical, int32_t panel)
+{
+ return (int32_t)(((int64_t)(2 * p + 1) * logical) / (2 * panel));
+}
+/* 第一個對到邏輯座標 >= a 的面板像素（a 在 0..logical）。 */
+static inline int32_t sweet_fit_first(int32_t a, int32_t logical, int32_t panel)
+{
+ int64_t n = (int64_t)2 * a * panel - logical;
+ return n <= 0 ? 0 : (int32_t)((n + 2 * (int64_t)logical - 1) / (2 * (int64_t)logical));
+}
+/* 把邏輯矩形 [dx,dx+w)x[dy,dy+h)（來源 row 指向 (sx,sy)）縮放寫進面板畫面矩形；
+ * col 是 1080 個面板欄對應的邏輯欄。等比模式的整張畫面順便把上下黑邊塗黑。 */
+static void sweet_fit_copy(volatile uint8_t *pixels, uint32_t rowBytes, uint32_t fit, const uint8_t *src,
+    uint32_t srcRowBytes, int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h,
+    int32_t logicalW, int32_t logicalH, const uint16_t *col)
+{
+ int32_t y0 = (int32_t)fuxi_fit_y0(fit), ph = (int32_t)fuxi_fit_h(fit);
+ int32_t x0 = sweet_fit_first(dx, logicalW, 1080), x1 = sweet_fit_first(dx + w, logicalW, 1080);
+ int32_t r0 = sweet_fit_first(dy, logicalH, ph), r1 = sweet_fit_first(dy + h, logicalH, ph);
+ if (x1 > 1080) x1 = 1080;
+ if (r1 > ph) r1 = ph;
+ for (int32_t r = r0; r < r1; r++) {
+  const uint32_t *row = (const uint32_t *)(src + (uint64_t)(sy + sweet_fit_src(r, logicalH, ph) - dy) * srcRowBytes);
+  volatile uint32_t *out = (volatile uint32_t *)(pixels + (uint64_t)(y0 + r) * rowBytes);
+  for (int32_t x = x0; x < x1; x++) out[x] = row[sx + col[x] - dx];
+ }
+ if (fit == 1 && dx == 0 && dy == 0 && w == logicalW && h == logicalH) {
+  for (int32_t y = 0; y < 2400; y++) {
+   if (y == y0) y = y0 + ph;
+   volatile uint32_t *out = (volatile uint32_t *)(pixels + (uint64_t)y * rowBytes);
+   for (int32_t x = 0; x < 1080; x++) out[x] = 0xff000000u;
+  }
+ }
+}
+
 /* Opt-in disp0 ADT properties (the boot-arg line is nearly full): absent or not a u32 -> 0. */
 static uint32_t sweet_fb_adt_u32(IOService *provider, const char *key)
 {
@@ -617,6 +656,14 @@ AppleCLCD::start(IOService *provider)
 		    fUnixnuDiff ? "enabled" : "unavailable");
 	}
 	if (fUnixnuIdle) IOLog("FUXI UNIXNU FB: demand timer enabled, software 60 Hz, panel power inherited\n");
+	/* /chosen fuxi,fit：只在 1125x2436 邏輯畫面配 1080x2400 面板時有效；差分複製以面板像素為準，縮放時不用。 */
+	fFit = (fLogicalW == SWEET_FB_LOGICAL_W && fLogicalH == SWEET_FB_LOGICAL_H && fWidth == 1080 && fHeight == 2400 &&
+	    fRowBytes >= 1080 * 4) ? fuxi_display_fit() : 0;
+	if (fFit) {
+		for (int32_t x = 0; x < 1080; x++) fFitCol[x] = (uint16_t)sweet_fit_src(x, (int32_t)fLogicalW, 1080);
+		IOLog("FUXI UNIXNU FB: fit %u picture 1080x%u at 0,%u from %ux%u (GPU bilinear full frames, CPU nearest)\n",
+		    fFit, fuxi_fit_h(fFit), fuxi_fit_y0(fFit), fLogicalW, fLogicalH);
+	}
 	sweet_fb_te_configure(this);
 #endif
 	uint32_t timerOptions = sweet_fb_timer_options();
@@ -1318,8 +1365,18 @@ AppleCLCD::present(const SwapRecord &record)
 			dx = dy = 0;
 		}
 		/* Logical (presented) display coordinates -> panel coordinates. */
-		dx -= fOffX;
-		dy -= fOffY;
+		int32_t limW = (int32_t)fWidth, limH = (int32_t)fHeight;
+#if defined(FUXI)
+		if (fFit) {
+			/* 縮放模式保留邏輯座標，裁到整個邏輯畫面；換算到面板在 GPU／CPU 複製時做。 */
+			limW = (int32_t)fLogicalW;
+			limH = (int32_t)fLogicalH;
+		} else
+#endif
+		{
+			dx -= fOffX;
+			dy -= fOffY;
+		}
 		if (dx < 0) {
 			sx -= dx;
 			w += dx;
@@ -1336,11 +1393,11 @@ AppleCLCD::present(const SwapRecord &record)
 		if (h > (int32_t)s->height - sy) {
 			h = (int32_t)s->height - sy;
 		}
-		if (w > (int32_t)fWidth - dx) {
-			w = (int32_t)fWidth - dx;
+		if (w > limW - dx) {
+			w = limW - dx;
 		}
-		if (h > (int32_t)fHeight - dy) {
-			h = (int32_t)fHeight - dy;
+		if (h > limH - dy) {
+			h = limH - dy;
 		}
 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
 		    (uint64_t)(sx + w) * 4;
@@ -1353,21 +1410,21 @@ AppleCLCD::present(const SwapRecord &record)
 #if defined(FUXI)
             /* Keep CPU replay complete too if a full composed crop is available. */
             if (fuxi_gpu_scanout_double() && (mask & (mask-1)) == 0 && sx >= dx && sy >= dy &&
-                (uint64_t)(sx-dx)+fWidth <= s->width && (uint64_t)(sy-dy)+fHeight <= s->height &&
-                ((uint64_t)(sx-dx)+fWidth)*4 <= s->bytesPerRow &&
-                (uint64_t)s->offset + ((uint64_t)(sy-dy)+fHeight-1)*s->bytesPerRow +
-                ((uint64_t)(sx-dx)+fWidth)*4 <= s->memory->getLength()) {
-             sx -= dx; sy -= dy; dx = dy = 0; w = fWidth; h = fHeight;
+                (uint64_t)(sx-dx)+limW <= s->width && (uint64_t)(sy-dy)+limH <= s->height &&
+                ((uint64_t)(sx-dx)+limW)*4 <= s->bytesPerRow &&
+                (uint64_t)s->offset + ((uint64_t)(sy-dy)+limH-1)*s->bytesPerRow +
+                ((uint64_t)(sx-dx)+limW)*4 <= s->memory->getLength()) {
+             sx -= dx; sy -= dy; dx = dy = 0; w = limW; h = limH;
             }
 			uint64_t copyStart = mach_absolute_time();
 			/* CA's composed frame has one layer. Preserve the CPU path for
 			 * multi-layer records rather than submit multiple fences per frame. */
             /* fuxigpuncimport bit 24: VIG0 fetches the surface itself through a display IOVA slot; any refusal copies. */
-            if (fScanout && (mask & (mask-1)) == 0) {
+            if (fScanout && (mask & (mask-1)) == 0 && !fFit) { /* 直接掃描不會縮放：縮放模式一律複製 */
              int direct = sweet_surface_direct(s, src, sx, sy, w, h);
              if (direct == 3) { fStageBlocks[2]++; fScanoutDefers++; s->release(); return false; }
              if (direct == 2) { fShadowValid = false; s->release(); continue; }
-            } else if (fScanout && fuxi_gpu_scanout_direct_on()) fuxi_gpu_scanout_direct_refused(FG_DD_LAYERS);
+            } else if (!fFit && fScanout && fuxi_gpu_scanout_direct_on()) fuxi_gpu_scanout_direct_refused(FG_DD_LAYERS);
 			if ((mask & (mask-1)) == 0)
 				copied = sweet_surface_gpu_copy(s, src, sx, sy, dx, dy, w, h);
             if (copied == 3 || (copied < 0 && fScanout)) {
@@ -1402,7 +1459,7 @@ AppleCLCD::present(const SwapRecord &record)
 #endif
 			bool diffCopied = false;
 #if defined(FUXI)
-			if (copied != 2 && fUnixnuDiff && sweet_console_muted &&
+			if (copied != 2 && fUnixnuDiff && !fFit && sweet_console_muted &&
 			    s->pixelFormat == SWEET_FB_FORMAT_BGRA && (mask & (mask - 1)) == 0 &&
 			    dx == 0 && dy == 0 && w == (int32_t)fWidth && h == (int32_t)fHeight) {
 				uint64_t offset = (uint64_t)s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4;
@@ -1423,7 +1480,10 @@ AppleCLCD::present(const SwapRecord &record)
 			if (copied != 2 && !diffCopied) {
 				fShadowValid = false;
 #if defined(FUXI)
-				if (fUnixnuDiff) {
+				if (fFit) {
+					sweet_fit_copy((volatile uint8_t *)fPixels, fRowBytes, fFit, (const uint8_t *)(src + s->offset),
+					    s->bytesPerRow, sx, sy, dx, dy, w, h, (int32_t)fLogicalW, (int32_t)fLogicalH, fFitCol);
+				} else if (fUnixnuDiff) {
 					uint64_t offset = (uint64_t)s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4;
 					uint64_t dest = (uint64_t)dy * fRowBytes + (uint64_t)dx * 4;
 					fuxi_unixnu_copy_pixels((volatile void *)(fPixels + dest),

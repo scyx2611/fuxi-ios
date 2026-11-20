@@ -35,10 +35,18 @@ static unsigned fg_abi_present_wait, fg_client_busy, fg_scanout_owned, fg_scanou
 static unsigned fg_scanout_double_active,fg_scanout_front,fg_scanout_back_ready,fg_scanout_ready_drops,fg_scanout_triple_requested,fg_scanout_double_requested,fg_scanout_ready,fg_scanout_copy;
 static uintptr_t fg_scanout_source;
 static unsigned fg_scanout_pitch,fg_scanout_sx,fg_scanout_sy,fg_scanout_dx,fg_scanout_dy,fg_scanout_w,fg_scanout_h;
+static unsigned fg_scanout_fifo_q, fg_scanout_fifo_buf;
 static unsigned scanoutStops,verifyBad,dcvsKicks;
 static void fg_dcvs_kick(void) {dcvsKicks++;}
 static unsigned irqQuiesces;static void fg_irq_quiesce(void) {irqQuiesces++;}
 static int fg_scanout_verify(void) {return !verifyBad;}
+/* /chosen fuxi,fit 的主機模型：fit_model 就是 ADT 值。 */
+static unsigned fit_model; static unsigned fuxi_display_fit(void) {return fit_model;}
+#define FUXI_FIT_SRC_W 1125u
+#define FUXI_FIT_SRC_H 2436u
+static inline unsigned fuxi_fit_y0(unsigned fit) { return fit == 1 ? 31u : 0u; }
+static inline unsigned fuxi_fit_h(unsigned fit) { return fit == 1 ? 2338u : 2400u; }
+static uint32_t fg_fit_frames, fg_fit_refused;
 static int fg_scanout_stop(const char *reason) {(void)reason;scanoutStops++;fg_scanout_writable=0;return -1;}
 #include <stdint.h>
 #include <stdlib.h>
@@ -214,7 +222,37 @@ static int g3_gw(unsigned reg,unsigned value)
    for(unsigned i=0;i<n;i++) a[i]=ring[pos++&8191];
    left-=n;
    if(op==0x17) { assert(n==1 && a[0]==((1u<<27)|1)); br=1; }
-   else if(op==0x2c) {
+   else if(op==0x2c && regs[G4_SP_SRC_INFO]==(0x500430u|1u<<16)) {
+    /* 縮放（FILTER）：假設目的地像素中心對到 SRC 範圍 [TL, BR+1) 等比位置（Turnip r2d 慣例），雙線性、像素中心 +0.5。 */
+    assert(br && n==1 && a[0]==3 && regs[G4_RB_BLIT]==0x10f03000 && regs[G4_GRAS_BLIT]==0x10f03000);
+    for(unsigned i=0x8401;i<=0x8404;i++) assert(!(regs[i]&255));
+    unsigned sx=regs[0x8401]>>8, ex=regs[0x8402]>>8, sy=regs[0x8403]>>8, ey=regs[0x8404]>>8;
+    unsigned dx=regs[0x8405]&65535, bx=regs[0x8406]&65535, h=(regs[0x8406]>>16)+1, w=bx-dx+1;
+    unsigned tw=regs[0xb2c1]&0x7fff, th=regs[0xb2c1]>>15;
+    assert(sx<=ex && ex<tw && sy<=ey && ey<th && bx>=dx && !(regs[0x8405]>>16));
+    unsigned sp=(regs[0xb2c4]>>9)*64, dp=regs[0x8c1a]*64;
+    assert(sp>=tw*4 && dp>=(bx+1)*4 && !((regs[0xb2c2]|regs[0x8c18])&63));
+    for(unsigned y=0;y<h;y++) for(unsigned x=0;x<w;x++) {
+     assert(pending<2400*1080);
+     long u=(long)sx*256+(long)(((2ull*x+1)*(ex-sx+1)*128)/w)-128, v=(long)sy*256+(long)(((2ull*y+1)*(ey-sy+1)*128)/h)-128;
+     long x0=u>>8, y0=v>>8; unsigned fx=u&255, fy=v&255;
+     /* 取樣點不能碰到 SRC 範圍外（畫面左右上下的鄰居）。 */
+     assert(x0>=(long)sx && y0>=(long)sy && (x0+(fx?1:0))<=(long)ex && (y0+(fy?1:0))<=(long)ey);
+     uint32_t p00=translated_pixel(regs[0xb2c2]+y0*sp+x0*4), p10=fx?translated_pixel(regs[0xb2c2]+y0*sp+(x0+1)*4):p00;
+     uint32_t p01=fy?translated_pixel(regs[0xb2c2]+(y0+1)*sp+x0*4):p00, p11=fx&&fy?translated_pixel(regs[0xb2c2]+(y0+1)*sp+(x0+1)*4):fx?p10:p01;
+     uint32_t out=0;
+     for(unsigned c=0;c<32;c+=8) {
+      unsigned a00=p00>>c&255,a10=p10>>c&255,a01=p01>>c&255,a11=p11>>c&255;
+      out|=(((a00*(256-fx)+a10*fx)*(256-fy)+(a01*(256-fx)+a11*fx)*fy+32768)>>16)<<c;
+     }
+     unsigned dst=regs[0x8c18]+y*dp+(dx+x)*4-(regs[0x8c18]>=FG_INL_FB_VA ? FG_INL_FB_VA : G4_FB_VA);
+     unsigned buffer=dst/0xa00000u;
+     dst-=buffer*0xa00000u;
+     assert(buffer<3 && dst<4320*2400 && (!fg_scanout_double_active || buffer!=fg_scanout_front));
+     pdst[pending]=dst+buffer*4320*2400; pdata[pending++]=out;
+    }
+    blits++;
+   } else if(op==0x2c) {
     assert(br && n==1 && a[0]==3 && regs[G4_SP_SRC_INFO]==0x500430);
     assert(regs[G4_RB_BLIT]==0x10f03000 && regs[G4_GRAS_BLIT]==0x10f03000);
     unsigned sx=regs[0x8401]>>8, ex=regs[0x8402]>>8;
@@ -459,6 +497,39 @@ int main(void)
  assert(clean_bytes==4352ULL*2400);
  clean_bytes=0; fg_clean((uintptr_t)source_buf,4352,17,3,10,10);
  assert(clean_bytes==640);
+ /* /chosen fuxi,fit：CA 的整張 1125x2436（pitch 4608）兩趟雙線性縮進面板。來源是水平／垂直漸層，
+  * 輸出要接近理想中心對應 ((p+0.5)*src/dst-0.5) 的漸層值；畫面外列不動、畫面每點剛好寫一次。 */
+ for(unsigned fit=1;fit<=2;fit++) {
+  reset(); fit_model=fit; fg_fit_frames=fg_fit_refused=0;
+  unsigned fp=4608, H=fit==1?2338:2400, Y0=fit==1?31:0;
+  for(unsigned y=0;y<2436;y++) for(unsigned x=0;x<1152;x++) {
+   uint32_t px=0xff000000u|(y*255/2435)<<8|(x<1125 ? x*255/1124 : 0x5a)|0x40u<<16;
+   memcpy(source_buf+y*fp+x*4,&px,4);
+  }
+  page_fixture(0,fp,0,0,1125,2436);
+  assert(fuxi_gpu_map(0,7,(uintptr_t)source_buf,2436*fp,&times)==1);
+  /* 局部、未對齊 pitch、非整張都拒絕，交回 CPU。 */
+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,0,1080,2400,&times) && fg_fit_refused==1);
+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*4520,4520,0,0,0,0,1125,2436,&times) && fg_fit_refused==2);
+  assert(!fuxi_gpu_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,1,1125,2436,&times) && fg_fit_refused==3 && !doorbells);
+  assert(model_copy(0,7,(uintptr_t)source_buf,2436*fp,fp,0,0,0,0,1125,2436,&times)==1);
+  assert(doorbells==1 && fg_cp_rects==2 && fg_fit_frames==1);
+  double worst_u=0, worst_v=0;
+  for(unsigned y=0;y<2400;y++) for(unsigned x=0;x<1080;x++) {
+   uint32_t got; memcpy(&got,panel+y*4320+x*4,4);
+   if(y<Y0 || y>=Y0+H) { assert(got==0x6b6b6b6bu); continue; }
+   assert((got>>24)==0xff && ((got>>16)&255)==0x40); /* 寫過、恰好一次（總數＝畫面像素數） */
+   double u=(x+0.5)*1125.0/1080-0.5, v=(y-Y0+0.5)*2436.0/H-0.5;
+   double du=(got&255)-u*255/1124, dv=((got>>8)&255)-v*255/2435;
+   if(du<0)du=-du; if(dv<0)dv=-dv;
+   if(du>worst_u)worst_u=du; if(dv>worst_v)worst_v=dv;
+  }
+  assert(worst_u<1.6 && worst_v<1.6);
+  for(unsigned i=0;i<64;i++) assert(panel[4320*2400+i]==0x6b);
+  assert(fuxi_gpu_unmap(0,&times));
+  printf("PASS: fit %u two-pass bilinear 1125x2436 -> 1080x%u at y %u, taps inside the picture, gradient error u %.2f v %.2f LSB\n",fit,H,Y0,worst_u,worst_v);
+ }
+ fit_model=0;
  printf("PASS: %u pixel-exact copies, cropped phases, noncontiguous 16K/4K mappings, full panel, hot cache, blocks/hints, exact clean ranges, one submit/frame, %u wraps, async busy/deadline/quarantine\n",checks,wrap_count);
  free(source_buf);free(panel);return 0;
 }
@@ -486,7 +557,7 @@ def main():
             assert a + n <= b or b + m <= a, 'overlapping platform mappings'
     functions = ''.join(function(probe, n) for n in ('g3_parity', 'g3_pkt7', 'g4_pkt4', 'g4_reg', 'g4_event', 'g4_wfi', 'g4_setup', 'g4_end'))
     functions += function((ROOT / 'xnu/fuxi-adreno/fuxi_gpu_scanout.inc').read_text(), 'fg_scanout_target')
-    functions += ''.join(function(adapter, n) for n in ('fg_fail', 'fg_isolate', 'fuxi_gpu_unmap', 'fuxi_gpu_map', 'fg_rect', 'fg_clean', 'fg_ring_doorbell', 'fg_cp_stamp', 'fg_cp_retire', 'fuxi_gpu_poll', 'fuxi_gpu_copy'))
+    functions += ''.join(function(adapter, n) for n in ('fg_fail', 'fg_isolate', 'fuxi_gpu_unmap', 'fuxi_gpu_map', 'fg_rect', 'fg_rect_fit', 'fg_clean', 'fg_ring_doorbell', 'fg_cp_stamp', 'fg_cp_retire', 'fuxi_gpu_poll', 'fuxi_gpu_copy'))
     functions = re.sub(r'__asm__ volatile\([^;]*\);', ';', functions)
     constants = '\n'.join(line for line in sync.added_file('gpu-a740.h').splitlines() if line.startswith('#define G4_'))
     with tempfile.TemporaryDirectory() as d:
