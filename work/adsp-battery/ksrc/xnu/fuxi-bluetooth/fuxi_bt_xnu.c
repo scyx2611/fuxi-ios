@@ -625,9 +625,12 @@ static enum fuxi_bt_status fuxi_bt_resident(struct fuxi_bt_board *board,
                 pump.optional_last_opcode, pump.optional_last_status, optional_seen);
         }
         if (pump.padded != padded_seen) {
+            /* vendor 狀態回應補位經常觸發：前 32 次逐筆印，之後只在次數是 2 的冪時印 */
             padded_seen = pump.padded;
-            printf("FUXI BT PAD: opcode=%#x subop=%#x count=%llu\n", pump.pad_last_opcode,
-                pump.pad_last_subop, padded_seen);
+            if (padded_seen <= 32 || !(padded_seen & (padded_seen - 1))) {
+                printf("FUXI BT PAD: opcode=%#x subop=%#x count=%llu\n", pump.pad_last_opcode,
+                    pump.pad_last_subop, padded_seen);
+            }
         }
         if (pump.masked != masked_seen) {
             masked_seen = pump.masked;

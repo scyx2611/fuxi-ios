@@ -609,8 +609,7 @@ static void test_ibs(void)
     host_send(w, reset, sizeof(reset));
     step_n(w, 20);
     assert(w->uart.wire_size == 2 + 2 * sizeof(reset) && w->pump.ibs_wakes_sent == 1);
-    assert(w->pump.host.desync_bytes == 2 && w->pump.host.desync_recent_pos == 2);
-    assert(w->pump.host.desync_recent[0] == 0xfd && w->pump.host.desync_recent[1] == 0xfc);
+    assert(w->pump.host.desync_bytes == 0 && w->pump.host.desync_recent_pos == 0);
     free(w);
 
     /* 等不到 WAKE_ACK：每 RETRY 步重送 WAKE_IND，等滿照送 */
@@ -637,6 +636,8 @@ static void test_ibs(void)
     run_until_idle(w, 100);
     assert(w->uart.wire_size == sizeof(reset) && !memcmp(w->uart.wire, reset, sizeof(reset)));
     assert(w->pump.host.ibs_bytes[1] == 1 && !w->pump.ibs_acks_sent && !w->pump.ibs_wakes_sent);
+    assert(w->pump.host.desync_bytes == 1 && w->pump.host.desync_recent_pos == 1);
+    assert(w->pump.host.desync_recent[0] == 0xfd);
     free(w);
 }
 
@@ -974,8 +975,16 @@ static void test_rx_garbage(void)
         assert(w->pump.host.packets == 1 && !w->pump.host.header_need);
         assert(w->pump.host.ibs_bytes[1] == 1 && w->pump.ibs_acks_sent == 1);
         assert(w->uart.wire_size == 1 && w->uart.wire[0] == FUXI_BT_IBS_WAKE_ACK);
-        /* 04 00 跨塊時只少算上一塊的 00，其餘 byte 都算 desync */
-        assert(w->pump.host.desync_bytes >= 7 && w->pump.host.desync_bytes <= 8);
+        /* IBS 開啟時 0xfd 不計入 desync；04 00 跨塊時少算 00，其餘 6..7 個垃圾 byte 計入 desync */
+        assert(w->pump.host.desync_bytes >= 6 && w->pump.host.desync_bytes <= 7);
+        bool saw_garbage = false;
+        for (unsigned i = 0; i < w->pump.host.desync_recent_pos && i < sizeof(w->pump.host.desync_recent); i++) {
+            assert(w->pump.host.desync_recent[i] != FUXI_BT_IBS_WAKE_IND);
+            if (w->pump.host.desync_recent[i] == 0xda) {
+                saw_garbage = true;
+            }
+        }
+        assert(saw_garbage);
         assert(w->pump.host.invalid_headers <= 1);
         assert(!w->pump.to_host.packets[FUXI_BT_H4_COMMAND] && w->pump.to_host.packets[FUXI_BT_H4_EVENT] == 1);
         free(w);

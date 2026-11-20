@@ -475,6 +475,24 @@
 - 11-19 15:46 拉回的實機紀錄第 5073–5074 行顯示，一筆 132-byte PCM 峰值 34、一次輪詢後播放成功，隨後一筆逾時。使用者當時不在手機旁。原始紀錄在 `work/adsp-battery/fuxilog/20261119-154617/console.txt`。
 
 - **2026-11-19 的觸感差異**：原廠 Android 四種 UI 操作均送 376 個 24 kHz 樣點。第一次以固定波形重播時，iOS 日常觸感因 FIFO 播放失敗而消失。改以單筆 SPMI 讀取 FIFO 深度後，實機記錄到 28 筆成功。將同一波形的 VMAX 改為 0x30 後，實機又有 26 筆成功，但使用者仍感覺所有場景相近，計時器快速滑動的回饋也會漏拍。
+- **2026-11-20 觸感整形（mode 6，預設關）**：使用者回報「有些地方有震、有些沒有，震感不像 iOS」。本條 18 日的實機紀錄裡，SpringBoard 輕觸只有一個 6 ms、level 17 的視窗（`amp=0x11`）。LRA 一個週期約 5.7 ms，馬達還沒起振請求就結束，所以感覺不到；重的回饋則是共振頻率的嗡聲加拖尾。19 日的 mode 5 用固定 VMAX 播原廠點按，使用者覺得各場景強弱相近。mode 6 不改 HAL，HAL 照舊送 DIRECT 請求（`fuxihalhaptic=1`），由核心依請求的時間、毫秒與 level 分類：
+  - 與前一個請求間隔 ≥ 8 ms，就算新的一段觸感。
+  - 一段的第一個請求 ≤ 20 ms 時，改播同機 Android 的 376-byte 點按（0_click_P_RTP.bin）。VMAX 依 level 套平方根曲線，介於 Android VMAX 的 115/256（約 45%）與 100% 之間。Android 為 0x1c 時，level 4 對應 0x0f、17 對應 0x12、41 對應 0x15、90 對應 0x19、128 對應 0x1c，最強不超過 Android 本身的強度。
+  - 同一段開始後 40 ms 內的後續視窗與停止請求都吞掉，停止請求因此不會取消已排定的點按。超過 40 ms 仍在送的視為連續觸感，交回 DIRECT_PLAY。
+  - 第一個請求 > 20 ms 的請求（VibePattern 鈴聲、充電 400 ms、包絡 40 ms 段）整段照舊。
+  - 實作：ksrc `d4747ed` 的 `xnu/patches/0123-fuxi-haptic-shape.patch`，新增 `bsd/dev/fuxi_haptic_shape.h`，`fuxi_pmic.c` 只移除 7 行舊閘門與參數，其餘為新增。分類只在 `fuxi,haptic=6`、RTP 開機點按成功（`fp_rtp_ready`）且執行期未故障時才啟用；PCM 只留給 mode 5。開機標記為 `haptic shape on`，點按紀錄 `haptic RTP FIFO UI click … vmax= shape level= clicks= swallowed=`。
+  - 主機測試：`python3 tools/test-fuxi-haptic-shape.py --sanitize` 通過，涵蓋輕觸、連續視窗、停止、間隔邊界、每 15／25 ms 的快速刻度、長請求與續約、時間倒退，以及 1..0x38 全部 base 下 VMAX 單調、介於下限與 base 之間。補丁結構也檢查閘門、PCM 只給 5 與開機標記。harness 工作流程已加這個測試。
+  - 本機 WSL 核心 `kernel-local-haptic-shape-1120-9g-artifact`（ksrc `d4747ed`，含 0122；harness `3027c50` 加工作目錄補丁，SHA-256 `01cc79d03ecc2e839d760c8705d76046c82011aacc4310ee11630522e530a0ae`）。增量 24 秒，ISA 解碼 2,567,309 條，禁止指令 0 條，核心 SHA-256 `89032f585d296bbb05c09386d97ddb7f81edf0c7c9bcdc46e4a54c1cd97485a5`。
+  - 產生器 `--haptic 6` 必須帶 `--haptic-rtp`（同一 SHA 檢查），並檢查核心含 `haptic shape on`。`--haptic-rtp-vmax` 可用於 mode 5、6，mode 6 以它作為 base。
+  - **第一趟實機（000 線趟 30，11-20 03:05–03:14:13）**：loader `native-bt5-hapshape-1120-loader`。建置方式是在趟 29 的命令上把 `--haptic 3` 換成 `--haptic 6 --haptic-rtp work/adsp-battery/android-haptic-waves-1118-2352/0_click_P_RTP.bin`，`--artifact` 換成上述核心。其餘照舊，包括 `--hal-haptics --product-haptics --haptic-ui-ms 15 --haptic-envelope --haptic-amp 128`，命令列為 `fuxihalhaptic=1`。boot SHA-256 `76dd2bc25d9ec33ad23da9496aa0cdcf92641d29f15ade6b47d1a9e8cec029a8`。
+    - 啟動命令：`work/statusbar-fix/launch-loader-check.ps1 -Loader native-bt5-hapshape-1120-loader -Kernel kernel-local-haptic-shape-1120-9g-artifact -Out native-hw000bt5-hapshape-1120 -Seconds 240 -Reset 12`。
+    - 第 447 行開機標記 `haptic shape on … VMAX 115/256..1 of 0x1c`。第 613 行開機 FIFO 點按 `rc=0`。
+    - 兩次主畫面長按分別在第 11912、12013 行改播原廠點按，都是 `rc=0`。第一次 `level=90`，第二次 `level=81`，VMAX 都是 `0x19`，`clicks=1→2`、`swallowed=0`，與主機曲線一致。
+    - 第 4763–5049 行是一段 328 ms、振幅 0x8→0x80 漸強的長觸感，照舊走 DIRECT_PLAY，沒有被整形。期間出現一次既有的 auto-resonance 錯誤，已在下次播放前清除。
+    - 這趟沒有 fault 或 EIO。主機量到 TSENS 峰值 82.8°C。
+    - 點擊腳本誤開了備忘錄，沒有新增或修改任何備忘錄。因此沒有驗到計時器快速刻度、開關、鍵盤等場景。手感（強弱層次、是否像 iOS）待使用者親自比較。
+    - 證據 `work/Codex-Xiaomi13-GPU-20261109/native-hw000bt5-hapshape-1120/boot.log`，12,699 行，SHA-256 `e63dea1cb3bd3fa6d18cad814b6e18715e5bc75d62837075f154c33c46abee78`。
+  - **使用者試手感用 loader（尚未上機）**：`native-bt5-hapshape-user-1120-loader`，boot SHA-256 `5463a0074bd34aa874a338e5eec0821c134fbd813c85dcf954630fff0d72d754`。用趟 31 的同一組選項重包，拿掉 `--tap-script`；命令列與趟 31 只差 `fuxitaps=85`。RTC 校正已過期，所以沒帶 `--rtc-calibration`，開機後時鐘可能要等網路校時。啟動：`launch-loader-check.ps1 -Loader native-bt5-hapshape-user-1120-loader -Kernel kernel-local-haptic-shape-1120-9g-artifact -Out native-hw000bt5-hapshape-user-1120 -Seconds 900 -Reset 20`。
 - **有號 PCM 方案**：`--haptic 5 --hal-haptics --haptic-pcm` 使用帶 `kern.fuxihapticpcm` 的核心及 `audio-local-hal-pcm-1119-artifact`。HAL 依原本輸出時間排程，把 48 kHz 的有號波形降至 24 kHz，保留各段振幅和正負樣點。主機模型核對雙極樣點、8-byte 短封包、填充、播放及逾時回退。每個封包仍是有限長度的 FIFO 播放，密集刻度的連續性須用實機驗證。實機驗收看 `Actuator HAP525 first PCM packet`、`haptic RTP FIFO UI PCM`、HAL 丟送紀錄，以及使用者對計時器刻度、長按與強弱回饋的比較。
 
 - **日期**：2026-11-18。
@@ -489,7 +507,7 @@
   - `native-actuator-haptic-offline-1118-loader` 已用 K-078 的核心離線封裝，boot SHA-256 為 `dc6cba54f05a5f5c48211c0acf34ceb67af267f808198f39f8e18de9e21cc46b`。本配方省略 `--haptic-ui-ms`，以 Actuator 訊號驗收原生震動。重包時補本輪 RTC 校時，試裝與還原仍由上述 launcher 執行。
 - **參考來源**：本機既有的 HackiOS 衍生 FuxiAudio、K-033 的 HAP525 執行期，以及 Apple 的 HAL callback 介面。 [AudioServerPlugIn DoIOOperation](https://developer.apple.com/documentation/coreaudio/audioserverplugindriverinterface/doiooperation)
 - **實機驗證**：`work/Codex-Xiaomi13-GPU-20261109/native-hw000bt5-native-pcm-hal-1118-2202/boot.log` 第 1350 行確認 HAL 載入，第 4013 行 SpringBoard 回報 `initialized=1`。第 5150–5153 行 Actuator 輸出 6 ms、振幅 17，核心回報 `amp=0x11..0x11`、`fault-mid=0`、`stop-rc=0`，HAL 停止時計數為一筆請求、零錯誤。實機試裝寫入紀錄在 `work/statusbar-fix/audio-hal-enable-1118-2200/`。
-- **結論／未完成**：試裝配置的原生震動路徑已能驅動馬達。使用者兩次回報所有場景都有震感，但手感像轉子拖尾；起振加強的 mode 4 實機亦未通過手感驗收。
+- **結論／未完成**：試裝配置的原生震動路徑已能驅動馬達。使用者兩次回報所有場景都有震感，但手感像轉子拖尾；起振加強的 mode 4 實機亦未通過手感驗收。11-20 使用者回報「有些地方沒震、震感不像 iOS」，因此加了 mode 6 觸感整形（預設關，見上）。趟 30 實機已驗到短觸感改播原廠點按（VMAX 依 level 調整）、長觸感照舊走 DIRECT，這兩項通過；使用者手感驗收待做。
 - 11-19 14:50 實機，`native-av-muted-haptic-1119-pm-loader` 的 750 ms 長按後，Actuator 與 HAP525 都記錄同一筆 132 bytes PCM，核心回報 `polls=1 rc=0 peak=81 played=1 expired=0`。此趟無人在場評分手感，連續刻度另待驗證。持久紀錄 `work/adsp-battery/fuxilog/20261119-145858/console.txt` 第 4924、4927 行。
 - **同機 Android 基準**：`android-haptic-waves-1118-2352/report.json` 顯示 Xiaomi vibratorfeature HAL 開啟 event4，對應 PM8550B HAP525。四筆獨立 SPMI 紀錄（`work/adsp-battery/android-haptic-spmi-1118-2353/`）的點按、刻度、長按與開關均為 FIFO，rate code 10（24 kHz），先 320 再 56 bytes，每個 byte 均符合手機上的 0_click_P_RTP.bin。第一次 play enable 至 disable 為 16.023、16.160、16.112、16.027 ms。重播命令 `python -X utf8 work/adsp-battery/verify-haptic-rtp.py work/adsp-battery/android-haptic-waves-1118-2352/0_click_P_RTP.bin work/adsp-battery/android-haptic-spmi-1118-2353`。iOS HAL 現行 10 ms 峰值轉 DIRECT_PLAY 路徑會丟掉正負相位；同機 Android 波形與 iOS 回饋的實機比對是後續驗收依據。喇叭出聲另見 K-078。
 - **出處**：`ksrc/tools/fuxi-audio/FuxiAudio.c`、`work/statusbar-fix/stage-audio-hal-guest.py`、U-005 和 K-033。
@@ -545,3 +563,82 @@
 - **參考來源**：dyld `mach-o/dyld-interposing.h` 的 DYLD_INTERPOSE（APSL）；libsystem_trace `os/log.h`、`os/log_private.h` 的函式原型；`sys/reason.h`。ADT 讀法同 `FuxiBlueTool.c`。
 - **結論／未完成**：只在診斷趟次開；藍牙日常可用後關閉（每次輸出有行數上限，但仍佔 console）。
 - **出處**：K-077 的 os_log 趟 1／2。
+
+### U-023 bluetoothd 相容修補：關藍牙閃退與單實例 BLE 廣播（fuxi,bt-fix）
+
+- **日期**：2026-11-20 01:58–09:20
+- **狀態**：已實機驗證（趟 32／33：設定頁關→開兩次無閃退，電源循環後 Windows SDP 成功）。只在測試 loader，日常 boot_a 未改。
+- **開關**：ADT `/chosen fuxi,bt-fix`（u32，預設 0）：bit 0 補 H4 傳輸表的 PrepareTerminate；bit 1 讓 bluetoothd 讀到 `SupportsMultipleAdvertising=false`。需要核心 0118 的注入位元 64（bluetoothd）。loader 產生器 `--bt-fix <1..3>`，要求 `--bt-native` 與含 ` bluetoothd gets ` 的核心，並把 `fuxi,inject` 加上 64；不綁 `--bt-oslog`／`--stderr-log`。
+- **問題／現象**：
+  - K-077 趟 16 起，設定頁關藍牙時 bluetoothd 必定 SIGSEGV（pc 0，lr 換算 `0x1000f3b50`）。launchd 重啟後開關仍能再打開，但每次關藍牙都重來一輪。
+  - bluetoothd 開機時會送 Broadcom 多實例廣播 VSC `0xfd48`，WCN7850 回 status 1（未知命令；趟 31 第 6503／6509 行）。
+- **根因**：
+  - 20H392 bluetoothd 的 H4 傳輸表在 `__DATA`，靜態位址 `0x100844228`，共 18 個 64-bit 欄位；其中第 12 欄（+0x60，PrepareTerminate）是 NULL。
+  - 終止路徑 `0x1000e6aac` 在表的型別非 0 時，會尾呼叫 `[表+0x60]`，結果跳到位址 0。
+  - H4BC 表同一欄（`0x10006a444`）只設一個旗標位元組，所以換成空函式是安全的。
+  - bluetoothd 是 plain ARM64、沒有 PAC，`__DATA` 可寫，執行期直接改表即可。
+  - `0xfd48` 是 Broadcom 的多實例廣播命令。`com.apple.MobileBluetooth.debug` 的 `LE` 字典設 `SupportsMultipleAdvertising=false` 時，ChipMgr／LeBroadcaster 會改走標準 Legacy 廣播（`0x2005`／`0x2006`／`0x2008`／`0x200a`）。
+- **做法**：harness `da0ac11`（分支 `codex/adsp-battery`；核心補丁同步 ksrc `231479a` 在 `f8a799a`）。
+  - `harness/userland/fuxi-shape/FuxiBluetoothPatch.h`（Codex）：`fuxi_bt_patch_h4_table()` 先驗證表的形狀才寫，任一條件不符就不寫：
+    - 型別為 1，名稱字串為 "H4"。
+    - 第 2–9 欄落在 `__TEXT` 且 4-byte 對齊，第 10–17 欄為 0。
+    - 第 12 欄必須仍是 0，否則回 `already_set`。
+  - `FuxiBluetoothLog.c` 的建構函式（Codex）：
+    - bit 0：找主程式的 `__TEXT`／`__DATA`，用 header 位址減 `__TEXT` vmaddr 算 slide，再呼叫上式。
+    - bit 1：攔 `CFPreferencesCopyAppValue("LE", "com.apple.MobileBluetooth.debug")`，在回傳的字典補上 `SupportsMultipleAdvertising=false`。
+  - 主程式 header（Claude 修正）：
+    - Codex 01:58 那趟只用 `_dyld_get_image_header(0)`，bluetoothd 三個 pid 都回 `h4=bad_header`，表示第 0 個映像不是可接受的 MH_EXECUTE header。
+    - 改成先用 `crt_externs.h` 的 `_NSGetMachExecuteHeader()`，不成再掃 dyld 映像表找 `MH_EXECUTE`，並檢查 `__TEXT` fileoff 為 0 及 slide 加總不溢位。
+    - console 的 `h4=` 後面會附上用了哪一種方式（`nsget`／`image0`／`scan`）；都找不到時印 `no_exec(nsget=…,n=…,t0=…)`。
+  - `work/statusbar-fix/windows-bluetooth-peer.py`：
+    - `--require-cycle` 原本只認 bt-oslog 的 `Sending 'power state changed'`。bt-oslog 每個程序有上限（default／error／fault 4000 行、info／debug 1500 行），修補後 bluetoothd 不再重啟，趟 32 在第 11257 行（`BTLOG N 5501`）就用完，點開關時已沒有電源事件可看。
+    - 改成同時認 bluetoothd 直接寫到 stderr 的 `Update Dynamic Store with state On/Off`，這行不受上限影響，並保持兩種事件的出現順序。
+    - 以趟 32、趟 33、Codex 那趟及 `native-hw000bt5-cycle-pc-check-1119` 的 boot.log 離線驗證，都判為已完成 1→0→1。
+- **復現**：
+
+  ```powershell
+  .\work\localbuild\build-sb-shape.ps1 -Name sb-local-btfix-h4main-1120-artifact
+  python -X utf8 work/adsp-battery/prepare-wlan-w18-loader.py build --like native-bt5-diag-1120-loader --artifact kernel-local-bt-complete-1120-9g-artifact --wifi-ios --wifi-args-adt --with-adsp --audio-spf --audio-tdm-pcm --bt 5 --bt-native --bt-ibs --bt-optional '0x0c5b,0xfd3c,0xfd47' --bt-pad 0xfc00 --bt-mask '0x2003:2:0x30' --bt-txmask '0x200b:5:1,0x200d:12:1,0x2006:5:1,0x2041:0:1,0x2043:1:1' --bt-baud 3200000 --bt-nolog --bt-link-log --bt-controller-identity native-hw000bt5-mfbalign-1119 native-hw000bt5-fce9-status-1119 --bt-oslog 3 --bt-fix 3 --haptic 3 --inject-media --product-haptics --haptic-ui-ms 15 --haptic-envelope --haptic-amp 128 --hal-haptics --wifi-audit --wifi-password-prompt --wifi-sb-audit --wifi-sb-refresh --wifi-rssi-bounds --wifi-ux 2047 --mfb-align --display-gamut sRGB --stderr-log 'mediaserverd,bluetoothd,BlueTool' --privs --rtc-calibration <一小時內的 json> --tap-delay 75 --tap-script 's540,2390,540,999,99;w3000;s540,2390,540,1100,250;w2500;s540,2390,540,1100,250;w2000;p200;t408,1426;w4000;p200;t80,175;w1500;t80,175;w1500;s560,690,560,1570,340;w1800;t260,1200;w3500;p200;t935,415;w6000;p200;w9500;t935,415;w12000;p200' --name native-bt5-btfix-h4main-1120-loader
+  .\work\statusbar-fix\launch-loader-check.ps1 -Loader native-bt5-btfix-h4main-1120-loader -Kernel kernel-local-bt-complete-1120-9g-artifact -Out <輸出名> -Seconds 240 -Reset 8 -FramebufferHeight 640 -Dylib D:\xiaomi13\fuxi_ios\work\Codex-Xiaomi13-GPU-20261109\sb-local-btfix-h4main-1120-artifact\libfuxi-sb.dylib -DylibSha c2c3184af48cb7288392e5c45182770d9aa78a98203b5eedcc12b87773a15ef1 -PeerTestPython <Windows 藍牙測試 venv 的 python.exe> -PeerIdentityRuns native-hw000bt-early-exit-1119-e,native-hw000bt-fce2-native-status-1119-f -PeerAfterPowerCycle -PeerAudioSource
+  ```
+
+  - 點擊腳本：解鎖後回主畫面，開「設定」（主畫面第 4 列第 2 個），回最上層並捲到頂，點「藍牙」，再點開關兩次（關、開），共 15 張截圖。截圖 11 是藍牙頁、13 是已關、15 是已開。
+  - 成功判據：
+    - `BTLOG S 1 on mode=3 fix=3 h4=patched/<方式>`。
+    - `BTLOG N … Overriding Multiple Advertising support - disabled`，且整份紀錄沒有 `0xfd48`。
+    - `Update Dynamic Store with state Off` 之後同一個 pid 重新 `FUXI BT SK: connect`，並出現 `state On`；整份沒有 `CRASH bluetoothd`。
+    - `windows-peer.json` 的 `sdp.status` 為 `SUCCESS`。
+  - 失敗判據：`h4=no_exec(…)`、`bad_*`、`out_of_data`，或 `already_set` 但 pc 0 仍出現（表示表的版本不同）；`CRASH bluetoothd … pc 0x0`。
+- **主機測試**：`harness/tools/test-bluetooth-patch.c`，涵蓋：正確的表、已填過（`already_set`）、參數錯誤、表越出 `__DATA`、型別錯、名稱錯、函式指標越界／未對齊、尾欄非 0。`work/localbuild/fuxi-sb-build.sh` 與 `sb-shape.yml` 都以 ASan／UBSan 執行。
+- **驗證紀錄**：
+  - **Codex 01:58–02:02**（`native-hw000bt5-complete-1120`；dylib `sb-local-bt-complete-1120-artifact`，SHA-256 `f5ce49597c85086d0e56c45e5542f9ce6ab91f8511566c21aa0aa4e04d1ca861`，只用 `_dyld_get_image_header(0)`）：
+    - 修補沒套上：`h4=bad_header` ×3（boot.log 第 1325、12408、19286 行）。
+    - 關藍牙仍兩次 CRASH（第 12397、19272 行，pc 0，lr mh+0xf3b50）。
+    - 廣播覆寫有生效；Windows 端 SDP 成功、5 項服務。
+    - boot.log 26,359 行，SHA-256 `9c4c92896743164d883a1cb71fba701200c3ac7e9ae0811bc3cfe4f62b92930a`。
+  - **趟 32 08:55–09:06**（`native-hw000bt5-btfix-h4main-1120`；dylib `sb-local-btfix-h4main-1120-artifact` SHA-256 `c2c3184af48cb7288392e5c45182770d9aa78a98203b5eedcc12b87773a15ef1`；loader boot SHA-256 `85fab06e78b46479f07dfadbc3ca3e1b9e01536dd5d1080f79b39377b3539253`）：
+    - 第 1315 行 `h4=patched/nsget`，第 1351 行廣播覆寫。
+    - 點開關後：第 12251 行 `FUXI BT SK: disconnect … owner=85 … owner_exiting=0`，第 12253 行 `state Off`。
+    - 再點一次：第 12340 行同一個 pid 85 重新 connect，標準 HCI 初始化命令回 status 0（Broadcom VSC 照舊回不支援，與開機時相同），第 12591 行 `state On`。
+    - 整份 0 次 `CRASH bluetoothd`；截圖 15 開關為開。
+    - Windows 端判斷失敗：bt-oslog 用完，原因見上。
+    - boot.log 13,561 行，SHA-256 `19f952180348592d1d10e60ddf0286ee6ccd07bc16a763339ed264c69a2b264e`；主機 TSENS 最高 69°C。
+  - **趟 33 09:11–09:20**（`native-hw000bt5-btfix-peer-1120`，同一個 loader 與 dylib，Windows 判斷已改）：
+    - 第 1325 行 `h4=patched/nsget`。
+    - 關：第 12129 行 disconnect，第 12131 行 `state Off`。開：第 12248 行 pid 85 重新 connect，第 12509 行 `state On`。整份 0 次 `CRASH bluetoothd`。
+    - 整份 0 次 `0xfd48`；Legacy 廣播 `0x2005`／`0x2006`／`0x2008`／`0x200a` 全回 status 0（第 6477–8464、12475–12664 行）。
+    - 電源循環後 Windows 端：SDP `SUCCESS`、5 項服務，Audio Source（110a）1 筆、137 bytes。
+    - BLE 廣告掃描為 false，GATT 為 `device_unavailable`，與 Codex 那趟及 `native-hw000bt5-cycle-pc-check-1119` 相同，不是這次的退步。
+    - boot.log 13,507 行，SHA-256 `42ff048fb9fee623946249d02f628b0563eb51916b75b9c51d950104bb20de2d`；主機 TSENS 最高 76.5°C。
+- **參考來源**：
+  - bluetoothd 20H392 反組譯：`0x1000e6aac`、`0x1000f3b44`，H4BC `0x10006a444`。
+  - dyld `mach-o/dyld.h`（`_dyld_image_count`／`_dyld_get_image_header`）與 `crt_externs.h`（`_NSGetMachExecuteHeader`）。
+  - CFPreferences API。
+  - 本機 `UniXNU` 原始碼找不到 `PrepareTerminate`／`SupportsMultipleAdvertising` 相關修補；ios-redfin 不在這個工作區，沒有查。
+- **結論／未完成**：
+  - 關藍牙閃退已解決，bit 1 也去掉了 `0xfd48` 的未知命令。
+  - 仍待做：
+    - Windows 端 BLE 掃描與 GATT 仍找不到手機（修補前就是如此）。
+    - 併入日常 loader 需要另外部署，日常 boot_a 目前未改。
+    - 日常使用時可以考慮關掉 `--bt-oslog`；`--bt-fix` 不需要它。
+- **出處**：K-077 趟 18 第 15028 行（關藍牙閃退初次記錄，趟 16 第 11192 行也有）。

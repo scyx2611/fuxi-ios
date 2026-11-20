@@ -159,7 +159,17 @@ def ui_ready(console, marker, require_cycle):
         return False
     if not require_cycle:
         return True
-    states = re.findall(rb"Sending 'power state changed' event for local device - \{powerstate: ([01])\}", console)
+    # bt-oslog 每個程序有行數上限；bluetoothd 關藍牙不再閃退後（U-023）同一個程序活到測試結束，
+    # 2026-11-20 趟 32 在點開關前就用完 5500 行，看不到 os_log 的電源事件。
+    # bluetoothd 直接寫 stderr 的「Update Dynamic Store with state On/Off」不受上限影響，兩種都採用並保持順序。
+    states = [
+        match.group(1) or (b"1" if match.group(2) == b"On" else b"0")
+        for match in re.finditer(
+            rb"Sending 'power state changed' event for local device - \{powerstate: ([01])\}"
+            rb"|\|bluetoothd\| Update Dynamic Store with state (On|Off)\b",
+            console,
+        )
+    ]
     transitions = [state for index, state in enumerate(states) if not index or states[index - 1] != state]
     return transitions[-3:] == [b"1", b"0", b"1"]
 

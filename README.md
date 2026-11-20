@@ -81,12 +81,12 @@
 | --- | --- | --- |
 | Wi-Fi 2.4 GHz | 已驗證連線 | 已手動完成 **WPA2-PSK／2412 MHz** 加入、四向握手及 DHCP。[E3](docs/status-20261118.zh-TW.md#e3) |
 | Wi-Fi 5 GHz | **已驗證連線** | 使用者確認，原始 console 亦記錄 **joined at 5200 MHz、join finished 0**。[E1](docs/status-20261118.zh-TW.md#e1) [E14](docs/status-20261118.zh-TW.md#e14) |
-| 實際上網／Safari | **已驗證上網** | 使用者已實際開啟網頁；不再列為「僅 DHCP 通過」。這不代表所有網站繪圖及長時間網頁壓力測試通過。[E14](docs/status-20261118.zh-TW.md#e14) |
+| 實際上網／Safari | **已驗證上網** | 使用者已實際開啟網頁；不再列為「僅 DHCP 通過」。這不代表所有網站繪圖及長時間網頁壓力測試通過。非 DRM 網頁影片可播放（apple.com 首頁影片）；YouTube 需要 FairPlay 授權（`lskdd` 回 `-42660`），這個移植無法取得裝置憑證，無法播放。[E14](docs/status-20261118.zh-TW.md#e14) · [K-077](records/items/K-kernel.zh-TW.md) |
 | Wi-Fi 自動加入 | 已成功實測 | Claude 最新對話記錄單次開機自動加入約 **0.44 秒**，使用者也曾確認自動連線；跨多次重啟的成功率未統計。[E14](docs/status-20261118.zh-TW.md#e14) |
 | Wi-Fi 掃描 | 可掃描，仍偏慢 | 00:31 那趟：2.4 GHz 13 頻道約 **0.94 秒**、5 GHz 27 頻道約 **7.20 秒**、全頻約 **16.11 秒**；結果取回約 1–7 ms。不同掃描範圍分開比較。[E1](docs/status-20261118.zh-TW.md#e1) [E14](docs/status-20261118.zh-TW.md#e14) |
 | Wi-Fi 吞吐量 | 可傳輸，效能未達目標 | 使用者先前實測約 **100 Mbps**，後續確認有提升但未提供新數值，仍未達對照手機約 300 Mbps；AP 選擇器的 648–720 Mbps 是估計值，不能當實際網速。[E14](docs/status-20261118.zh-TW.md#e14) |
 | Wi-Fi 開關／重連 | 可切換，仍有偶發失敗 | 最新回退趟底層關閉 **2 ms**、開啟 **18 ms**；先出現一次 join=80，後續成功加入 5200 MHz。底層耗時不等於 UI 操作延遲。[E2](docs/status-20261118.zh-TW.md#e2) |
-| 藍牙 | 耳機可用；關閉藍牙仍閃退 | 原廠 `bluetoothd` 直接驅動 QCA 控制器（SoC **0x40170200**）。UART 升到 **3.2 Mbaud** 後韌體載入約 **1.4 秒**，Apple 耳機 A2DP（AAC-ELD 48 kHz）播放正常，使用者已確認；耳機出盒會自動回連並完成加密。從設定頁配對 iPhone 不成功：對端沒開個人熱點時沒有可連的傳統藍牙服務（NAP `ServiceAvailability=0`），這是原生行為。在設定裡關閉藍牙時 `bluetoothd` 仍會閃退，修正中。[2026-11-19／20 趟次](records/journal/hw000-runs.zh-TW.md) |
+| 藍牙 | 耳機可用；關閉藍牙不再閃退（測試開機） | 原廠 `bluetoothd` 直接驅動 QCA 控制器（SoC **0x40170200**）。UART 升到 **3.2 Mbaud** 後韌體載入約 **1.4 秒**，Apple 耳機 A2DP（AAC-ELD 48 kHz）播放正常，使用者已確認；耳機出盒會自動回連並完成加密。從設定頁配對 iPhone 不成功：對端沒開個人熱點時沒有可連的傳統藍牙服務（NAP `ServiceAvailability=0`），這是原生行為。關閉藍牙的閃退已修正：`bluetoothd` 的 H4 傳輸表少一個終止函式，由注入的 `libfuxi-sb.dylib` 在 ADT `fuxi,bt-fix` 開啟時補上；設定頁關→開兩趟皆未閃退，關開後電腦端 SDP 仍查得到 5 項服務。目前只在測試開機，日常開機尚未換上。[U-023](records/items/U-userland.zh-TW.md) · [2026-11-19／20 趟次](records/journal/hw000-runs.zh-TW.md) |
 | 行動網路 | 尚未驗收 | 沒有通話、SMS 或 4G／5G 數據連線通過紀錄。[E15](docs/status-20261118.zh-TW.md#e15) |
 | 個人熱點 | 尚未驗收 | Wi-Fi station 連線成功不代表 AP／網路分享功能可用。[E15](docs/status-20261118.zh-TW.md#e15) |
 

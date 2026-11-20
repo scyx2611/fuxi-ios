@@ -64,7 +64,7 @@
 
 <!-- INDEX:BEGIN -->
 
-共 415 項紀錄；目錄涵蓋 342 筆提交、244 份補丁、197 個開關、204 份測試、602 個檔案。
+共 416 項紀錄；目錄涵蓋 349 筆提交、244 份補丁、198 個開關、205 份測試、604 個檔案。
 
 ### S：上游繼承補丁（iOS 16、XNU 27 與 GPU 建置）（117 項）
 
@@ -379,7 +379,7 @@
 | [K-077](items/K-kernel.zh-TW.md#k-077-wcn7850-uartsk-與-skywalk-常駐收送) | WCN7850 UART.SK 與 Skywalk 常駐收送 | 11-19 設定頁關閉再開啟後，Windows 重新連線並即時讀回 5 項 RFCOMM 服務。iOS 另建立過對外 BLE 連線。使用者已配對 Apple 耳機（趟 17），趟 20 換到 3.2 Mbaud 後確認 A2DP 聲音正常。關藍牙閃退與長時間穩定性待驗。 | ADT `fuxi,bt=5`，自測另加 `fuxi,bt-probe=1`；原生 bluetoothd 用 `--bt-native`（另開 `fuxi,inject` 位元 32）。UART 換速 `fuxi,bt-baud`（u32，loader `--bt-baud`）與控制器日誌關閉 `fuxi,bt-nolog`（loader `--bt-nolog`），預設都關（趟 20）。 |
 | [K-078](items/K-kernel.zh-TW.md#k-078-用目前-adsp-驗證-fuxi-喇叭與播放圖) | 用目前 ADSP 驗證 Fuxi 喇叭與播放圖 | 21:25 實機建圖六步全部 `status=0`；22:02 PCM（模式 5）實機通過，靜音 80 ms 各步驟 `status=0`、`probe complete result=ok`。11-19 16:57／17:01 mode 6 靜音保護試跑兩趟通過；18:04 mode 7 下方喇叭 `-30 dB` 1 秒 2 kHz 短測實機通過（`pup 1 ms`、PLL 鎖定、`48000 frames`、`stray=0`、`checks=10` 全零故障、`down ok`、腳位還原、`PCM probe complete result=ok`）。耳聽確認、上方喇叭／較高音量（需另獲同意）與 iOS 即時音訊 HAL／`mediaserverd` 輸出仍在後面。 | `--audio-tdm-graph`。寫入 ADT `fuxi,audio-spf=4`，預設停用；`--audio-tdm-pcm` 為模式 5。 |
 
-### U：iOS root 與使用者空間（22 項）
+### U：iOS root 與使用者空間（23 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -405,6 +405,7 @@
 | [U-020](items/U-userland.zh-TW.md#u-020-wcn7850-藍牙韌體放進-ios-rootstage-wlan-assets-kindbt) | WCN7850 藍牙韌體放進 iOS root（stage-wlan-assets kind=bt） | 已部署（`/usr/local/share/fuxi/bt/` 50 檔，寫前比對、寫後讀回通過） | manifest 的 `"kind": "bt"`；輸出目錄名必須是 `run-bt-…`（`run-wlan-…` 給 WLAN），名稱與 kind 不符就拒絕。 |
 | [U-021](items/U-userland.zh-TW.md#u-021-從-ios-hal-的-actuator-輸出驅動-hap525) | 從 iOS HAL 的 Actuator 輸出驅動 HAP525 | WSL 建置、主機模型、HFS+ 離線試裝／還原通過。11 月 18 日實機已驗到原生 CoreHaptics、Actuator 與 HAP525 播放。 | loader `--hal-haptics` 寫入 `fuxihalhaptic=1`，搭配 `--haptic 3 --product-haptics`。根映像試驗透過 `launch-loader-check.ps1 -AudioHal enable\|disable -AudioBundle <FuxiAudio.driver> -AudioSha <FuxiAudio SHA-256> -Out <紀錄名>`。 |
 | [U-022](items/U-userland.zh-TW.md#u-022-bluetoothd-os_log-轉錄到-consolefuxibt-oslog) | bluetoothd os_log 轉錄到 console（fuxi,bt-oslog） | 已實機驗證（os_log 趟 2 無 crash，轉錄出 VSC stall 的原因） | ADT `/chosen fuxi,bt-oslog`（u32，預設 0）：bit 0 default／error／fault（每程序最多 4000 行），bit 1 info、bit 2 debug（合計最多 1500 行）。需要核心 0118 的注入位元 64（bluetoothd）及 `sweetnull` 含 bluetoothd；loader 產生器 `--bt-oslog <1..7>`，要求 `--bt-native` 與 `--stderr-log` 含 bluetoothd。 |
+| [U-023](items/U-userland.zh-TW.md#u-023-bluetoothd-相容修補關藍牙閃退與單實例-ble-廣播fuxibt-fix) | bluetoothd 相容修補：關藍牙閃退與單實例 BLE 廣播（fuxi,bt-fix） | 已實機驗證（趟 32／33：設定頁關→開兩次無閃退，電源循環後 Windows SDP 成功）。只在測試 loader，日常 boot_a 未改。 | ADT `/chosen fuxi,bt-fix`（u32，預設 0）：bit 0 補 H4 傳輸表的 PrepareTerminate；bit 1 讓 bluetoothd 讀到 `SupportsMultipleAdvertising=false`。需要核心 0118 的注入位元 64（bluetoothd）。loader 產生器 `--bt-fix <1..3>`，要求 `--bt-native` 與含 ` bluetoothd gets ` 的核心，並把 `fuxi,inject` 加上 64；不綁 `--bt-oslog`／`--stderr-log`。 |
 
 ### B：開機鏈、部署與雙系統選單（12 項）
 

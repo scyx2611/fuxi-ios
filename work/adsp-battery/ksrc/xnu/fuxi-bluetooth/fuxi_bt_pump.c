@@ -306,26 +306,26 @@ static void fuxi_bt_pump_queue_ctl(struct fuxi_bt_pump *pump, uint8_t byte)
     }
 }
 
-/* 封包邊界上的非 H4 byte：計數、留樣本；IBS 開啟時處理控制器的 WAKE_IND／WAKE_ACK */
+/* 封包邊界上的非 H4 byte：IBS 開啟時處理控制器的 WAKE_IND／WAKE_ACK／SLEEP_IND（不計入 desync）；
+ * 其餘非 H4 byte 或 IBS 關閉時的 0xfc–0xfe 計入 desync 並留樣本 */
 static void fuxi_bt_pump_desync(struct fuxi_bt_pump *pump, uint8_t byte)
 {
     struct fuxi_bt_h4_framer *framer = &pump->host;
+    if (byte >= FUXI_BT_IBS_WAKE_ACK && byte <= FUXI_BT_IBS_SLEEP_IND) {
+        framer->ibs_bytes[byte - FUXI_BT_IBS_WAKE_ACK]++;
+        if (pump->ibs) {
+            if (byte == FUXI_BT_IBS_WAKE_IND) {
+                /* 控制器要送資料：回 WAKE_ACK（hci_qca device_want_to_wakeup） */
+                fuxi_bt_pump_queue_ctl(pump, FUXI_BT_IBS_WAKE_ACK);
+            } else if (byte == FUXI_BT_IBS_WAKE_ACK) {
+                /* 主機的 WAKE_IND 得到回應 */
+                pump->ibs_tx_awake = true;
+            }
+            return;
+        }
+    }
     framer->desync_bytes++;
     framer->desync_recent[framer->desync_recent_pos++ % sizeof(framer->desync_recent)] = byte;
-    if (byte < FUXI_BT_IBS_WAKE_ACK || byte > FUXI_BT_IBS_SLEEP_IND) {
-        return;
-    }
-    framer->ibs_bytes[byte - FUXI_BT_IBS_WAKE_ACK]++;
-    if (!pump->ibs) {
-        return;
-    }
-    if (byte == FUXI_BT_IBS_WAKE_IND) {
-        /* 控制器要送資料：回 WAKE_ACK（hci_qca device_want_to_wakeup） */
-        fuxi_bt_pump_queue_ctl(pump, FUXI_BT_IBS_WAKE_ACK);
-    } else if (byte == FUXI_BT_IBS_WAKE_ACK) {
-        /* 主機的 WAKE_IND 得到回應 */
-        pump->ibs_tx_awake = true;
-    }
 }
 
 /* opcode 清單比對；0xfc00 代表所有 vendor（OGF 0x3f）命令 */

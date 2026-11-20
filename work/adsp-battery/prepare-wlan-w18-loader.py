@@ -775,9 +775,12 @@ def build(args, report, tree, source_inputs):
                 'artifact lacks the HAP525 direct-play runtime')
         if args.haptic == 4:
             require(b'haptic transient attack-us=' in kernel_bytes, 'artifact lacks the HAP525 transient mode')
-        if args.haptic == 5:
+        if args.haptic in (5, 6):
+            # 6：核心把短觸感改播同一份原廠點按、VMAX 依強度縮放（0123），HAL 照舊送 DIRECT 請求
             require(args.haptic_rtp is not None and b'haptic RTP FIFO' in kernel_bytes,
-                    'mode 5 needs the HAP525 FIFO kernel and the measured Android click')
+                    f'mode {args.haptic} needs the HAP525 FIFO kernel and the measured Android click')
+            require(args.haptic != 6 or b'haptic shape on' in kernel_bytes,
+                    'mode 6 needs the kernel with the haptic shape patch')
             require(not args.hal_haptics or b'haptic RTP FIFO UI click' in kernel_bytes,
                     'normal UI haptics need the kernel with the RTP request handler')
             wave = args.haptic_rtp.read_bytes()
@@ -793,8 +796,8 @@ def build(args, report, tree, source_inputs):
         report['haptic'] = args.haptic
         report['adt_off'] = [name for name in report['adt_off'] if name != 'fuxi,haptic']
     if args.haptic_rtp_vmax is not None:
-        require(args.haptic == 5 and 0x1c <= args.haptic_rtp_vmax <= 0x38,
-                '--haptic-rtp-vmax needs mode 5 and a code from 0x1c to 0x38')
+        require(args.haptic in (5, 6) and 0x1c <= args.haptic_rtp_vmax <= 0x38,
+                '--haptic-rtp-vmax needs mode 5 or 6 and a code from 0x1c to 0x38')
         require(b'fuxi,haptic-rtp-vmax' in kernel.read_bytes(), 'artifact lacks the RTP voltage option')
         chosen.props.append(('fuxi,haptic-rtp-vmax', 0, struct.pack('<I', args.haptic_rtp_vmax)))
         report['haptic_rtp_vmax'] = args.haptic_rtp_vmax
@@ -1028,6 +1031,7 @@ def build(args, report, tree, source_inputs):
         tree.children.append(bluetooth)
         report['bt_node'] = True
     chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-oslog']
+    chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-fix']
     if args.bt_oslog:
         # 第九趟：bluetoothd 自願重啟（0x100090734／0x100090778）先以 os_log 寫
         # 「Bluetooth error - restarting { reason=…, context=… }」再 _exit(1)，console 看不到原因。
@@ -1046,6 +1050,22 @@ def build(args, report, tree, source_inputs):
         chosen.props.append(('fuxi,bt-oslog', 0, struct.pack('<I', args.bt_oslog)))
         report['inject'] = mode
         report['bt_oslog'] = args.bt_oslog
+    if args.bt_fix:
+        # 注入位元 64 讓 libfuxi-sb.dylib 進 bluetoothd，不綁定 --bt-oslog 或 --stderr-log：
+        # bit 0 填補 H4 PrepareTerminate（+0x60）避免關藍牙 pc=0 SIGSEGV；
+        # bit 1 覆寫 SupportsMultipleAdvertising=false，改走單實例標準 Legacy BLE 廣播。
+        require(args.bt_native, '--bt-fix needs --bt-native')
+        require(1 <= args.bt_fix <= 3, '--bt-fix takes 1..3 (1 H4 PrepareTerminate, 2 single-instance BLE advertising)')
+        kernel_bytes = kernel.read_bytes()
+        require(b' bluetoothd gets ' in kernel_bytes, '--bt-fix needs a kernel with opt-in bluetoothd injection')
+        current = chosen.prop('fuxi,inject')
+        require(current is not None and len(current) == 4, 'source lacks ADT fuxi,inject')
+        mode = struct.unpack('<I', current)[0] | 64
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
+        chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
+        chosen.props.append(('fuxi,bt-fix', 0, struct.pack('<I', args.bt_fix)))
+        report['inject'] = mode
+        report['bt_fix'] = args.bt_fix
     if args.product_haptics:
         # /product/haptics closed-loop=1：MobileGestalt 的 DeviceSupportsClosedLoopHaptics 才會成立，
         # MediaExperience 才建立震動器（走 VibeSynthEngine → AVHapticServer playVibePattern，由注入的 hook 轉核心）。
@@ -1797,8 +1817,8 @@ def main():
     parser.add_argument('--haptic-fast-apid', action='store_true', help='Reuse verified haptic APIDs with live owner checks')
     parser.add_argument('--haptic-pcm', action='store_true',
                         help='Send signed Actuator PCM in mode 5 with the matching HAL')
-    parser.add_argument('--haptic', type=int, choices=(2, 3, 4, 5),
-                        help='HAP525 vibration: ADT fuxi,haptic=2 runtime (sysctl kern.fuxivibrate) or 3 with a boot self-test, or 4 with transient attack and stock brake detection')
+    parser.add_argument('--haptic', type=int, choices=(2, 3, 4, 5, 6),
+                        help='HAP525 vibration: ADT fuxi,haptic=2 runtime (sysctl kern.fuxivibrate) or 3 with a boot self-test, or 4 with transient attack and stock brake detection, 5 RTP FIFO click, or 6 shaping short requests into the RTP click with level-scaled VMAX (needs --haptic-rtp)')
     parser.add_argument('--hal-haptics', action='store_true',
                         help='Enable the Actuator output in FuxiAudio.driver; needs --haptic and --product-haptics')
     parser.add_argument('--bt', type=int, choices=(1, 3, 4, 5),
@@ -1847,6 +1867,10 @@ def main():
                         help='ADT fuxi,bt-oslog and injection bit 64: libfuxi-sb.dylib copies bluetoothd os_log to '
                              'stderr (1 default/error/fault, 2 info, 4 debug). Needs --bt-native and '
                              '--stderr-log with bluetoothd.')
+    parser.add_argument('--bt-fix', type=int, default=0, metavar='BITS',
+                        help='ADT fuxi,bt-fix and injection bit 64: libfuxi-sb.dylib bluetoothd compatibility fixes '
+                             '(1 H4 PrepareTerminate null-call patch, 2 single-instance legacy BLE advertising). '
+                             'Needs --bt-native.')
     parser.add_argument('--inject-media', action='store_true',
                         help='ADT fuxi,inject=6: mediaserverd also gets libfuxi-sb.dylib (haptic server hooks)')
     parser.add_argument('--wifi-audit', action='store_true',

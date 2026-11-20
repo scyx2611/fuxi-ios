@@ -50,6 +50,9 @@ python3 "$HARNESS/tools/test-vibe-worker.py" > "$OUT/logs/vibe-worker.txt" 2>&1
 clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
     "$HARNESS/tools/test-oslog-format.c" -o "$BUILD/test-oslog-format"
 ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-oslog-format" > "$OUT/logs/oslog-format.txt" 2>&1
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
+    "$HARNESS/tools/test-bluetooth-patch.c" -o "$BUILD/test-bluetooth-patch"
+ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-bluetooth-patch" > "$OUT/logs/bluetooth-patch.txt" 2>&1
 (
     OBJECTS=()
     for unit in FuxiShape FuxiFlashlight FuxiBatteryAudit FuxiVibrate FuxiWifiAudit FuxiBluetoothProbe FuxiBlueTool \

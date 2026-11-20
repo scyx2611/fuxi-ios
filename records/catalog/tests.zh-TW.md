@@ -192,6 +192,7 @@
 | `harness:tests/test-perf-governor.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `harness:tests/test-surface-plane-result.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml、kernel-surface-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `harness:tests/test-surfrow-mode2.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:tools/test-bluetooth-patch.c` | sb-shape.yml | [U-023](../items/U-userland.zh-TW.md#u-023-bluetoothd-相容修補關藍牙閃退與單實例-ble-廣播fuxibt-fix) |
 | `harness:tools/test-flashlight-levels.c` | sb-shape.yml | [K-031](../items/K-kernel.zh-TW.md#k-031-手電筒調光不重開輸出與五檔)、[U-003](../items/U-userland.zh-TW.md#u-003-ios-手電筒控制接上核心租約與五檔亮度) |
 | `harness:tools/test-oslog-format.c` | sb-shape.yml | [U-022](../items/U-userland.zh-TW.md#u-022-bluetoothd-os_log-轉錄到-consolefuxibt-oslog) |
 | `harness:tools/test-vibe-pattern.c` | sb-shape.yml | [K-033](../items/K-kernel.zh-TW.md#k-033-hap525-direct_play-震動執行期)、[U-004](../items/U-userland.zh-TW.md#u-004-ios-震動交給核心-hap525-執行期mediaserverdfigvibratormediaexperience) |
