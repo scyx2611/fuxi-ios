@@ -8,6 +8,11 @@
 #define FDBL_FADE_MAX_MS 5000u
 #define FDBL_STEP_MS 16u
 #define FDBL_PENDING (1ull << 63)
+#define FDBL_MIN_NITS_FIXED (2u << 16)
+#define FDBL_MID_NITS_FIXED (100u << 16)
+#define FDBL_MAX_NITS_FIXED (500u << 16)
+#define FDBL_CURR_MID_FIXED (10u << 16)
+#define FDBL_CURR_MAX_FIXED (20u << 16)
 static inline int fdbl_enabled(int present, int value)
 {
 	return present && value == 4;
@@ -17,6 +22,14 @@ static inline uint32_t fdbl_goal(uint64_t raw, unsigned bits)
 {
 	if (bits >= 1 && bits <= 64 && ((raw >> (bits - 1)) & 1u)) return 0;
 	return raw > FDBL_MAX ? FDBL_MAX : (uint32_t)raw;
+}
+/* brightness-nits is signed 16.16 fixed-point nits (0..500.0 nits -> DBV 0..FDBL_MAX). */
+static inline uint32_t fdbl_nits_goal(uint64_t raw, unsigned bits)
+{
+	if (bits >= 1 && bits <= 64 && ((raw >> (bits - 1)) & 1u)) return 0;
+	if (raw >= FDBL_MAX_NITS_FIXED) return FDBL_MAX;
+	return (uint32_t)((raw * (uint64_t)FDBL_MAX + ((uint64_t)FDBL_MAX_NITS_FIXED / 2u)) /
+	    (uint64_t)FDBL_MAX_NITS_FIXED);
 }
 /* FadePeriod is 16.16 fixed-point seconds. */
 static inline uint32_t fdbl_fade_ms(uint64_t fixed)

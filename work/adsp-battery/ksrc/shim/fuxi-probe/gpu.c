@@ -1259,11 +1259,11 @@ static uint32_t g4_pattern(unsigned x, unsigned y, unsigned panel)
                                 0xffffff00,0xff00ffff,0xffff00ff,0xff202020};
  return bars[x / 32u];
 }
-static int g4_tlb(uint32_t *d)
+static int g4_tlb_asid(uint32_t *d, unsigned asid)
 {
  unsigned cb = g_cb(g3_bank);
  __asm__ volatile("dsb sy" ::: "memory");
- if (!g3_sw(cb+0x610, g3_asid) || !g3_sw(cb+0x7f0, 0)) return 0xe01;
+ if (!g3_sw(cb+0x610, asid) || !g3_sw(cb+0x7f0, 0)) return 0xe01;
  for (unsigned i = 0; i < 1000; i++) {
   d[29] = g3_sr(cb+0x7f4); d[30] = i+1;
   if (gpu_extra[5][116]) return 0xe01;
@@ -1271,6 +1271,10 @@ static int g4_tlb(uint32_t *d)
   delay(1);
  }
  return 0xe03;
+}
+static int g4_tlb(uint32_t *d)
+{
+ return g4_tlb_asid(d, g3_asid);
 }
 /* Source/destination base64 alignment and pitch64 units; nearest, no UBWC,
  * no sRGB, single sample. WXYZ swap (1) is BGRA in Mesa fd6_format_table.c. */

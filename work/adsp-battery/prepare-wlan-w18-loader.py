@@ -138,14 +138,15 @@ def wifi_args_value(text, kernel):
     return value
 
 
-def audio_spf_choice(enabled, with_adsp, kernel, wire_format='apm', *, prm=False, tdm_graph=False, tdm_pcm=False):
+def audio_spf_choice(enabled, with_adsp, kernel, wire_format='apm', *, prm=False, tdm_graph=False, tdm_pcm=False,
+                     tdm_live=False):
     require(type(enabled) is bool and type(with_adsp) is bool, 'invalid audio SPF selector')
     require(wire_format in ('apm', 'bare') and (enabled or wire_format == 'apm'),
             'invalid audio SPF format selector')
     require(not enabled or with_adsp, 'audio SPF query needs the ADSP owner')
     require(not enabled or (b'FUXI AUDIO SPF: state query queued bytes' in kernel and
                            b'fuxi,audio-spf' in kernel), 'artifact lacks the query-only audio SPF client')
-    require(sum((prm, tdm_graph, tdm_pcm)) <= 1, 'select one PRM, TDM graph or TDM PCM probe')
+    require(sum((prm, tdm_graph, tdm_pcm, tdm_live)) <= 1, 'select one PRM, TDM graph, TDM PCM or live stream mode')
     if prm:
         require(enabled and wire_format == 'apm', '--audio-prm needs --audio-spf and APM wire format')
         require(b'FUXI AUDIO PRM: LPASS macro request status=' in kernel, 'artifact lacks the audio PRM probe')
@@ -159,6 +160,11 @@ def audio_spf_choice(enabled, with_adsp, kernel, wire_format='apm', *, prm=False
         require(b'FUXI AUDIO PCM: probe complete result=' in kernel and b'fuxi,audio-dma' in kernel,
                 'artifact lacks the audio PCM probe')
         return 5
+    if tdm_live:
+        require(enabled and wire_format == 'apm', '--audio-tdm-live needs --audio-spf and APM wire format')
+        require(b'FUXI AUDIO LIVE:' in kernel and b'fuxiaudiopcm' in kernel and b'fuxi,audio-dma' in kernel,
+                'artifact lacks the live speaker PCM stream')
+        return 6
     return (2 if wire_format == 'bare' else 1) if enabled else 0
 
 
@@ -473,6 +479,13 @@ def statusbar_shape(current, width=None, height=None):
     return width * 1000 + height
 
 
+def hal_haptic_mode(args):
+    """FuxiAudio 的 Actuator 模式：5 固定線性串流、4 感知串流（haptic=9 預設）、3 單段 PCM、2 RTP 點按、1 DIRECT。"""
+    if getattr(args, 'hal_haptics_mode', None) is not None:
+        return args.hal_haptics_mode
+    return 4 if args.haptic == 9 else 3 if args.haptic_pcm else 2 if args.haptic == 5 else 1
+
+
 def inspect(args):
     source, artifact = STORAGE / args.source, STORAGE / args.artifact
     pinned = sums(source / 'sha256.txt')
@@ -523,10 +536,18 @@ def inspect(args):
         removed.append(replaced)
     require(not any(arg.startswith('fuxihalhaptic=') for arg in line.split()),
             'inherited fuxihalhaptic is not allowed')
+    require(not args.hal_haptics_adt or args.hal_haptics, '--hal-haptics-adt needs --hal-haptics')
+    require(args.hal_haptics_mode is None or args.hal_haptics, '--hal-haptics-mode needs --hal-haptics')
+    require(args.hal_haptics_mode not in (5, 6) or args.haptic == 9, '--hal-haptics-mode 5/6 needs --haptic 9')
     if args.hal_haptics:
         require(args.haptic and args.product_haptics, '--hal-haptics needs --haptic and --product-haptics')
-        line += f' fuxihalhaptic={3 if args.haptic_pcm else 2 if args.haptic == 5 else 1}'
-        require(len(line.encode('ascii')) < 608, 'HAL haptics command line exceeds 607 bytes')
+        if args.hal_haptics_adt:
+            # 日常命令列 604／607 bytes 已滿。FuxiAudio（ksrc a47bc58 起）在命令列沒有 fuxihalhaptic 時
+            # 讀 ADT /chosen fuxi,hal-haptic；模式 3／4 需要核心也支援讀取 ADT fuxi,hal-haptic（0124 起）。
+            pass
+        else:
+            line += f' fuxihalhaptic={hal_haptic_mode(args)}'
+            require(len(line.encode('ascii')) < 608, 'HAL haptics command line exceeds 607 bytes')
     if args.bt_exit_trace:
         require(args.bt_native, '--bt-exit-trace requires --bt-native')
         line += ' fuxibtexittrace=1'
@@ -629,6 +650,8 @@ def inspect(args):
     else:
         gaps.append('kernel artifact pending download for ' + args.artifact)
     resolved_board = bool(args.bdf or args.native_ath12k)
+    full_sweetnull = (validate_adt_sweetnull(args.adt_sweetnull, args.stderr_log, args.native_ath12k)
+                      if args.adt_sweetnull is not None else None)
     report = {'profile': 'controlled-ath12k-ram9g-sb127' if args.native_ath12k else 'controlled-w18-ram9g-sb127',
               'source': args.source, 'native_ath12k': args.native_ath12k,
               'wifi_ios': args.wifi_ios, 'wifi_self_test': args.wifi_self_test,
@@ -641,6 +664,7 @@ def inspect(args):
               'sample': args.sample,
               'crash_strings': args.crash_strings,
               'stderr_log': args.stderr_log,
+              'adt_sweetnull': full_sweetnull,
               'bt_native': args.bt_native,
               'privs': args.privs,
               'daily_tuning': list(DAILY_TUNING) if args.daily_tuning else None,
@@ -686,6 +710,40 @@ def tap_p_shots(script):
     return shots
 
 
+def validate_audio_idle_pdn(value, bottom_live):
+    require(bottom_live and (value in (0, 1) or 200 <= value <= 60000),
+            '--audio-idle-pdn needs --audio-bottom-live and value 0, 1 (default 2500 ms), or 200..60000 ms')
+
+
+def validate_adt_sweetnull(adt_sweetnull, stderr_log, native_ath12k):
+    require(not stderr_log, '--adt-sweetnull is exclusive with --stderr-log')
+    require(native_ath12k and isinstance(adt_sweetnull, str) and
+            re.fullmatch(r'[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*', adt_sweetnull) and
+            not {'backboardd', 'SpringBoard'} & set(adt_sweetnull.split(',')),
+            'invalid --adt-sweetnull process list')
+    full = 'backboardd,SpringBoard,' + adt_sweetnull
+    require(len(full.encode('ascii')) <= 127, '--adt-sweetnull full list exceeds 127 ASCII bytes')
+    return full
+
+
+def validate_audio_mic_cfg(value, audio_mic):
+    require(audio_mic in (1, 2) and type(value) is int and 0 <= value <= 1,
+            '--audio-mic-cfg needs --audio-mic 1|2 and 0..1')
+
+
+def validate_audio_mic_dsp(value, inject_media):
+    require(inject_media and type(value) is int and 1 <= value <= 3,
+            '--audio-mic-dsp takes 1..3 and needs --inject-media')
+
+
+def validate_dict_oslog(value, kernel_bytes, stderr_procs):
+    require(type(value) is int and 1 <= (value & 7) <= 7 and 0 <= value <= 0x3ffff,
+            '--dict-oslog takes (delay_s<<8)|bits with bits 1..7 and delay_s 0..1023')
+    require(b' dictation gets ' in kernel_bytes, '--dict-oslog needs a kernel with opt-in dictation daemon injection')
+    require(bool(stderr_procs & {'assistantd', 'assistant_service', 'corespeechd', 'kbd'}),
+            '--dict-oslog needs --stderr-log or --adt-sweetnull with assistantd, assistant_service, corespeechd or kbd')
+
+
 def build(args, report, tree, source_inputs):
     require(report['ready_to_build'], 'build needs a verified kernel and board firmware record with provenance')
     output = STORAGE / args.name
@@ -695,7 +753,12 @@ def build(args, report, tree, source_inputs):
     controlled = set(OFF_PROPS) | {'fuxi,tapcmd', 'fuxi,rtc-offset', 'fuxi,haptic-ui', 'fuxi,haptic-env',
                                    'fuxi,wifi-sb', 'fuxi,wifi-rssi', 'fuxi,haptic-amp', 'fuxi,wifi-ux', 'fuxi,args',
                                    'fuxi,audio-dma', 'fuxi,haptic-rtp', 'fuxi,haptic-rtp-vmax',
-                                   'fuxi,cs35l41-prot', 'fuxi,fit'}
+                                   'fuxi,cs35l41-prot', 'fuxi,fit', 'fuxi,audio-gain', 'fuxi,audio-max-db',
+                                   'fuxi,audio-chime', 'fuxi,audio-idle-pdn', 'fuxi,volhud', 'fuxi,hal-haptic', 'fuxi,haptic-fast-apid',
+                                   'fuxi,haptic-damp', 'fuxi,audio-mic', 'fuxi,audio-mic-gain', 'fuxi,audio-mic-cfg',
+                                   'fuxi,audio-mic-dsp', 'fuxi,media-oslog', 'fuxi,vm-oslog', 'fuxi,dict-oslog',
+                                   'fuxi,sweetnull', 'fuxi,sb-ext', 'fuxi,capsrc-stub',
+                                   'fuxi,rtc-persist', 'fuxi,rtc-user', 'fuxi,atx-fix'}
     chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name not in controlled]
     chosen.props.extend((name, 0, struct.pack('<I', 0)) for name in OFF_PROPS)
     require({name: (flags, value) for name, flags, value in chosen.props if name not in controlled} ==
@@ -717,6 +780,14 @@ def build(args, report, tree, source_inputs):
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,sbshape']
         chosen.props.append(('fuxi,sbshape', 0, struct.pack('<I', shape)))
         report['statusbar_shape'] = shape
+    if args.volhud is not None:
+        packed_ok = (100000 <= args.volhud <= 700300 and
+                     100 <= args.volhud // 1000 <= 700 and 80 <= args.volhud % 1000 <= 300)
+        require(args.volhud in (0, 1) or 100 <= args.volhud <= 700 or packed_ok,
+                '--volhud must be 0 (off), 1 (right edge), 100..700 (centerY pt), or Y*1000+H (Y 100..700, H 80..300)')
+        if args.volhud:
+            chosen.props.append(('fuxi,volhud', 0, struct.pack('<I', args.volhud)))
+        report['volhud'] = args.volhud
     kernel = STORAGE / args.artifact / 'kernel.development.fuxi'
     if args.bt_exit_trace:
         require(b'fuxibtexittrace' in kernel.read_bytes(), 'artifact lacks the Bluetooth exit trace')
@@ -735,23 +806,29 @@ def build(args, report, tree, source_inputs):
         report['adt_off'] = [name for name in OFF_PROPS if name not in joint]
         report['adsp_gate'] = 'opted in: adt fuxi,adsp=3 fuxi,pmic=3 fuxi,adsp-wlan=1'
     audio_mode = audio_spf_choice(args.audio_spf, args.with_adsp, kernel.read_bytes(), args.audio_spf_format,
-                                  prm=args.audio_prm, tdm_graph=args.audio_tdm_graph, tdm_pcm=args.audio_tdm_pcm)
+                                  prm=args.audio_prm, tdm_graph=args.audio_tdm_graph, tdm_pcm=args.audio_tdm_pcm,
+                                  tdm_live=args.audio_tdm_live)
     report['audio_spf'] = bool(audio_mode)
     report['audio_spf_format'] = args.audio_spf_format if audio_mode else None
     report['audio_prm'] = args.audio_prm
     report['audio_tdm_graph'] = args.audio_tdm_graph
     report['audio_tdm_pcm'] = args.audio_tdm_pcm
+    report['audio_tdm_live'] = args.audio_tdm_live
     if args.audio_spf:
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,audio-spf']
         chosen.props.append(('fuxi,audio-spf', 0, struct.pack('<I', audio_mode)))
         report['adt_off'] = [name for name in report['adt_off'] if name != 'fuxi,audio-spf']
-    if args.audio_tdm_pcm:
+    if args.audio_tdm_pcm or args.audio_tdm_live:
         chosen.props.append(('fuxi,audio-dma', 0, AUDIO_DMA_HANDOFF))
     require(not args.audio_bottom_full or args.audio_bottom_fw, '--audio-bottom-full needs --audio-bottom-fw')
     require(not args.audio_bottom_cal or args.audio_bottom_full, '--audio-bottom-cal needs --audio-bottom-full')
     require(not args.audio_bottom_run or args.audio_bottom_cal, '--audio-bottom-run needs --audio-bottom-cal')
+    require(not (args.audio_bottom_tone and args.audio_bottom_live),
+            'choose either --audio-bottom-tone or --audio-bottom-live')
     require(not args.audio_bottom_tone or (args.audio_bottom_run and args.audio_tdm_pcm),
             '--audio-bottom-tone needs --audio-bottom-run and --audio-tdm-pcm')
+    require(not args.audio_bottom_live or (args.audio_bottom_run and args.audio_tdm_live),
+            '--audio-bottom-live needs --audio-bottom-run and --audio-tdm-live')
     if args.audio_bottom_fw:
         require(args.with_adsp and b'fuxi,cs35l41-prot' in kernel.read_bytes(),
                 'muted firmware probe needs the CS35L41-capable kernel and ADSP init')
@@ -760,8 +837,8 @@ def build(args, report, tree, source_inputs):
         spec.loader.exec_module(halo)
         packed = halo.pack_stock_protection(args.audio_bottom_fw, full=args.audio_bottom_full)
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,amp']
-        # 6: 靜音試跑保護韌體；7: 保護與校正核對通過後，下方喇叭播 1 秒 2 kHz（-20 dBFS、數位音量 -30 dB）（K-078）。
-        amp_mode = (7 if args.audio_bottom_tone else 6 if args.audio_bottom_run else
+        # 6: 靜音試跑保護韌體；7: 1 秒 2 kHz（-30 dB）；8: 下方喇叭即時串流（搭配 fuxi,audio-spf=6）。
+        amp_mode = (8 if args.audio_bottom_live else 7 if args.audio_bottom_tone else 6 if args.audio_bottom_run else
                     5 if args.audio_bottom_cal else 4 if args.audio_bottom_full else 3)
         chosen.props.append(('fuxi,amp', 0, struct.pack('<I', amp_mode)))
         if args.audio_bottom_full:
@@ -777,6 +854,10 @@ def build(args, report, tree, source_inputs):
                     kernel_bytes = kernel.read_bytes()
                     require(b'FUXI AUDIO TONE' in kernel_bytes and b'tone on -30 dB' in kernel_bytes,
                             'kernel lacks the mode 7 bottom-speaker -30 dB tone stage')
+                if args.audio_bottom_live:
+                    kernel_bytes = kernel.read_bytes()
+                    require(b'FUXI AMP: live on' in kernel_bytes and b'FUXI AUDIO LIVE:' in kernel_bytes,
+                            'kernel lacks the mode 8 live bottom-speaker stage')
                 speaker.props.append(('fuxi,cs35l41-cal', 0,
                                       halo.pack_bottom_controls(args.audio_bottom_fw, args.audio_bottom_cal)))
             chosen.children.append(speaker)
@@ -786,6 +867,47 @@ def build(args, report, tree, source_inputs):
         report['audio_bottom_fw'] = hashlib.sha256(packed).hexdigest()
         report['audio_bottom_full'] = args.audio_bottom_full
         report['audio_bottom_amp_mode'] = amp_mode
+    if args.audio_gain is not None:
+        require(args.audio_bottom_live and 0 <= args.audio_gain <= 18,
+                '--audio-gain needs --audio-bottom-live and value 0..18')
+        chosen.props.append(('fuxi,audio-gain', 0, struct.pack('<I', args.audio_gain)))
+        report['audio_gain'] = args.audio_gain
+    if args.audio_max_db is not None:
+        require(args.audio_bottom_live and -36 <= args.audio_max_db <= 0,
+                '--audio-max-db needs --audio-bottom-live and value -36..0')
+        chosen.props.append(('fuxi,audio-max-db', 0, struct.pack('<i', args.audio_max_db)))
+        report['audio_max_db'] = args.audio_max_db
+    if args.audio_chime is not None:
+        require(args.audio_bottom_live and args.audio_chime in (0, 1),
+                '--audio-chime needs --audio-bottom-live and value 0 or 1')
+        chosen.props.append(('fuxi,audio-chime', 0, struct.pack('<I', args.audio_chime)))
+        report['audio_chime'] = args.audio_chime
+    if args.audio_idle_pdn is not None:
+        validate_audio_idle_pdn(args.audio_idle_pdn, args.audio_bottom_live)
+        if args.audio_idle_pdn:
+            require(b'fuxi,audio-idle-pdn' in kernel.read_bytes(), 'artifact lacks fuxi,audio-idle-pdn')
+            chosen.props.append(('fuxi,audio-idle-pdn', 0, struct.pack('<I', args.audio_idle_pdn)))
+        report['audio_idle_pdn'] = args.audio_idle_pdn
+    if args.audio_mic is not None:
+        require(args.audio_mic == 0 or (args.audio_spf and args.audio_tdm_live),
+                '--audio-mic 1|2 needs --audio-spf --audio-tdm-live')
+        if args.audio_mic:
+            kernel_bytes = kernel.read_bytes()
+            require(b'fuxi,audio-mic' in kernel_bytes and b'FUXI AUDIO MIC:' in kernel_bytes,
+                    'artifact lacks the live ADSP microphone capture path')
+            chosen.props.append(('fuxi,audio-mic', 0, struct.pack('<I', args.audio_mic)))
+        report['audio_mic'] = args.audio_mic
+    if args.audio_mic_gain is not None:
+        require(args.audio_mic in (1, 2) and 0 <= args.audio_mic_gain <= 0xffff,
+                '--audio-mic-gain needs --audio-mic 1|2 and 0..0xffff')
+        require(b'fuxi,audio-mic-gain' in kernel.read_bytes(), 'artifact lacks fuxi,audio-mic-gain')
+        chosen.props.append(('fuxi,audio-mic-gain', 0, struct.pack('<I', args.audio_mic_gain)))
+        report['audio_mic_gain'] = args.audio_mic_gain
+    if args.audio_mic_cfg is not None:
+        validate_audio_mic_cfg(args.audio_mic_cfg, args.audio_mic)
+        require(b'fuxi,audio-mic-cfg' in kernel.read_bytes(), 'artifact lacks fuxi,audio-mic-cfg')
+        chosen.props.append(('fuxi,audio-mic-cfg', 0, struct.pack('<I', args.audio_mic_cfg)))
+        report['audio_mic_cfg'] = args.audio_mic_cfg
     if args.haptic:
         # 震動：ADT fuxi,haptic=2（DIRECT_PLAY 執行期，sysctl kern.fuxivibrate）或 3（另加開機自測三下 30/100/300 ms）。
         kernel_bytes = kernel.read_bytes()
@@ -793,20 +915,34 @@ def build(args, report, tree, source_inputs):
                 'artifact lacks the HAP525 direct-play runtime')
         if args.haptic == 4:
             require(b'haptic transient attack-us=' in kernel_bytes, 'artifact lacks the HAP525 transient mode')
-        if args.haptic in (5, 6):
+        if args.haptic in (5, 6, 7, 8, 9):
             # 6：核心把短觸感改播同一份原廠點按、VMAX 依強度縮放（0123），HAL 照舊送 DIRECT 請求
+            # 7：觸感整形 v2（0124），縮短吞掉期至 18 ms 支援快速滾輪並拉開輕中重 VMAX 分級
+            # 8：觸感整形 v3（0124），38 ms 吞掉期防長按雙擊彈簧感、支援短主動制動波形與高壓 VMAX 上限 0x64
+            # 9：連續低延遲 24 kHz FIFO PCM 串流（0124），保留 iOS CoreHaptics 原始波形、自動快取 APID、VMAX 上限 0xa3
             require(args.haptic_rtp is not None and b'haptic RTP FIFO' in kernel_bytes,
                     f'mode {args.haptic} needs the HAP525 FIFO kernel and the measured Android click')
             require(args.haptic != 6 or b'haptic shape on' in kernel_bytes,
                     'mode 6 needs the kernel with the haptic shape patch')
+            require(args.haptic != 7 or b'haptic shape v2 on' in kernel_bytes,
+                    'mode 7 needs the kernel with the haptic shape v2 patch')
+            require(args.haptic != 8 or b'haptic shape v3 on' in kernel_bytes,
+                    'mode 8 needs the kernel with the haptic shape v3 patch')
+            require(args.haptic != 9 or b'haptic stream v4 on' in kernel_bytes,
+                    'mode 9 needs the kernel with the haptic stream v4 patch')
             require(not args.hal_haptics or b'haptic RTP FIFO UI click' in kernel_bytes,
                     'normal UI haptics need the kernel with the RTP request handler')
             wave = args.haptic_rtp.read_bytes()
             wave_digest = hashlib.sha256(wave).hexdigest()
-            require(wave_digest == '43f3146f2f4abe53f92fe21ddea006742385110ce015c1fb045d622615bc34b5',
-                    'waveform differs from the click captured at the Android FIFO')
+            if args.haptic in (8, 9):
+                require(8 <= len(wave) <= 376 and len(wave) % 4 == 0 and wave[-4:] == b'\x00\x00\x00\x00',
+                        f'mode {args.haptic} RTP waveform must be 8..376 bytes, 4-byte aligned, ending with 4 zero bytes')
+            else:
+                require(wave_digest == '43f3146f2f4abe53f92fe21ddea006742385110ce015c1fb045d622615bc34b5',
+                        'waveform differs from the click captured at the Android FIFO')
             chosen.props.append(('fuxi,haptic-rtp', 0, wave))
             report['haptic_rtp_sha256'] = wave_digest
+            report['haptic_rtp_bytes'] = len(wave)
         require(not any(token.startswith('fuxihaptic=') for token in report['command_line'].split()),
                 'command line pins fuxihaptic, which would override the ADT')
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,haptic']
@@ -814,15 +950,34 @@ def build(args, report, tree, source_inputs):
         report['haptic'] = args.haptic
         report['adt_off'] = [name for name in report['adt_off'] if name != 'fuxi,haptic']
     if args.haptic_rtp_vmax is not None:
-        require(args.haptic in (5, 6) and 0x1c <= args.haptic_rtp_vmax <= 0x38,
-                '--haptic-rtp-vmax needs mode 5 or 6 and a code from 0x1c to 0x38')
+        vmax_limit = 0xa3 if args.haptic == 9 else 0x64 if args.haptic == 8 else 0x38
+        require(args.haptic in (5, 6, 7, 8, 9) and 0x1c <= args.haptic_rtp_vmax <= vmax_limit,
+                f'--haptic-rtp-vmax needs mode 5..9 and a code from 0x1c to {vmax_limit:#x}')
         require(b'fuxi,haptic-rtp-vmax' in kernel.read_bytes(), 'artifact lacks the RTP voltage option')
         chosen.props.append(('fuxi,haptic-rtp-vmax', 0, struct.pack('<I', args.haptic_rtp_vmax)))
         report['haptic_rtp_vmax'] = args.haptic_rtp_vmax
+    if args.haptic_damp is not None:
+        require(args.haptic == 9 and 0 <= args.haptic_damp <= 0xffff,
+                '--haptic-damp needs --haptic 9 and a code in 0..0xffff')
+        require(b'fuxi,haptic-damp' in kernel.read_bytes(), 'artifact lacks the LRA active damping option')
+        if args.haptic_damp:
+            chosen.props.append(('fuxi,haptic-damp', 0, struct.pack('<I', args.haptic_damp)))
+        report['haptic_damp'] = args.haptic_damp
     if args.haptic_pcm:
         require(args.haptic == 5 and args.hal_haptics and b'fuxihapticpcm' in kernel.read_bytes(),
                 '--haptic-pcm requires the mode 5 kernel and Actuator PCM HAL')
         report['haptic_pcm'] = True
+    if args.hal_haptics_adt:
+        require(args.hal_haptics and not any(token.startswith('fuxihalhaptic=')
+                                             for token in report['command_line'].split()),
+                'ADT HAL haptics must not also stay on the command line')
+        mode = hal_haptic_mode(args)
+        if mode in (3, 4, 5, 6):
+            require(b'fuxi,hal-haptic' in kernel.read_bytes(),
+                    f'--hal-haptics-adt mode {mode} needs a kernel that reads ADT fuxi,hal-haptic')
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,hal-haptic']
+        chosen.props.append(('fuxi,hal-haptic', 0, struct.pack('<I', mode)))
+        report['hal_haptic_adt'] = mode
     if args.display_fit:
         # 畫面縮放：ADT /chosen fuxi,fit（1 等比、2 填滿）。核心的 GPU 縮放只在雙緩衝掃描下接整張畫面，
         # 觸控（SweetHID）讀同一個屬性；命令列已滿，不放 boot-arg。
@@ -837,8 +992,11 @@ def build(args, report, tree, source_inputs):
         chosen.props.append(('fuxi,fit', 0, struct.pack('<I', DISPLAY_FIT[args.display_fit])))
         report['display_fit'] = args.display_fit
     if args.haptic_fast_apid:
-        require(args.haptic_pcm and b'fuxi,haptic-fast-apid' in kernel_bytes,
-                '--haptic-fast-apid requires the PCM HAL and haptic APID cache kernel')
+        kernel_bytes = kernel.read_bytes()
+        require(b'fuxi,haptic-fast-apid' in kernel_bytes and
+                (args.haptic_pcm or (args.haptic in (5, 6, 7, 8, 9) and
+                 (b'haptic cached two EE0 APIDs' in kernel_bytes or b'haptic cached %u APIDs' in kernel_bytes))),
+                '--haptic-fast-apid requires the PCM HAL or the generalized haptic APID cache kernel')
         chosen.props.append(('fuxi,haptic-fast-apid', 0, struct.pack('<I', 1)))
         report['haptic_fast_apid'] = True
     if args.bt:
@@ -1063,6 +1221,63 @@ def build(args, report, tree, source_inputs):
         report['bt_node'] = True
     chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-oslog']
     chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,bt-fix']
+    stderr_procs = set((args.stderr_log or '').split(',')) | set((args.adt_sweetnull or '').split(','))
+    stderr_procs.discard('')
+    if args.media_oslog:
+        require(args.inject_media, '--media-oslog needs --inject-media')
+        require(1 <= (args.media_oslog & 7) <= 7 and 0 <= args.media_oslog <= 0x3ffff,
+                '--media-oslog takes (delay_s<<8)|bits with bits 1..7 and delay_s 0..1023')
+        require('mediaserverd' in stderr_procs,
+                '--media-oslog needs --stderr-log or --adt-sweetnull with mediaserverd')
+        chosen.props.append(('fuxi,media-oslog', 0, struct.pack('<I', args.media_oslog)))
+        report['media_oslog'] = args.media_oslog
+    if args.vm_oslog:
+        require(1 <= (args.vm_oslog & 7) <= 7 and 0 <= args.vm_oslog <= 0x3ffff,
+                '--vm-oslog takes (delay_s<<8)|bits with bits 1..7 and delay_s 0..1023')
+        kernel_bytes = kernel.read_bytes()
+        require(b' VoiceMemos/voicememod gets ' in kernel_bytes,
+                '--vm-oslog needs a kernel with opt-in VoiceMemos/voicememod injection')
+        require(bool(stderr_procs & {'VoiceMemos', 'voicememod'}),
+                '--vm-oslog needs --stderr-log or --adt-sweetnull with VoiceMemos or voicememod')
+        current = chosen.prop('fuxi,inject')
+        require(current is not None and len(current) == 4, 'source lacks ADT fuxi,inject')
+        mode = struct.unpack('<I', current)[0] | 128
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
+        chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
+        chosen.props.append(('fuxi,vm-oslog', 0, struct.pack('<I', args.vm_oslog)))
+        report['inject'] = mode
+        report['vm_oslog'] = args.vm_oslog
+    if args.dict_oslog:
+        kernel_bytes = kernel.read_bytes()
+        validate_dict_oslog(args.dict_oslog, kernel_bytes, stderr_procs)
+        require(not any(token.startswith('fxinj=') for token in report['command_line'].split()),
+                'command line pins fxinj, which would override the ADT')
+        current = chosen.prop('fuxi,inject')
+        require(current is not None and len(current) == 4, 'source lacks ADT fuxi,inject')
+        mode = struct.unpack('<I', current)[0] | 512
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
+        chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
+        chosen.props.append(('fuxi,dict-oslog', 0, struct.pack('<I', args.dict_oslog)))
+        report['inject'] = mode
+        report['dict_oslog'] = args.dict_oslog
+    if args.sb_ext:
+        kernel_bytes = kernel.read_bytes()
+        require(b'fuxi,sb-ext' in kernel_bytes,
+                '--sb-ext needs a kernel with 0125-fuxi-sandbox-ext.patch (fuxi,sb-ext)')
+        chosen.props.append(('fuxi,sb-ext', 0, struct.pack('<I', 1)))
+        report['sb_ext'] = True
+    if args.capsrc_stub is not None:
+        require(0 <= args.capsrc_stub <= 15,
+                '--capsrc-stub takes 0 (off) or bitmask 1..15 (1 capturesource, 2 capturesession, 4 deferred-cm, 8 flashlight)')
+        if args.capsrc_stub:
+            current = chosen.prop('fuxi,inject')
+            require(current is not None and len(current) == 4, 'source lacks ADT fuxi,inject')
+            mode = struct.unpack('<I', current)[0] | 4
+            chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
+            chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
+            chosen.props.append(('fuxi,capsrc-stub', 0, struct.pack('<I', args.capsrc_stub)))
+            report['inject'] = mode
+        report['capsrc_stub'] = args.capsrc_stub
     if args.bt_oslog:
         # 第九趟：bluetoothd 自願重啟（0x100090734／0x100090778）先以 os_log 寫
         # 「Bluetooth error - restarting { reason=…, context=… }」再 _exit(1)，console 看不到原因。
@@ -1072,7 +1287,7 @@ def build(args, report, tree, source_inputs):
         require(1 <= args.bt_oslog <= 7, '--bt-oslog takes 1..7 (1 default/error/fault, 2 info, 4 debug)')
         kernel_bytes = kernel.read_bytes()
         require(b' bluetoothd gets ' in kernel_bytes, '--bt-oslog needs a kernel with opt-in bluetoothd injection')
-        require('bluetoothd' in (args.stderr_log or '').split(','), '--bt-oslog needs --stderr-log with bluetoothd')
+        require('bluetoothd' in stderr_procs, '--bt-oslog needs --stderr-log or --adt-sweetnull with bluetoothd')
         current = chosen.prop('fuxi,inject')
         require(current is not None and len(current) == 4, 'source lacks ADT fuxi,inject')
         mode = struct.unpack('<I', current)[0] | 64
@@ -1100,8 +1315,11 @@ def build(args, report, tree, source_inputs):
     if args.product_haptics:
         # /product/haptics closed-loop=1：MobileGestalt 的 DeviceSupportsClosedLoopHaptics 才會成立，
         # MediaExperience 才建立震動器（走 VibeSynthEngine → AVHapticServer playVibePattern，由注入的 hook 轉核心）。
-        # 只放 closed-loop；supports-3rd-party-haptics 會讓 app 的 CoreHaptics 以為有 Actuator，先不給。
+        # 搭配 --product-haptics-3p（需已啟用 --hal-haptics 的 Actuator）再補 supports-3rd-party-haptics=1，
+        # 讓 AVHapticServer／鍵盤觸感回饋（_UIKeyboardFeedbackGenerator）與 CoreHaptics 正常辨識內建觸感。
         require(args.haptic and args.inject_media, '--product-haptics needs --haptic and --inject-media')
+        require(not args.product_haptics_3p or args.hal_haptics,
+                '--product-haptics-3p needs --hal-haptics so CoreHaptics has an Actuator output')
         product = [node for node in tree.children if node.name == 'product']
         require(len(product) == 1, 'ADT needs one /product node')
         require(not any(node.name == 'haptics' for node in product[0].children), 'ADT already has /product/haptics')
@@ -1110,10 +1328,15 @@ def build(args, report, tree, source_inputs):
             own = struct.unpack('<I', value)[0] if value and len(value) == 4 else 0
             return max([own] + [max_phandle(child) for child in node.children])
         haptics = adt.Node()
-        haptics.props = [('closed-loop', 0, struct.pack('<I', 1)), ('name', 0, b'haptics\0'),
-                         ('AAPL,phandle', 0, struct.pack('<I', max_phandle(tree) + 1))]
+        haptics.props = [('closed-loop', 0, struct.pack('<I', 1))]
+        if args.product_haptics_3p:
+            haptics.props.append(('supports-3rd-party-haptics', 0, struct.pack('<I', 1)))
+        haptics.props.extend([('name', 0, b'haptics\0'),
+                              ('AAPL,phandle', 0, struct.pack('<I', max_phandle(tree) + 1))])
         product[0].children.append(haptics)
-        report['product_haptics'] = 'closed-loop'
+        report['product_haptics'] = 'closed-loop+3rd-party' if args.product_haptics_3p else 'closed-loop'
+    else:
+        require(not args.product_haptics_3p, '--product-haptics-3p needs --product-haptics')
     if args.haptic_ui_ms or args.haptic_envelope:
         # 震動調整（libfuxi-sb.dylib 讀 ADT /chosen，沒有就是關）：fuxi,haptic-ui＝SpringBoard 在 CoreHaptics engine
         # 從未建成時（AVHapticServer 起不來，client -4810）的 UI 回退脈衝毫秒；fuxi,haptic-env＝mediaserverd 把
@@ -1206,6 +1429,44 @@ def build(args, report, tree, source_inputs):
         chosen.props.append(('fuxi,rtc-offset', 0, struct.pack('<I', rtc_record['offset_seconds'])))
         report['rtc_offset_seconds'] = rtc_record['offset_seconds']
         report['rtc_captured_at_utc'] = rtc_record['captured_at_utc']
+    if args.rtc_persist:
+        kernel_bytes = kernel.read_bytes()
+        require(b'fuxi,rtc-persist' in kernel_bytes and b'FUXI RTC: persist LUN 0' in kernel_bytes,
+                'artifact lacks the opt-in persist:/time/ats_2 RTC offset reader')
+        require(not any(token.startswith(('fuxirtc=', 'fuxirtcoffset=', 'fuxirtcpersist='))
+                        for token in report['command_line'].split()),
+                'command line already carries an RTC override')
+        chosen.props.append(('fuxi,rtc-persist', 0, struct.pack('<I', 1)))
+        report['rtc_persist'] = True
+    if args.rtc_user is not None:
+        require(1 <= args.rtc_user <= 3, '--rtc-user takes 1..3 (1=Plan B timed persistence, 3=with selftest)')
+        kernel_bytes = kernel.read_bytes()
+        require(b'fuxirtc_info' in kernel_bytes and b'fuxirtc_raw' in kernel_bytes and b' timed gets ' in kernel_bytes,
+                '--rtc-user needs a kernel with Plan B read-only RTC sysctls and opt-in timed injection')
+        current = chosen.prop('fuxi,inject')
+        require(current is not None and len(current) == 4, 'source lacks ADT fuxi,inject')
+        mode = struct.unpack('<I', current)[0] | 256
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
+        chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
+        chosen.props.append(('fuxi,rtc-user', 0, struct.pack('<I', args.rtc_user)))
+        report['inject'] = mode
+        report['rtc_user'] = args.rtc_user
+    if args.atx_fix:
+        require(args.atx_fix == 1, '--atx-fix takes 0 or 1')
+        current = chosen.prop('fuxi,inject')
+        require(current is not None and len(current) == 4 and (struct.unpack('<I', current)[0] & 2),
+                '--atx-fix requires SpringBoard injection (fuxi,inject bit 2)')
+        chosen.props.append(('fuxi,atx-fix', 0, struct.pack('<I', 1)))
+        report['atx_fix'] = 1
+    if args.audio_mic_dsp:
+        validate_audio_mic_dsp(args.audio_mic_dsp, args.inject_media)
+        chosen.props.append(('fuxi,audio-mic-dsp', 0, struct.pack('<I', args.audio_mic_dsp)))
+        report['audio_mic_dsp'] = args.audio_mic_dsp
+    if args.adt_sweetnull is not None:
+        full_sweetnull = validate_adt_sweetnull(args.adt_sweetnull, args.stderr_log, args.native_ath12k)
+        require(b'fuxi,sweetnull' in kernel.read_bytes(), 'artifact lacks ADT fuxi,sweetnull')
+        chosen.props.append(('fuxi,sweetnull', 0, full_sweetnull.encode('ascii') + b'\0'))
+        report['adt_sweetnull'] = full_sweetnull
     shim = WORKSPACE / 'ios-fuxi/shim'
     with tempfile.TemporaryDirectory(prefix='.' + args.name + '-', dir=STORAGE) as temporary:
         stage = Path(temporary)
@@ -1246,7 +1507,7 @@ def build(args, report, tree, source_inputs):
         sources = [shim / 'fuxi-loader/start.S', loader_source, shim / 'console.c',
                    shim / 'fuxi-probe/probe.c', stage / 'gpu-fw.S', stage / 'payload.S']
         link_flags = ['--build-id=none']
-        if args.audio_tdm_pcm:
+        if args.audio_tdm_pcm or args.audio_tdm_live:
             handoff = audio_dma_handoff_offset(packed, offset, size)
             report['audio_dma'] = {'bytes': AUDIO_DMA_BYTES, 'payload_handoff_offset': handoff,
                                    'loader_source_sha256': digest(AUDIO_DMA_LOADER),
@@ -1269,7 +1530,7 @@ def build(args, report, tree, source_inputs):
         image = (stage / 'Image').read_bytes()
         require(struct.unpack_from('<Q', image, 16)[0] == len(image) and image[56:60] == b'ARM\x64' and
                 image.count(packed) == 1, 'loader Image header/payload differs')
-        if args.audio_tdm_pcm:
+        if args.audio_tdm_pcm or args.audio_tdm_live:
             report['audio_dma']['image_buffer_offset'] = audio_dma_loader_layout(
                 args.compiler_dir, stage / 'loader.elf', image)
             require(digest(AUDIO_DMA_LOADER) == report['audio_dma']['loader_source_sha256'] and
@@ -1775,6 +2036,51 @@ def self_test():
         raise ValueError('inherited native ath12k selector accepted')
     require(not asset_report(None, None, True)['bdf_recorded'],
             'native ath12k must require a board-2.bin record')
+    for good in (0, 1, 200, 500, 2500, 60000):
+        validate_audio_idle_pdn(good, True)
+    for bad_val, live in ((-1, True), (2, True), (199, True), (60001, True), (1, False), (2500, False)):
+        try:
+            validate_audio_idle_pdn(bad_val, live)
+        except ValueError:
+            continue
+        raise ValueError(f'invalid --audio-idle-pdn accepted: {bad_val}, live={live}')
+    require(validate_adt_sweetnull('mediaserverd,assistantd,kbd', None, True) ==
+            'backboardd,SpringBoard,mediaserverd,assistantd,kbd', 'ADT sweetnull formatting differs')
+    for bad_args in (('', None, True), ('mediaserverd', 'wifid', True), ('mediaserverd', None, False),
+                     ('backboardd,mediaserverd', None, True), ('a b', None, True), ('a' * 106, None, True)):
+        try:
+            validate_adt_sweetnull(*bad_args)
+        except ValueError:
+            continue
+        raise ValueError(f'invalid --adt-sweetnull accepted: {bad_args}')
+    for good in (0, 1):
+        validate_audio_mic_cfg(good, 1)
+        validate_audio_mic_cfg(good, 2)
+    for bad_cfg, mic in ((-1, 1), (2, 1), (1, 0), (1, None)):
+        try:
+            validate_audio_mic_cfg(bad_cfg, mic)
+        except ValueError:
+            continue
+        raise ValueError(f'invalid --audio-mic-cfg accepted: {bad_cfg}, mic={mic}')
+    for good in (1, 2, 3):
+        validate_audio_mic_dsp(good, True)
+    for bad_dsp, inj in ((0, True), (4, True), (-1, True), (1, False)):
+        try:
+            validate_audio_mic_dsp(bad_dsp, inj)
+        except ValueError:
+            continue
+        raise ValueError(f'invalid --audio-mic-dsp accepted: {bad_dsp}, inject={inj}')
+    dict_marker = b' dictation gets /usr/local/lib/libfuxi-sb.dylib'
+    validate_dict_oslog(8963, dict_marker, {'assistantd'})
+    validate_dict_oslog(3, dict_marker, {'kbd'})
+    for bad_dict, kbytes, procs in ((0, dict_marker, {'assistantd'}), (8, dict_marker, {'assistantd'}),
+                                    (0x40000, dict_marker, {'assistantd'}), (8963, b'', {'assistantd'}),
+                                    (8963, dict_marker, {'mediaserverd'})):
+        try:
+            validate_dict_oslog(bad_dict, kbytes, procs)
+        except ValueError:
+            continue
+        raise ValueError(f'invalid --dict-oslog accepted: {bad_dict}, procs={procs}')
     print('PASS W18 and native ath12k host profiles, selector refusals/bounds, board records, ADT round trip, recorded pin/extents/DM and asset hashes')
 
 
@@ -1823,16 +2129,29 @@ def main():
     parser.add_argument('--stderr-log', metavar='PROCS',
                         help='Also tee the /dev/null stderr of these programs into the kernel log (sweetnull), '
                              'after backboardd and SpringBoard')
+    parser.add_argument('--adt-sweetnull', metavar='PROCS',
+                        help='ADT fuxi,sweetnull: tee /dev/null stderr of backboardd,SpringBoard plus these '
+                             'comma-separated programs without consuming the 608-byte command line; exclusive with --stderr-log')
     parser.add_argument('--privs', action='store_true',
                         help='fuxiprivs=1: grant a privilege when the asking process carries its entitlement (0107)')
     parser.add_argument('--rtc-calibration', type=Path,
                         help='Fresh rtc-calibration.py capture; carried as ADT /chosen fuxi,rtc-offset')
+    parser.add_argument('--rtc-persist', action='store_true',
+                        help='ADT /chosen fuxi,rtc-persist=1: read-only LUN 0 persist:/time/ats_2 RTC offset '
+                             '(falls back to fuxi,rtc-offset if unavailable)')
+    parser.add_argument('--rtc-user', nargs='?', const=1, type=int, metavar='MODE',
+                        help='ADT /chosen fuxi,rtc-user=MODE (1=Plan B timed persistence, 3=with one-shot selftest) '
+                             'and fuxi,inject bit 256 for /usr/libexec/timed')
     parser.add_argument('--tap-script', help='Isolated native iOS UI test; store commands in the ADT')
     parser.add_argument('--tap-delay', type=int, default=85, help='UI test delay in seconds, 30..300')
     parser.add_argument('--statusbar-width', type=int, metavar='PX',
                         help='Set the centred FixedSplit cutout width in 1125-wide logical pixels (30..627)')
     parser.add_argument('--statusbar-height', type=int, metavar='PX',
                         help='Replace the height part of ADT fuxi,sbshape (in the centred crop, time centre y is about height - 39.5 px)')
+    parser.add_argument('--volhud', type=int, metavar='VAL',
+                        help='ADT fuxi,volhud: 0=off, 1=right edge, 100..700=centerY pt, or Y*1000+H (e.g. 238128)')
+    parser.add_argument('--atx-fix', type=int, default=0, metavar='MODE',
+                        help='ADT /chosen fuxi,atx-fix (0=off, 1=decode zero-watermark pseudo-twiddled ATX as linear)')
     parser.add_argument('--with-adsp', action='store_true',
                         help='Combined test: ADT fuxi,adsp=3 (battery) and fuxi,pmic=3 (torch) alongside WLAN, opted in '
                              'with fuxi,adsp-wlan=1; needs a kernel with that opt-in and no fuxiadsp= on the command line')
@@ -1846,6 +2165,9 @@ def main():
                         help='Open, configure and close the speaker and stream graphs. Requires --audio-spf (apm).')
     parser.add_argument('--audio-tdm-pcm', action='store_true',
                         help='Send 80 ms of silent PCM over the secondary TDM graph. Requires --audio-spf (apm).')
+    parser.add_argument('--audio-tdm-live', action='store_true',
+                        help='Stream live 48 kHz stereo PCM from FuxiAudio.driver over TDM (fuxi,audio-spf=6). '
+                             'Requires --audio-spf (apm).')
     parser.add_argument('--haptic-rtp', type=Path, help='Stock Fuxi 376-byte click measured in Android')
     parser.add_argument('--audio-bottom-full', action='store_true', help='Verify all stock HALO regions under mute')
     parser.add_argument('--audio-bottom-cal', type=Path, help='Captured calibration directory for muted bottom speaker tuning')
@@ -1855,17 +2177,41 @@ def main():
     parser.add_argument('--audio-bottom-tone', action='store_true',
                         help='After the mode 6 protection/calibration gate passes, play 1 s 2 kHz -20 dBFS at -30 dB on '
                              'the bottom speaker only (fuxi,amp=7). Requires --audio-bottom-run and --audio-tdm-pcm.')
+    parser.add_argument('--audio-bottom-live', action='store_true',
+                        help='After the mode 6 protection/calibration gate passes, keep the bottom speaker live for '
+                             'FuxiAudio.driver PCM + volume control (fuxi,amp=8). Requires --audio-bottom-run and --audio-tdm-live.')
+    parser.add_argument('--audio-gain', type=int, help='CS35L41 analog gain code 0..18 for --audio-bottom-live (default 12)')
+    parser.add_argument('--audio-max-db', type=int, help='CS35L41 digital ceiling -36..0 dB for --audio-bottom-live (default -12)')
+    parser.add_argument('--audio-chime', type=int, choices=(0, 1),
+                        help='Enable (1, default) or disable (0) the 400 ms soft boot chime in --audio-bottom-live')
+    parser.add_argument('--audio-idle-pdn', type=int,
+                        help='ADT fuxi,audio-idle-pdn: CS35L41 idle standby to prevent shutdown pop '
+                             '(0=off, 1=default 2500 ms, or 200..60000 ms; needs --audio-bottom-live)')
+    parser.add_argument('--audio-mic', type=int, choices=(0, 1, 2),
+                        help='ADT fuxi,audio-mic: 0=off, 1=on-demand live mic, 2=on-demand + 100-period boot self-test')
+    parser.add_argument('--audio-mic-gain', type=lambda value: int(value, 0),
+                        help='ADT fuxi,audio-mic-gain: low byte ADC1 gain, high byte DEC0 gain (0..0xffff)')
+    parser.add_argument('--audio-mic-cfg', type=lambda value: int(value, 0),
+                        help='ADT fuxi,audio-mic-cfg: bit 0 = 4 Hz TX0 HPF (0..1; needs --audio-mic 1|2)')
     parser.add_argument('--audio-bottom-fw', type=Path,
                         help='Stock CS35L41 protection firmware for muted lower amplifier RAM verification')
     parser.add_argument('--haptic-rtp-vmax', type=lambda value: int(value, 0),
-                        help='Experimental UI FIFO voltage code (0x1c to 0x38)')
+                        help='Experimental UI FIFO voltage code (0x1c..0x38 for modes 5..7, 0x1c..0x64 for mode 8, 0x1c..0xa3 for mode 9)')
+    parser.add_argument('--haptic-damp', type=lambda value: int(value, 0),
+                        help='ADT fuxi,haptic-damp: bits 0..3 mode (0..9), bits 4..7 gain override, bit 8 HW brake, bit 9 no_tail, bits 10..13 z0, bit 14 no_pitch/tail_f0, bit 15 crisp_high/warm (0..0xffff)')
     parser.add_argument('--haptic-fast-apid', action='store_true', help='Reuse verified haptic APIDs with live owner checks')
     parser.add_argument('--haptic-pcm', action='store_true',
                         help='Send signed Actuator PCM in mode 5 with the matching HAL')
-    parser.add_argument('--haptic', type=int, choices=(2, 3, 4, 5, 6),
-                        help='HAP525 vibration: ADT fuxi,haptic=2 runtime (sysctl kern.fuxivibrate) or 3 with a boot self-test, or 4 with transient attack and stock brake detection, 5 RTP FIFO click, or 6 shaping short requests into the RTP click with level-scaled VMAX (needs --haptic-rtp)')
+    parser.add_argument('--haptic', type=int, choices=(2, 3, 4, 5, 6, 7, 8, 9),
+                        help='HAP525 vibration: ADT fuxi,haptic=2 runtime, 3 selftest, 4 transient, 5 RTP FIFO click, '
+                             '6 shape v1, 7 shape v2, 8 shape v3, or 9 continuous 24kHz FIFO PCM stream (0xa3 VMAX; needs --haptic-rtp)')
     parser.add_argument('--hal-haptics', action='store_true',
                         help='Enable the Actuator output in FuxiAudio.driver; needs --haptic and --product-haptics')
+    parser.add_argument('--hal-haptics-adt', action='store_true',
+                        help='Carry the --hal-haptics mode (1..6) in ADT /chosen fuxi,hal-haptic instead of the '
+                             'full command line; needs FuxiAudio from ksrc a47bc58 or later')
+    parser.add_argument('--hal-haptics-mode', type=int, choices=(1, 2, 3, 4, 5, 6),
+                        help='Explicit FuxiAudio Actuator mode override (1..6; 5=linear stream, 6=coalescing + perceptual stream)')
     parser.add_argument('--bt', type=int, choices=(1, 3, 4, 5),
                         help='WCN7850 Bluetooth: ADT fuxi,bt=1 read-only survey, 3 board power-up and QCA version '
                              'probe once WLAN_EN has been steady for 15 s (needs --native-ath12k), or 4 which also '
@@ -1912,6 +2258,26 @@ def main():
                         help='ADT fuxi,bt-oslog and injection bit 64: libfuxi-sb.dylib copies bluetoothd os_log to '
                              'stderr (1 default/error/fault, 2 info, 4 debug). Needs --bt-native and '
                              '--stderr-log with bluetoothd.')
+    parser.add_argument('--media-oslog', type=int, default=0, metavar='VAL',
+                        help='ADT fuxi,media-oslog: (delay_s<<8)|bits for mediaserverd os_log capture to stderr '
+                             '(bits 1..7; needs --inject-media and --stderr-log with mediaserverd).')
+    parser.add_argument('--vm-oslog', type=int, default=0, metavar='VAL',
+                        help='ADT fuxi,vm-oslog and injection bit 128: (delay_s<<8)|bits for VoiceMemos and '
+                             'voicememod os_log capture to stderr (needs --stderr-log with VoiceMemos/voicememod).')
+    parser.add_argument('--dict-oslog', type=int, default=0, metavar='VAL',
+                        help='ADT fuxi,dict-oslog and injection bit 512: (delay_s<<8)|bits for assistantd, '
+                             'assistant_service, corespeechd and kbd os_log capture to stderr (bits 1..7; '
+                             'needs --stderr-log or --adt-sweetnull with at least one dictation daemon).')
+    parser.add_argument('--audio-mic-dsp', type=int, default=0, metavar='BITS',
+                        help='ADT fuxi,audio-mic-dsp: redirect D22/D221 VAD mic austrip to measurement strip '
+                             '(1=bottom_mic_general, 2=beam_mic_voice_recognition, 3=both; needs --inject-media).')
+    parser.add_argument('--sb-ext', action='store_true',
+                        help='ADT fuxi,sb-ext=1: enable permissive Sandbox extension issue (op 5) and consume (op 6) '
+                             'for CoreMedia/mediaserverd (e.g. Voice Memos AVAssetWriter recording).')
+    parser.add_argument('--capsrc-stub', type=int, nargs='?', const=7, default=None, metavar='MASK',
+                        help='ADT fuxi,capsrc-stub and injection bit 4: minimal mediaserverd CoreMedia capture XPC '
+                             'stubs when StartRecorderServer=False (default mask 7 = capturesource|capturesession|deferred-cm; '
+                             'prevents SpringBoard hang on mic recording).')
     parser.add_argument('--bt-fix', type=int, default=0, metavar='BITS',
                         help='ADT fuxi,bt-fix and injection bit 64: libfuxi-sb.dylib bluetoothd compatibility fixes '
                              '(1 H4 PrepareTerminate null-call patch, 2 single-instance legacy BLE advertising). '
@@ -1926,6 +2292,9 @@ def main():
     parser.add_argument('--product-haptics', action='store_true',
                         help='Add /product/haptics closed-loop=1 so MediaExperience creates its vibrator; '
                              'needs --haptic and --inject-media')
+    parser.add_argument('--product-haptics-3p', action='store_true',
+                        help='Also set /product/haptics supports-3rd-party-haptics=1 for keyboard & CoreHaptics; '
+                             'needs --product-haptics and --hal-haptics')
     parser.add_argument('--haptic-ui-ms', type=int, default=0,
                         help='ADT fuxi,haptic-ui: SpringBoard pulses this many ms (8..40) per UI feedback while no '
                              'CoreHaptics engine has been created; needs --haptic')

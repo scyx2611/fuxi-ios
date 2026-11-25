@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import subprocess
@@ -186,6 +187,87 @@ def self_test():
         rotated.write_text('Autojoin skipped candidate reason=host-test\n', encoding='utf-8')
         namespace['os'].utime(native_log, ns=(1, 1))
         assert namespace['wifi_log_summary']()['log']['path'] == '/private/var/logs/wifimanager.log.1'
+        # 當機報告：合成一份 309 型、一份 Jetsam、一份壞檔與一份不取內容的檔案
+        crash_root = namespace['ROOT'] / 'private/var/mobile/Library/Logs/CrashReporter'
+        (crash_root / 'Retired').mkdir(parents=True)
+        header = {'app_name': 'com.apple.WebKit.GPU', 'bug_type': '309', 'timestamp': 'host-test',
+                  'os_version': 'iPhone OS 16.7', 'incident_id': 'not-copied'}
+        body = {'exception': {'type': 'EXC_BAD_ACCESS', 'signal': 'SIGSEGV', 'subtype': 'KERN_INVALID_ADDRESS'},
+                'termination': {'namespace': 'SIGNAL', 'code': 11, 'indicator': 'Segmentation fault: 11'},
+                'faultingThread': 1, 'usedImages': [{'name': 'WebKit'}, {'name': 'Metal'}],
+                'threads': [{'frames': []}, {'queue': 'q', 'frames': [
+                    {'imageIndex': 1, 'symbol': 'MTLDevice_new', 'symbolLocation': 8}] * 20}]}
+        (crash_root / 'com.apple.WebKit.GPU-2026-11-17-174900.ips').write_text(
+            json.dumps(header) + '\n' + json.dumps(body), encoding='utf-8')
+        (crash_root / 'Retired' / 'JetsamEvent-2026-11-17-174950.ips').write_text(
+            json.dumps({'bug_type': '298'}) + '\n' + json.dumps({'largestProcess': 'com.apple.WebKit.WebContent',
+                'processes': [{'name': 'com.apple.WebKit.WebContent', 'reason': 'per-process-limit', 'rpages': 9},
+                              {'name': 'unrelated', 'rpages': 1}]}), encoding='utf-8')
+        (crash_root / 'MobileSafari-broken.ips').write_text('{not json', encoding='utf-8')
+        (crash_root / 'Analytics-2026-11-17.ips.ca.synced').write_text('x', encoding='utf-8')
+        for offset, name in enumerate(('com.apple.WebKit.GPU-2026-11-17-174900.ips', 'Retired/JetsamEvent-2026-11-17-174950.ips',
+                                       'MobileSafari-broken.ips', 'Analytics-2026-11-17.ips.ca.synced')):
+            namespace['os'].utime(crash_root / name, ns=((10 + offset) * 10**9, (10 + offset) * 10**9))
+        crashes = namespace['crash_summary']()
+        assert crashes['listing_complete'] is True and len(crashes['entries']) == 4
+        assert [item['path'].rsplit('/', 1)[1] for item in crashes['details']] == [
+            'MobileSafari-broken.ips', 'JetsamEvent-2026-11-17-174950.ips', 'com.apple.WebKit.GPU-2026-11-17-174900.ips']
+        broken, jetsam, gpu = crashes['details']
+        assert broken['error'] == 'crash_unreadable_or_over_limit'
+        assert jetsam['largest_process'] == 'com.apple.WebKit.WebContent'
+        assert jetsam['processes'] == [{'name': 'com.apple.WebKit.WebContent', 'reason': 'per-process-limit',
+                                        'rpages': 9, 'lifetimeMax': None}]
+        assert gpu['exception']['type'] == 'EXC_BAD_ACCESS' and gpu['termination']['code'] == 11
+        assert 'incident_id' not in gpu['header'] and 'not-copied' not in json.dumps(crashes)
+        assert len(gpu['faulting_thread']['frames']) == 12
+        assert gpu['faulting_thread']['frames'][0] == {'image': 'Metal', 'symbol': 'MTLDevice_new', 'offset': 8}
+        # AppStore 基線唯讀摘要測試：含 >1MiB launchd.plist 與不應被讀取的機密檔案內容
+        xpc_dir = namespace['ROOT'] / 'System/Library/xpc'
+        xpc_dir.mkdir(parents=True)
+        large_launchd = {
+            'LaunchDaemons': {
+                '/System/Library/LaunchDaemons/com.apple.fairplayd.H2.plist': {
+                    'Label': 'com.apple.fairplayd.H2', 'Disabled': True, 'Program': '/usr/sbin/fairplayd.H2',
+                },
+                '/System/Library/LaunchDaemons/com.apple.appstored.plist': {
+                    'Label': 'com.apple.appstored', 'Disabled': False,
+                    'Program': '/System/Library/PrivateFrameworks/AppStoreDaemon.framework/Support/appstored',
+                },
+                '/System/Library/LaunchDaemons/com.apple.padding.plist': {
+                    'Label': 'com.apple.padding', 'Note': 'P' * (1200 * 1024),
+                },
+            }
+        }
+        (xpc_dir / 'launchd.plist').write_bytes(plistlib.dumps(large_launchd))
+        sys_ld = namespace['ROOT'] / 'System/Library/LaunchDaemons'
+        sys_ld.mkdir(parents=True)
+        (sys_ld / 'com.apple.appstored.plist').write_bytes(plistlib.dumps({'Label': 'com.apple.appstored'}))
+        disabled_dir = namespace['ROOT'] / 'private/var/db/com.apple.xpc.launchd'
+        disabled_dir.mkdir(parents=True)
+        (disabled_dir / 'disabled.plist').write_bytes(
+            plistlib.dumps({'com.apple.fairplayd.H2': True, 'com.apple.unrelated': True}))
+        fp_dir = namespace['ROOT'] / 'private/var/mobile/Library/FairPlay'
+        fp_dir.mkdir(parents=True)
+        (fp_dir / 'IC-Info.sidb').write_text('SECRET_FAIRPLAY_BYTES', encoding='utf-8')
+        acc_dir = namespace['ROOT'] / 'private/var/mobile/Library/Accounts'
+        acc_dir.mkdir(parents=True)
+        (acc_dir / 'Accounts3.sqlite').write_text('SECRET_ACCOUNTS_DB', encoding='utf-8')
+        timed_dir = namespace['ROOT'] / 'private/var/db/timed'
+        timed_dir.mkdir(parents=True)
+        (timed_dir / 'fuxi-rtc-offset.bin').write_bytes(b'\x01' * 16)
+        (crash_root / 'appstored-2026-11-23.ips').write_text('SECRET_CRASH_BODY', encoding='utf-8')
+        baseline = namespace['appstore_baseline_summary']()
+        baseline_json = json.dumps(baseline)
+        assert baseline['xpc_launchd']['launch_daemons_count'] == 3
+        assert baseline['xpc_launchd']['jobs']['com.apple.fairplayd.H2']['configuration']['Disabled'] is True
+        assert baseline['xpc_launchd']['jobs']['com.apple.appstored']['configuration']['Disabled'] is False
+        assert baseline['disabled_plists'][0]['jobs'] == {'com.apple.fairplayd.H2': True}
+        assert baseline['disabled_plists'][0]['other_entries_count'] == 1
+        assert baseline['crash_reporter']['contents_read'] is False
+        assert any(e['path'].endswith('appstored-2026-11-23.ips') and e['appstore_related'] is True
+                   for e in baseline['crash_reporter']['entries'])
+        for secret in ('SECRET_FAIRPLAY_BYTES', 'SECRET_ACCOUNTS_DB', 'SECRET_CRASH_BODY'):
+            assert secret not in baseline_json
     mutations = [text.replace('CHUNK 0000 ', 'CHUNK 0001 ', 1),
                  text.replace('CHUNK 0000 ', 'CHUNK 0000 !', 1),
                  text.replace(SUCCESS, 'POWERLOG_STATE_FAILED'),
@@ -207,7 +289,7 @@ def self_test():
         pass
     else:
         raise AssertionError('Oversize JSON accepted')
-    print('POWERLOG_STATE_SELF_TEST_OK checks=42 guest_python_compiled=1 phone_operations=0')
+    print('POWERLOG_STATE_SELF_TEST_OK checks=46 guest_python_compiled=1 phone_operations=0')
 
 
 def inspect(arguments):
@@ -244,6 +326,10 @@ def inspect(arguments):
                 (share / 'inspect-wifi').write_bytes(b'1\n')
             if arguments.wifi_log:
                 (share / 'inspect-wifi-log').write_bytes(b'1\n')
+            if arguments.crash_reports:
+                (share / 'inspect-crash').write_bytes(b'1\n')
+            if arguments.appstore_baseline:
+                (share / 'inspect-appstore-baseline').write_bytes(b'1\n')
             blocks = phone.PhoneBlocks(output / 'read-cache', lambda index: phone.adb(
                 arguments.serial, f'dd if={phone.MAPPER} bs={phone.BLOCK} skip={index} count=1 2>/dev/null'))
             with phone.nbd(blocks) as (address, failures):
@@ -266,7 +352,8 @@ def inspect(arguments):
             provenance = {'method': 'locked read-only phone NBD; HFS and guest block read-only',
                           'root_bytes': phone.SIZE, 'phone_read_blocks': blocks.reads,
                           'guest_root_overlay_writes': 0, 'summary_sha256': hashlib.sha256(payload).hexdigest(),
-                          'runtime_state_observed': False, 'clock_correctness_established': False}
+                          'runtime_state_observed': False, 'clock_correctness_established': False,
+                          'appstore_baseline': bool(arguments.appstore_baseline)}
             (output / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n',
                                                    encoding='utf-8', newline='\n')
             phone.say('POWERLOG_STATE_INSPECT_OK', len(payload), 'bytes', blocks.reads, 'blocks')
@@ -287,7 +374,15 @@ if __name__ == '__main__':
                         help='Read only filtered native Wi-Fi decision messages and the logging flag')
     parser.add_argument('--wifi', action='store_true',
                         help='Also summarize saved Wi-Fi profile flags; omit passwords and keychain contents')
+    parser.add_argument('--crash-reports', action='store_true',
+                        help='List CrashReporter files and summarize recent WebKit/Safari/backboardd/Jetsam reports')
+    parser.add_argument('--appstore-baseline', action='store_true',
+                        help='Read-only baseline for AppStore/FairPlay: xpc launchd, disabled plists, directory listings, CrashReporter metadata')
     arguments = parser.parse_args()
+    if arguments.crash_reports and (arguments.wifi or arguments.wifi_log or arguments.appstore_baseline):
+        parser.error('--crash-reports is a separate inspection')
+    if arguments.appstore_baseline and (arguments.wifi or arguments.wifi_log or arguments.crash_reports):
+        parser.error('--appstore-baseline is a separate inspection')
     if not 1024 <= arguments.port <= 65535:
         parser.error('--port must be 1024..65535')
     if arguments.self_test:

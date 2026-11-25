@@ -13,7 +13,7 @@ extern "C" {
 #define QCOM_QRTR_HEADER 32u
 #define QCOM_QRTR_PORT_CTRL 0xfffffffeu
 #define QCOM_QRTR_NODE_BROADCAST 0xffffffffu
-#define QCOM_QRTR_MAX_LOCAL 4u
+#define QCOM_QRTR_MAX_LOCAL 16u
 #define QCOM_QRTR_MAX_REMOTE 32u
 
 enum {
@@ -28,16 +28,20 @@ typedef int (*QcomQrtrSend)(void *context, const uint8_t *packet, uint32_t lengt
 /* A data packet for one of our ports from node:port. */
 typedef void (*QcomQrtrReceive)(void *context, QcomQrtr *q, uint32_t port, uint32_t node, uint32_t from_port, const uint8_t *data,
                                 uint32_t length);
+typedef void (*QcomQrtrNotify)(void *context);
 
 struct QcomQrtr {
     uint32_t local_node, remote_node;  /* remote_node: QCOM_QRTR_NODE_BROADCAST until the remote's hello */
     uint8_t hello_sent, hello_received;
     QcomQrtrSend send;
     void *send_context;
-    struct {uint32_t service, instance, port; QcomQrtrReceive receive; void *context;} local[QCOM_QRTR_MAX_LOCAL];
+    struct {uint32_t service, instance, port; uint8_t announced; QcomQrtrReceive receive; void *context;} local[QCOM_QRTR_MAX_LOCAL];
     uint32_t local_count;
     struct {uint32_t service, instance, node, port;} remote[QCOM_QRTR_MAX_REMOTE];
     uint32_t remote_count;
+    uint32_t remote_generation;
+    QcomQrtrNotify on_server;
+    void *on_server_context;
     /* counters for the log */
     uint32_t rx_packets, rx_data, rx_bad, rx_unrouted, tx_packets, tx_refused, resumes_sent;
 };
@@ -46,6 +50,10 @@ void qcom_qrtr_init(QcomQrtr *q, uint32_t local_node, QcomQrtrSend send, void *s
 /* Adds one of our services (instance as announced: version | instance << 8) on port; announced to the remote after its hello, or at
  * once when that has been. Returns 0, or -1 when full. */
 int qcom_qrtr_add_service(QcomQrtr *q, uint32_t service, uint32_t instance, uint32_t port, QcomQrtrReceive receive, void *context);
+/* Adds a local client-only port (not announced via NEW_SERVER). Returns 0, or -1 when full or duplicate. */
+int qcom_qrtr_add_client(QcomQrtr *q, uint32_t port, QcomQrtrReceive receive, void *context);
+/* Registers a callback invoked whenever remote services change (NEW_SERVER, DEL_SERVER, BYE). */
+void qcom_qrtr_set_server_notify(QcomQrtr *q, QcomQrtrNotify notify, void *context);
 /* The link is up: says hello. */
 void qcom_qrtr_start(QcomQrtr *q);
 /* One received packet. Returns 0, or -1 when it was not a valid packet. */
@@ -54,6 +62,8 @@ int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length);
 int qcom_qrtr_send_data(QcomQrtr *q, uint32_t from_port, uint32_t node, uint32_t port, const uint8_t *data, uint32_t length);
 /* Index of a remote service in the list, -1 when not announced. */
 int qcom_qrtr_find_remote(const QcomQrtr *q, uint32_t service);
+/* Finds any announced instance of service and outputs its node, port and instance. Returns 0 when found, -1 otherwise. */
+int qcom_qrtr_find_remote_any(const QcomQrtr *q, uint32_t service, uint32_t *node, uint32_t *port, uint32_t *instance);
 
 /* ---- QMI messages carried in data packets: a 7-byte header (type, transaction, message id, length) and TLVs ---- */
 #define QCOM_QMI_HEADER 7u

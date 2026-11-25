@@ -37,6 +37,9 @@
 #include <libkern/c++/OSNumber.h>
 
 extern "C" void FuxiWLANStart(const char * interface, const uint8_t * address);
+extern "C" void FuxiWLANStartAP(const char * interface, const uint8_t * address);
+
+static IOService * g_wlan_controller;
 
 class IO80211Controller : public IOService
 {
@@ -142,7 +145,49 @@ FuxiWLANStart(const char * interface, const uint8_t * address)
 	} else {
 		wlan->release();
 	}
-	controller->release();
+	/* Retain the controller for optional virtual interfaces (ap1 SoftAP). */
+	g_wlan_controller = controller;
+}
+
+/* Optional SoftAP virtual interface under the same IO80211Controller (opt-in fuxi,wifi-ap).
+ * Do NOT set IO80211InterfaceRole="Infrastructure" or IOPrimaryInterface here: wifid discovers
+ * the primary device by Infrastructure role and binds ap1 by IOInterfaceName="ap1". */
+void
+FuxiWLANStartAP(const char * interface, const uint8_t * address)
+{
+	IOService * controller = g_wlan_controller;
+	FuxiWLAN * ap = OSTypeAlloc(FuxiWLAN);
+	OSData * mac;
+	OSNumber * number;
+
+	if (controller == NULL || interface == NULL || ap == NULL || !ap->init()) {
+		OSSafeReleaseNULL(ap);
+		IOLog("FuxiWLAN: cannot create SoftAP service\n");
+		return;
+	}
+	if (address != NULL && (mac = OSData::withBytes(address, 6)) != NULL) {
+		ap->setProperty("IOMACAddress", mac);
+		mac->release();
+	}
+	ap->setProperty("IOInterfaceName", interface);
+	ap->setProperty("BSD Name", interface);
+	ap->setProperty("IOInterfaceNamePrefix", "ap");
+	if ((number = OSNumber::withNumber(6ULL, 32)) != NULL) {        /* IFT_ETHER */
+		ap->setProperty("IOInterfaceType", number);
+		number->release();
+	}
+	if ((number = OSNumber::withNumber((unsigned long long) (interface[2] - '0'), 32)) != NULL) {
+		ap->setProperty("IOInterfaceUnit", number);
+		number->release();
+	}
+	ap->setProperty("IOBuiltin", true);
+	ap->setProperty("IO80211VirtualInterfaceRole", "SoftAP");
+	if (publish(ap, controller, "FuxiWLANAP") == NULL) {
+		IOLog("FuxiWLAN: the SoftAP service did not start\n");
+	} else {
+		IOLog("FuxiWLAN: published SoftAP service for %s\n", interface);
+		ap->release();
+	}
 }
 
 #endif /* FUXI */

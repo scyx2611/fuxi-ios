@@ -44,6 +44,10 @@ fwa_alloc(struct fwa_arena *arena, size_t bytes, uint64_t *bus)
 		alignment = 4096;
 		while (alignment < rounded && alignment < 0x80000000u) { alignment <<= 1; }
 		if (alignment < rounded) { return NULL; }
+	} else {
+		/* Match Linux SLUB/dma_pool natural alignment so sub-page TX/ext_desc buffers
+		 * never straddle a 4 KiB PCIe boundary and satisfy WCN7850 128-byte IOVA alignment. */
+		while (alignment < rounded && alignment < 4096) { alignment <<= 1; }
 	}
 	for (uint32_t index = 1; index < arena->count; index++) {
 		struct fwa_block whole = arena->blocks[index];

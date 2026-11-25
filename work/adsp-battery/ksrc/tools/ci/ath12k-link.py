@@ -11,11 +11,15 @@ SCAN_DWELL_SHA256 = '4abc2793df722c3fc03fd098118cc1731301b5523a5c8f8b28d04228b8e
 PEER_ZERO_PROVENANCE_SHA256 = 'd7689a235ac91b4cd108723521ca0d36b8fce3cc714431d572318820b665e385'
 SCAN_PRIORITY_OBJECT = '6e31ab4a480374ff3a761b87b59f5bd17cb9bf7c953d343f2118434cbedfb715'
 SCAN_PRIORITY_WMI_SHA256 = '5898c4fb7c96c4e56ad70f543a1fe9e78a70f588e865478a8b939c6aa9abcc41'
+AP_LOCAL_OBJECT = '13b0f3dda4ff90b9e591c2fd4357b3826c66e79613095336ddf1a36264e701d9'
+AP_CONTROL_SHA256 = '3e987a392f81917a59517e7dd7f17f65a7b94d82f4449c041def59412b418fcf'
+AP_NW_AP_SHA256 = 'f8aa2bdd28e8abe45b0457dbca7f48d9e44d7ca07bd65d8f9777d2f9982ecfdf'
 OBJECT_SOURCES = {
     OBJECT_SHA256: (44010197996, 'b2876c666c76af54be793a41830596a6b604a063', False),
     '8f7f1c0b94dc32904a3673c17a07ae9da5d1666fecf4613c253effd824e531ec':
         (44239539371, '6e9f2a2d7c67b69cb146aa01ca37ba9d829dfbea', True),
     SCAN_PRIORITY_OBJECT: (44243587936, '7387e889bd65b41fbe9197aaa6daba0c25ca2c6a', True),
+    AP_LOCAL_OBJECT: (0, 'local-wsl-ap-20261122', True),
 }
 ENTRY_POINTS = (
     '_nw_wifi_start', '_nw_wifi_step', '_nw_wifi_stop', '_nw_wifi_poll',
@@ -24,6 +28,11 @@ ENTRY_POINTS = (
     '_nw_wifi_set_platform', '_nw_wifi_control_transport_set',
     '_nw_wifi_control_attach', '_nw_wifi_control_receive',
     '_nw_wifi_power', '_nw_wifi_set_events', '_nw_wifi_tx', '_nw_wifi_link_state',
+)
+AP_ENTRY_POINTS = (
+    '_nw_wifi_ap_set_events', '_nw_wifi_ap_start', '_nw_wifi_ap_stop',
+    '_nw_wifi_ap_set_key', '_nw_wifi_ap_get_key_seq',
+    '_nw_wifi_ap_sta_authorize', '_nw_wifi_ap_sta_deauth', '_nw_wifi_ap_tx',
 )
 IMPORTS = {
     '_bzero', '_memcmp', '_memcpy', '_memmove', '_memset', '_snprintf',
@@ -115,6 +124,8 @@ def validate_bundle(directory):
         objects = [item for item in report.get('objects', [])
                    if item.get('source', '').endswith(suffix)]
         expected = dwell['files'][suffix.lstrip('/')]['after_sha256']
+        if object_sha256 == AP_LOCAL_OBJECT and suffix == '/src/nw_cfg80211_control.c':
+            expected = AP_CONTROL_SHA256
         require(len(objects) == 1 and objects[0].get('source_sha256') == expected,
                 'ath12k build does not include the reviewed scan dwell source')
     require(report.get('runtime') == 'mainline' and
@@ -131,7 +142,8 @@ def validate_bundle(directory):
     undefined = set((directory / 'fuxi_ath12k.undefined.txt').read_text().split())
     exports = set((directory / 'fuxi_ath12k.exports.txt').read_text().split())
     require(undefined == IMPORTS, 'ath12k kernel imports differ')
-    require(set(ENTRY_POINTS) <= exports, 'ath12k module entry points are missing')
+    required_entries = set(ENTRY_POINTS) | (set(AP_ENTRY_POINTS) if object_sha256 == AP_LOCAL_OBJECT else set())
+    require(required_entries <= exports, 'ath12k module entry points are missing')
     record = {
         'schema': 'fuxi-ath12k-link-v1',
         'object_sha256': object_sha256,
@@ -140,7 +152,7 @@ def validate_bundle(directory):
         'source_identity': identity,
         'scan_dwell_provenance_sha256': SCAN_DWELL_SHA256,
         'scan_dwell': dwell,
-        'entry_points': list(ENTRY_POINTS),
+        'entry_points': sorted(required_entries),
         'imports': sorted(IMPORTS),
         'source_run': source_run,
         'source_commit': source_commit,
@@ -152,12 +164,18 @@ def validate_bundle(directory):
     if has_peer_zero_fix:
         record['peer_zero'] = validate_peer_zero(directory, report)
         record['peer_zero_provenance_sha256'] = PEER_ZERO_PROVENANCE_SHA256
-    if object_sha256 == SCAN_PRIORITY_OBJECT:
+    if object_sha256 in (SCAN_PRIORITY_OBJECT, AP_LOCAL_OBJECT):
         wmi = [entry for entry in report.get('objects', [])
                if entry.get('source', '').endswith('/out/ath12k-src/wmi.c')]
         require(len(wmi) == 1 and wmi[0].get('source_sha256') == SCAN_PRIORITY_WMI_SHA256,
                 'ath12k build does not encode the WMI scan priority')
         record['scan_priority_wmi_sha256'] = SCAN_PRIORITY_WMI_SHA256
+    if object_sha256 == AP_LOCAL_OBJECT:
+        nw_ap = [entry for entry in report.get('objects', [])
+                 if entry.get('source', '').endswith('/src/nw_ap.c')]
+        require(len(nw_ap) == 1 and nw_ap[0].get('source_sha256') == AP_NW_AP_SHA256,
+                'ath12k AP build does not include the reviewed nw_ap.c source')
+        record['softap_nw_ap_sha256'] = AP_NW_AP_SHA256
     return record
 
 

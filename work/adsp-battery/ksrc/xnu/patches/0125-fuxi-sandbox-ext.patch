@@ -1,0 +1,201 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -43,6 +43,7 @@
+ #include <sys/ubc_internal.h>
+ #include <sys/vnode.h>
+ #include <security/mac_policy.h>
++#include <pexpert/device_tree.h>
+ 
+ /* iokit/Kernel/arm/SweetEntitlements.cpp */
+ void *sweet_entitlements_create(const CS_GenericBlob *blob, size_t blob_len);
+@@ -283,6 +284,7 @@
+ 
+ #include "fuxi_amfi.h"
+ #include "fuxi_sys.h"
++#include "fuxi_sbext.h"
+ 
+ /*
+  * Policy "Sandbox": libsystem_sandbox calls __mac_syscall("Sandbox", op,
+@@ -311,7 +313,9 @@
+ 	case 4:         /* container path (audit token / pid) */
+ 		return fuxi_amfi_enabled ? fuxi_sys_container_result(fuxi_sandbox_container(arg)) : ENOENT;
+ 	case 5:         /* extension issue */
++		return fuxi_sbext_issue(arg);
+ 	case 6:         /* extension consume */
++		return fuxi_sbext_consume(arg);
+ 	case 0x43:      /* container expected */
+ 		return ENOENT;
+ 	default:
+@@ -397,5 +401,6 @@
+ 	    error ? "NOT registered" : "registered", error);
+ 	fuxi_amfi_policy_register();
+ 	fuxi_sys_report();
++	fuxi_sbext_init();
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- /dev/null
++++ b/bsd/kern/fuxi_sbext.h
+@@ -0,0 +1,163 @@
++/*
++ * Opt-in permissive Sandbox extension issue (op 5) and consume (op 6) stand-in
++ * for SWEET / FUXI (default off; enabled by boot-arg fuxisbext=1 or ADT
++ * /chosen u32 "fuxi,sb-ext"=1).
++ *
++ * iOS 16 libsystem_sandbox.dylib ABI verified against iPhone10,3 20A362
++ * dyld_shared_cache (__sandbox_extension_issue / _sandbox_extension_consume):
++ *   - op 5: 56-byte struct (7 x uint64_t), writes a NUL-terminated ASCII token
++ *           into the caller's 2048-byte out_token buffer.
++ *   - op 6: 24-byte struct (3 x uint64_t), writes a positive int64_t handle
++ *           (!= -1) into out_handle.
++ * Needed by CoreMedia FigSandboxRegisterURLAndCopyRegistration / mediaserverd
++ * FigSandboxRegistrationServer (e.g. Voice Memos AVAssetWriter recording).
++ */
++#ifndef FUXI_SBEXT_H
++#define FUXI_SBEXT_H
++
++enum {
++	FUXI_SBEXT_MAX_TOKEN = 4096u,
++	FUXI_SBEXT_LOG_ISSUE_ANY = 1u << 0,
++	FUXI_SBEXT_LOG_CONSUME_ANY = 1u << 1,
++	FUXI_SBEXT_LOG_ISSUE_VM = 1u << 2,
++	FUXI_SBEXT_LOG_CONSUME_MS = 1u << 3,
++};
++
++struct fuxi_sbext_issue_args {
++	user_addr_t extension_class;
++	uint64_t    type;
++	user_addr_t target;
++	uint64_t    flags;
++	user_addr_t out_token;
++	int64_t     pid;
++	uint64_t    pidversion;
++};
++_Static_assert(sizeof(struct fuxi_sbext_issue_args) == 56, "Sandbox op 5 ABI size");
++
++struct fuxi_sbext_consume_args {
++	user_addr_t token;
++	uint64_t    token_len;
++	user_addr_t out_handle;
++};
++_Static_assert(sizeof(struct fuxi_sbext_consume_args) == 24, "Sandbox op 6 ABI size");
++
++static TUNABLE(uint32_t, fuxi_sbext_bootarg, "fuxisbext", 0);
++static uint32_t fuxi_sbext_enabled;
++static uint64_t fuxi_sbext_issued;
++static uint64_t fuxi_sbext_handles;
++static uint32_t fuxi_sbext_logged_mask;
++
++static void
++fuxi_sbext_init(void)
++{
++	uint32_t mode = fuxi_sbext_bootarg;
++	if (!mode) {
++		DTEntry chosen;
++		void const *prop = NULL;
++		unsigned int bytes = 0;
++		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++		    SecureDTGetProperty(chosen, "fuxi,sb-ext", &prop, &bytes) == kSuccess &&
++		    bytes == sizeof(uint32_t)) {
++			memcpy(&mode, prop, sizeof(mode));
++		}
++	}
++	fuxi_sbext_enabled = mode ? 1u : 0u;
++	if (fuxi_sbext_enabled) {
++		printf("FUXI SBEXT: sandbox extension issue/consume on (mode=%u)\n", mode);
++	}
++}
++
++static int
++fuxi_sbext_issue(user_addr_t arg)
++{
++	if (!fuxi_sbext_enabled) {
++		return ENOENT;
++	}
++	if (!arg) {
++		return EFAULT;
++	}
++	struct fuxi_sbext_issue_args req;
++	int error = copyin(arg, &req, sizeof(req));
++	if (error) {
++		return error;
++	}
++	if (!req.extension_class || !req.out_token) {
++		return EINVAL;
++	}
++	char first_byte = 0;
++	error = copyin(req.extension_class, &first_byte, 1);
++	if (error) {
++		return error;
++	}
++	if (first_byte == '\0') {
++		return EINVAL;
++	}
++	uint64_t seq = os_atomic_add_orig(&fuxi_sbext_issued, 1ULL, relaxed) + 1ULL;
++	char token[32];
++	int len = snprintf(token, sizeof(token), "fuxi-ext-%llu", (unsigned long long)seq);
++	if (len <= 0 || (size_t)len >= sizeof(token)) {
++		return EINVAL;
++	}
++	error = copyout(token, req.out_token, (size_t)len + 1);
++	if (error) {
++		return error;
++	}
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	uint32_t bit = FUXI_SBEXT_LOG_ISSUE_ANY;
++	if (strncmp(name, "voicememod", 10) == 0 || strncmp(name, "VoiceMemos", 10) == 0) {
++		bit |= FUXI_SBEXT_LOG_ISSUE_VM;
++	}
++	uint32_t prev = os_atomic_or_orig(&fuxi_sbext_logged_mask, bit, relaxed);
++	if ((prev & bit) != bit) {
++		printf("FUXI SBEXT: %s op 5 issue seq=%llu type=%llu\n",
++		    name, (unsigned long long)seq, (unsigned long long)req.type);
++	}
++	return 0;
++}
++
++static int
++fuxi_sbext_consume(user_addr_t arg)
++{
++	if (!fuxi_sbext_enabled) {
++		return ENOENT;
++	}
++	if (!arg) {
++		return EFAULT;
++	}
++	struct fuxi_sbext_consume_args req;
++	int error = copyin(arg, &req, sizeof(req));
++	if (error) {
++		return error;
++	}
++	if (!req.token || req.token_len == 0 || req.token_len > FUXI_SBEXT_MAX_TOKEN || !req.out_handle) {
++		return EINVAL;
++	}
++	char first_byte = 0;
++	error = copyin(req.token, &first_byte, 1);
++	if (error) {
++		return error;
++	}
++	if (first_byte == '\0') {
++		return EINVAL;
++	}
++	uint64_t next = os_atomic_add_orig(&fuxi_sbext_handles, 1ULL, relaxed) + 1ULL;
++	int64_t handle = (next > 0 && next <= 0x7fffffffffffffffULL) ? (int64_t)next : 1;
++	error = copyout(&handle, req.out_handle, sizeof(handle));
++	if (error) {
++		return error;
++	}
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	uint32_t bit = FUXI_SBEXT_LOG_CONSUME_ANY;
++	if (strncmp(name, "mediaserverd", 12) == 0) {
++		bit |= FUXI_SBEXT_LOG_CONSUME_MS;
++	}
++	uint32_t prev = os_atomic_or_orig(&fuxi_sbext_logged_mask, bit, relaxed);
++	if ((prev & bit) != bit) {
++		printf("FUXI SBEXT: %s op 6 consume handle=%lld\n", name, (long long)handle);
++	}
++	return 0;
++}
++
++#endif /* FUXI_SBEXT_H */

@@ -182,6 +182,8 @@ static void fg_guard_exit(struct fg_guard *g) { if (g->lock) IOLockUnlock(g->loc
 static void fg_scm_call(uint64_t ret[4], unsigned slot, unsigned step,
     uint32_t fn, uint32_t info, uint64_t a, uint64_t b, uint64_t c);
 static void fg_irq_quiesce(void);
+static void fg_irq_quiesce_soft(void);
+static int fg_irq_rearm_soft(void);
 #include "gpu.c"
 static unsigned fg_clock_measure;
 /* Startup diagnostics have their own fault result: an optional readback must
@@ -1003,7 +1005,10 @@ int fuxi_gpu_copy(unsigned slot, uint64_t generation, uintptr_t source, uint64_t
  fg_cp_stamp(FG_CP_STAMP+16);
  g3_wptr &= 8191;
  __asm__ volatile("dsb sy" ::: "memory");
- fg_deadline = rsr("cntpct_el0") + rsr("cntfrq_el0")/10; /* six ticks */
+ /* Standalone copies keep the 100 ms (6-tick) watchdog; inline copies queued behind
+  * multiple client submits (e.g. rotated landscape IOSurface passes) get 500 ms so a
+  * brief multi-IB burst does not permanently disable the GPU (0x603). */
+ fg_deadline = rsr("cntpct_el0") + (inl ? rsr("cntfrq_el0")/2 : rsr("cntfrq_el0")/10);
  fg_dcvs_kick();
  fg_cp_submit_lo = g3_gr(0x980);
  if (!fg_ring_doorbell()) err = 0x602;

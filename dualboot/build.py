@@ -127,11 +127,20 @@ def build(args, output):
     objects = {}
     for name in ("start.o", "probe.o", "chain.o", "linux.o"):
         objects[name] = snapshot(base / name, staged / name, inputs)
-    for name in ("loader.o", "console.o", "gpu-fw.o", "payload.o"):
+    loader_name = "loader-speaker.o" if (payload / "loader-speaker.o").is_file() else "loader.o"
+    has_audio_dma = (payload / "loader-audio-dma.o").is_file()
+    payload_objs = [loader_name, "console.o", "gpu-fw.o", "payload.o"]
+    if has_audio_dma:
+        payload_objs.append("loader-audio-dma.o")
+    for name in payload_objs:
         objects[name] = snapshot(payload / name, staged / name, inputs)
     linker = snapshot(WORKSPACE / "ios-fuxi/shim/fuxi-loader/loader-chain.ld", staged / "loader-chain.ld", inputs)
     link_args = [ndk / "ld.lld.exe", "-T", linker, "--build-id=none", f"--defsym=LINUX_IMAGE_SIZE={image_size:#x}"]
-    order = ("start.o", "loader.o", "console.o", "probe.o", "chain.o", "gpu-fw.o", "payload.o", "linux.o")
+    if has_audio_dma:
+        link_args.append("--wrap=probe_main")
+    order = ("start.o", loader_name, "console.o", "probe.o", "chain.o", "gpu-fw.o", "payload.o", "linux.o")
+    if has_audio_dma:
+        order = order + ("loader-audio-dma.o",)
     # Prove input-object identity against the known chain, including all padding.
     run([*link_args, *[objects[n] for n in order], "-o", output / "base-relink.elf"], log)
     run([ndk / "llvm-objcopy.exe", "-O", "binary", output / "base-relink.elf", output / "base-relink.Image"], log)
@@ -163,6 +172,17 @@ def build(args, output):
     need(image[lp:] == linux, "Embedded Android kernel changed")
     need(image[pp:pp + len(payload_data)] == payload_data, "Embedded iOS payload changed")
     need(symbols["_payload_end"] == pp + len(payload_data), "Payload size changed")
+    if has_audio_dma:
+        need("__wrap_probe_main" in symbols and "audio_dma" in symbols, "Audio DMA probe_main wrap or buffer missing")
+        audio_dma_off = symbols["audio_dma"]
+        need(symbols["_bss_start"] <= audio_dma_off and audio_dma_off + 0x10000 <= symbols["_bss_end"] <= pp,
+             "Audio DMA buffer escapes BSS before payload")
+        need(audio_dma_off % 0x4000 == 0, "Audio DMA buffer misaligned")
+    has_sensor_pack = "_sensor_pack_start" in symbols
+    if has_sensor_pack:
+        sp0, sp1 = symbols["_sensor_pack_start"], symbols["_sensor_pack_end"]
+        need(symbols["_payload_end"] <= sp0 < sp1 <= lp and sp0 % 8 == 0, "Sensor pack placement invalid")
+        need(image[sp0:sp0 + 8] == b"SSCPACK1", "Sensor pack magic invalid")
     mkbootimg = snapshot(WORKSPACE / "uefi-fuxi/Resources/Scripts/mkbootimg.py", staged / "mkbootimg.py", inputs)
     run([sys.executable, mkbootimg, "--header_version", "4", "--kernel", output / "Image", "-o", output / "boot.img"], log)
     boot = (output / "boot.img").read_bytes()
@@ -174,6 +194,10 @@ def build(args, output):
     report.update({"ram_layout": "9g" if ram9g else "5g", "base_chain": str(base), "base_image_sha256": base_sums["Image"],
                    "base_relink_identical": True, "payload": payload_name[1], "payload_sha256": sha(payload / "payload.bin"),
                    "kernel_sha256": payload_sums["kernel.development.fuxi"], "android_sha256": base_sums["linux-Image"],
+                   "loader_object": loader_name,
+                   "audio_dma_offset": symbols["audio_dma"] if has_audio_dma else None,
+                   "sensor_pack_offset": symbols["_sensor_pack_start"] if has_sensor_pack else None,
+                   "sensor_pack_size": (symbols["_sensor_pack_end"] - symbols["_sensor_pack_start"]) if has_sensor_pack else None,
                    "candidate": {"boot_img": str(output / "boot.img"), "sha256": sha(output / "boot.img"), "bytes": len(boot),
                                  "linux_offset": lp, "payload_offset": pp, "ram_footprint": end}})
     (output / "sha256.txt").write_text("".join(f"{sha(output / name)}  {name}\n" for name in ("boot.img", "Image", "loader.elf")), encoding="utf-8", newline="\n")

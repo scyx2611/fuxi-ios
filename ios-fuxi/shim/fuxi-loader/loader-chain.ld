@@ -21,6 +21,8 @@ SECTIONS {
  _payload_start = .;
  .payload : { *(.payload) }
  _payload_end = .;
+ . = ALIGN(8);
+ .sensor_pack : { *(.sensor_pack) }
  . = ALIGN(0x200000);
  _linux_start = .;
  .linux : { KEEP(*(.linux)) }

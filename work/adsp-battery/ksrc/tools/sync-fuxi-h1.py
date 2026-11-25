@@ -19,6 +19,7 @@ FILES = {
     'iokit/Kernel/arm/hid/LICENSE.NativeHidInput': 'LICENSE.NativeHidInput',
     'bsd/kern/fuxi_amfi.h': 'fuxi_amfi.h',
     'bsd/dev/fuxi_key_state.h': 'fuxi_key_state.h',
+    'bsd/dev/fuxi_rtc_persist.h': 'fuxi_rtc_persist.h',
     'bsd/dev/sweet_spmi_bus.h': 'sweet_spmi_bus.h',
 }
 

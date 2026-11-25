@@ -128,4 +128,22 @@ public:
 // The dispatch reporter and lease live until process death, including during
 // static teardown. Local test instances still close their descriptors normally.
 inline BackboardGate &backboardGate=*new BackboardGate;
+
+// Process-local gate for Class 1 foreground Apps: failure latches only within
+// the failing process and never touches backboardd's persistent gate.state.
+class ForegroundClientGate {
+ std::atomic<bool> active{false},failed{false};
+ std::atomic<uint64_t> failures{0};
+public:
+ void admit() { active.store(true,std::memory_order_release); }
+ bool isActive() const { return active.load(std::memory_order_acquire); }
+ bool blocked() const { return active.load(std::memory_order_acquire) && failed.load(std::memory_order_acquire); }
+ void fault() {
+  failures.fetch_add(1,std::memory_order_relaxed);
+  if(active.load(std::memory_order_acquire))failed.store(true,std::memory_order_release);
+ }
+ uint64_t failureCount() const { return failures.load(std::memory_order_acquire); }
+ void resetForTest() { active.store(false); failed.store(false); failures.store(0); }
+};
+inline ForegroundClientGate &foregroundClientGate=*new ForegroundClientGate;
 }

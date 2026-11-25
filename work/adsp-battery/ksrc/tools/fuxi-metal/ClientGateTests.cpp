@@ -1,8 +1,8 @@
 #include "ClientGate.hpp"
 #include <cassert>
 #include <string>
-static fuxi::ClientMode parse(std::string text,const char *name="fuxi-metal-smoke",const char *args=nullptr) {
- size_t n=text.size();text.push_back(0);return fuxi::parseClients(text.data(),n,name,args);
+static fuxi::ClientMode parse(std::string text,const char *name="fuxi-metal-smoke",const char *args=nullptr,const char *adt=nullptr) {
+ size_t n=text.size();text.push_back(0);return fuxi::parseClients(text.data(),n,name,args,adt);
 }
 int main() {
  using M=fuxi::ClientMode;
@@ -49,5 +49,36 @@ int main() {
  chmod(path,0600);std::string link=std::string(path)+"-link";assert(!symlink(path,link.c_str()));
  assert(fuxi::readClients(link.c_str(),"fuxi-metal-smoke")==M::deny);unlink(link.c_str());unlink(path);
  assert(fuxi::readClients(path,"fuxi-metal-smoke")==M::deny);
- puts("PASS: exact clients, hidden SpringBoard/mediaserverd, census/conflicts, malformed/NUL, missing/untrusted/writable/symlink policy fail closed");
+ // U-026 Phase A: *poster* (case-insensitive) permanently denied; ADT fuxi,gpu-clients allows foreground apps but never blacklists or backboardd.
+ for(const char *poster:{"PosterBoard","CollectionsPoster","WeatherPoster","CustomPosterExt","LockScreenAstronomyWallpaperPosterExt","mywallpaperposterapp","WALLPAPERPOSTER"}) {
+  assert(fuxi::hiddenClient(poster));
+  assert(parse(std::string(poster)+"\n",poster,armed,"Maps,PosterBoard,CollectionsPoster,WeatherPoster,CustomPosterExt")==M::deny);
+  assert(fuxi::readClients("/nonexistent/fuxi-missing",poster,poster)==M::deny);
+ }
+ assert(fuxi::hiddenClient("springboard") && fuxi::hiddenClient("MEDIASERVERD"));
+ // BUG-6: parseAdtClientsData rejects >= capacity (256B truncation) or non-NUL-terminated / embedded-NUL buffers.
+ {
+  char out[256]={};
+  std::string ok("Maps,Weather"); ok.push_back('\0');
+  assert(fuxi::parseAdtClientsData(reinterpret_cast<const uint8_t *>(ok.data()),ok.size(),out,sizeof(out)));
+  assert(!strcmp(out,"Maps,Weather"));
+  std::string noNul("Maps,Weather");
+  assert(!fuxi::parseAdtClientsData(reinterpret_cast<const uint8_t *>(noNul.data()),noNul.size(),out,sizeof(out)));
+  std::string exact256(255,'a'); exact256.push_back('\0');
+  assert(exact256.size()==256);
+  assert(!fuxi::parseAdtClientsData(reinterpret_cast<const uint8_t *>(exact256.data()),exact256.size(),out,sizeof(out)));
+  std::string over260(250,'a'); over260+=",MapsExtra"; over260.push_back('\0');
+  assert(!fuxi::parseAdtClientsData(reinterpret_cast<const uint8_t *>(over260.data()),over260.size(),out,sizeof(out)));
+  std::string embedded("Maps\0Weather\0",13);
+  assert(!fuxi::parseAdtClientsData(reinterpret_cast<const uint8_t *>(embedded.data()),embedded.size(),out,sizeof(out)));
+ }
+ assert(parse("backboardd\n","SpringBoard",armed,"SpringBoard,Maps")==M::deny);
+ assert(parse("backboardd\n","mediaserverd",armed,"mediaserverd,Maps")==M::deny);
+ assert(parse("backboardd\n","Maps",nullptr,"Maps,Weather")==M::allow);
+ assert(parse("backboardd\n","Weather",nullptr,"Maps,Weather")==M::allow);
+ assert(parse("backboardd\n","MapsExtra",nullptr,"Maps,Weather")==M::deny);
+ assert(parse("backboardd\n","backboardd",nullptr,"backboardd,Maps")==M::deny);
+ assert(fuxi::readClients("/nonexistent/fuxi-missing","Maps","Maps,Weather")==M::allow);
+ assert(fuxi::readClients("/nonexistent/fuxi-missing","backboardd","backboardd,Maps")==M::deny);
+ puts("PASS: exact clients, hidden SpringBoard/mediaserverd/*Poster*, ADT allowlist, census/conflicts, malformed/NUL, missing/untrusted/writable/symlink policy fail closed");
 }

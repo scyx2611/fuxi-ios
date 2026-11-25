@@ -26,9 +26,16 @@ int main(void)
     const char *app = "/Applications/MobileSafari.app/MobileSafari";
     const char *bluetool = "/usr/sbin/BlueTool";
     const char *bluetoothd = "/usr/sbin/bluetoothd";
+    const char *vm = "/Applications/VoiceMemos.app/VoiceMemos";
+    const char *vmd = "/System/Library/PrivateFrameworks/VoiceMemos.framework/Support/voicememod";
+    const char *timed = "/usr/libexec/timed";
+    const char *asstd = "/System/Library/PrivateFrameworks/AssistantServices.framework/assistantd";
+    const char *assvc = "/System/Library/PrivateFrameworks/AssistantServices.framework/assistant_service";
+    const char *csd = "/System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd";
+    const char *kbd = "/System/Library/TextInput/kbd";
     char env[FUXI_INJECT_ENV_MAX];
 
-    assert(FUXI_INJECT_ALL == 127u);
+    assert(FUXI_INJECT_ALL == 1023u);
     for (unsigned mode = 0; mode <= FUXI_INJECT_ALL; mode++) {
         assert(same(fuxi_inject_library(mode, sb, "SpringBoard"), (mode & 2u) ? FUXI_INJECT_SB_LIB : NULL));
         assert(same(fuxi_inject_library(mode, media, "mediaserverd"), (mode & 4u) ? FUXI_INJECT_SB_LIB : NULL));
@@ -54,6 +61,28 @@ int main(void)
         assert(!fuxi_inject_library(mode, "/usr/sbin/BlueTool2", "BlueTool2"));
         assert(!fuxi_inject_library(mode, "/usr/libexec/bluetoothd", "bluetoothd"));
         assert(!fuxi_inject_library(mode, "/usr/sbin/bluetoothuserd", "bluetoothuserd"));
+        const char *vm_library = (mode & 1u) ? FUXI_INJECT_APP_LIB : NULL;
+        if (mode & 128u) vm_library = FUXI_INJECT_SB_LIB;
+        assert(same(fuxi_inject_library(mode, vm, "VoiceMemos"), vm_library));
+        assert(same(fuxi_inject_library(mode, vmd, "voicememod"), (mode & 128u) ? FUXI_INJECT_SB_LIB : NULL));
+        assert(!fuxi_inject_library(mode, "/var/tmp/VoiceMemos", "VoiceMemos"));
+        assert(!fuxi_inject_library(mode, "/var/tmp/voicememod", "voicememod"));
+        /* timed 只認原廠路徑 /usr/libexec/timed */
+        assert(same(fuxi_inject_library(mode, timed, "timed"), (mode & 256u) ? FUXI_INJECT_SB_LIB : NULL));
+        assert(!fuxi_inject_library(mode, "/var/tmp/timed", "timed"));
+        assert(!fuxi_inject_library(mode, "/usr/sbin/timed", "timed"));
+        assert(!fuxi_inject_library(mode, "/usr/libexec/timed2", "timed2"));
+        assert(!fuxi_inject_library(mode, timed, NULL));
+        /* assistantd / assistant_service / corespeechd / kbd 只認原廠路徑 (bit 9 = 512) */
+        assert(same(fuxi_inject_library(mode, asstd, "assistantd"), (mode & 512u) ? FUXI_INJECT_SB_LIB : NULL));
+        assert(same(fuxi_inject_library(mode, assvc, "assistant_service"), (mode & 512u) ? FUXI_INJECT_SB_LIB : NULL));
+        assert(same(fuxi_inject_library(mode, csd, "corespeechd"), (mode & 512u) ? FUXI_INJECT_SB_LIB : NULL));
+        assert(same(fuxi_inject_library(mode, kbd, "kbd"), (mode & 512u) ? FUXI_INJECT_SB_LIB : NULL));
+        assert(!fuxi_inject_library(mode, "/var/tmp/assistantd", "assistantd"));
+        assert(!fuxi_inject_library(mode, "/var/tmp/assistant_service", "assistant_service"));
+        assert(!fuxi_inject_library(mode, "/var/tmp/corespeechd", "corespeechd"));
+        assert(!fuxi_inject_library(mode, "/var/tmp/kbd", "kbd"));
+        assert(!fuxi_inject_library(mode, asstd, NULL));
     }
     /* SpringBoard 不會拿到 app 函式庫，.appex 與 app 內 helper 不算 app */
     assert(same(fuxi_inject_library(1u, sb, "SpringBoard"), NULL));
@@ -66,7 +95,7 @@ int main(void)
     assert(!fuxi_inject_env(FUXI_INJECT_SB_LIB, env, 10));
     assert(!fuxi_inject_env(FUXI_INJECT_SB_LIB, env, 0));
     assert(!fuxi_inject_library(16u, "/Applications/Other.app/Preferences", "Preferences"));
-    puts("PASS: exec injection modes 0..127, exact Settings/BlueTool/bluetoothd executables, other app modes and environment bounds");
+    puts("PASS: exec injection modes 0..1023, exact Settings/BlueTool/bluetoothd/VoiceMemos/timed/dictation executables, other app modes and environment bounds");
     return 0;
 }
 '''

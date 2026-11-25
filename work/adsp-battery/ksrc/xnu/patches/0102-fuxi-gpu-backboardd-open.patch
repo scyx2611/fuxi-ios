@@ -1,46 +1,196 @@
 --- a/iokit/Kernel/arm/FuxiAdrenoUserClient.cpp
 +++ b/iokit/Kernel/arm/FuxiAdrenoUserClient.cpp
-@@ -15,6 +15,7 @@
+@@ -15,6 +15,10 @@
  #include <kern/task.h>
  #include <sys/proc.h>
  #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
 +#include <sys/codesign.h>
++#include <sys/vnode.h>
++#include <sys/param.h>
  #include "fuxi_gpu_abi.h"
  #include "fuxi_abi_wire.h"
  
-@@ -395,6 +396,25 @@ OSDefineMetaClassAndStructors(FuxiAdrenoUserClient,IOUserClient)
+@@ -754,6 +758,147 @@
   * provider object or a mutable IOClass property. This owns only a discovery
   * name; it implements no Apple family/user-client ABI. The native root-only
   * ABI below remains the sole GPU connection contract. */
++/* U-026 Phase A permanent kernel blacklist: SpringBoard, mediaserverd, and all *poster* extensions (case-insensitive). */
++static bool fuxiGpuForbiddenProcess(const char *name) {
++ if (!name || !*name) return true;
++ auto lower=[](char c)->char{ return (c>='A' && c<='Z') ? static_cast<char>(c+('a'-'A')) : c; };
++ auto eqCase=[&](const char *a, const char *b)->bool{
++  while (*a && *b) { if (lower(*a)!=lower(*b)) return false; ++a; ++b; }
++  return *a==0 && *b==0;
++ };
++ if (eqCase(name,"SpringBoard") || eqCase(name,"mediaserverd")) return true;
++ const char *needle="poster";
++ for (const char *p=name; *p; ++p) {
++  size_t i=0;
++  while (i<6 && p[i] && lower(p[i])==needle[i]) ++i;
++  if (i==6) return true;
++ }
++ return false;
++}
++struct FuxiProcIdentity {
++ char selfName[64];
++ char commName[32];
++ char execBase[256];
++ char csIdent[256];
++ bool selfTruncated;
++ bool hasExecBase;
++ bool execTruncated;
++ bool hasCsIdent;
++ bool csTruncated;
++ bool platformBinary;
++ bool hasCodeBlob;
++ int pid;
++};
++static bool fuxiResolveProcessIdentity(task_t task, FuxiProcIdentity &out) {
++ out={};
++ proc_t p=nullptr;
++ bool isCurrent=(task==current_task());
++ if (isCurrent) {
++  p=proc_self();
++  proc_selfname(out.selfName,sizeof(out.selfName));
++  out.selfTruncated=(strnlen(out.selfName,sizeof(out.selfName))>=31);
++ } else {
++  proc_t tp=static_cast<proc_t>(get_bsdtask_info(task));
++  if (!tp) return false;
++  int tpid=proc_pid(tp);
++  if (tpid<=0) return false;
++  p=proc_find(tpid);
++ }
++ if (!p) return false;
++ out.pid=proc_pid(p);
++ proc_name(out.pid,out.commName,sizeof(out.commName));
++ if (!isCurrent) out.selfTruncated=(strnlen(out.commName,sizeof(out.commName))>=15);
++ out.platformBinary=(csproc_get_platform_binary(p)!=0);
++ struct cs_blob *blob=csproc_get_blob(p);
++ out.hasCodeBlob=(blob!=nullptr);
++ if (blob) {
++  const char *cid=csblob_get_identity(blob);
++  if (cid && *cid) {
++   size_t clen=strnlen(cid,sizeof(out.csIdent));
++   if (clen>=sizeof(out.csIdent)) {
++    out.csTruncated=true;
++   } else {
++    memcpy(out.csIdent,cid,clen);
++    out.csIdent[clen]=0;
++    out.hasCsIdent=true;
++   }
++  }
++ }
++ vnode_t vp=proc_getexecutablevnode(p);
++ if (vp) {
++  char pathBuf[MAXPATHLEN];
++  int pathLen=static_cast<int>(sizeof(pathBuf));
++  if (vn_getpath(vp,pathBuf,&pathLen)==0 && pathLen>1 && pathLen<=static_cast<int>(sizeof(pathBuf))) {
++   pathBuf[pathLen-1]=0;
++   const char *base=pathBuf;
++   for (const char *q=pathBuf; *q; ++q) if (*q=='/') base=q+1;
++   if (*base) {
++    size_t blen=strnlen(base,sizeof(out.execBase));
++    if (blen>=sizeof(out.execBase) || pathLen>=static_cast<int>(sizeof(pathBuf))) {
++     out.execTruncated=true;
++    } else {
++     memcpy(out.execBase,base,blen);
++     out.execBase[blen]=0;
++     out.hasExecBase=true;
++    }
++   }
++  }
++  vnode_put(vp);
++ }
++ proc_rele(p);
++ return true;
++}
 +/* M9j: the render server backboardd runs as mobile, not root. Admit that one
 + * non-root client only when the boot asks for it (fuxibbgpu=1, or 2 for the survey) and the
-+ * caller is the platform binary named backboardd opening for itself. FuxiMetal
-+ * keeps its own two-key gate and crash fallback in userspace. */
-+static bool backboardClient(task_t task) {
++ * caller is the platform binary named backboardd opening for itself. */
++static bool backboardClient(task_t task, const FuxiProcIdentity &id) {
 + int arg=0;
 + if (!PE_parse_boot_argn("fuxibbgpu",&arg,sizeof(arg)) || (arg!=1 && arg!=2)) return false;
 + if (task!=current_task()) return false;
-+ char name[32]={};
-+ proc_selfname(name,sizeof(name));
-+ if (strcmp(name,"backboardd")) return false;
-+ proc_t p=proc_self();
-+ if (!p) return false;
-+ bool platform=csproc_get_platform_binary(p)!=0;
-+ int pid=proc_pid(p);
-+ proc_rele(p);
-+ IOLog("FUXI GPU ABI: non-root open backboardd pid %d platform %d -> %s\n",pid,(int)platform,platform?"admit":"deny");
-+ return platform;
++ if (strcmp(id.selfName,"backboardd")) return false;
++ if (id.hasExecBase && strcmp(id.execBase,"backboardd")) return false;
++ IOLog("FUXI GPU ABI: non-root open backboardd pid %d platform %d -> %s\n",id.pid,(int)id.platformBinary,id.platformBinary?"admit":"deny");
++ return id.platformBinary;
++}
++static bool foregroundAllowlistMatch(const char *list, size_t maxBytes, const char *name) {
++ if (!list || !maxBytes || !name || fuxiGpuForbiddenProcess(name)) return false;
++ size_t nlen=strlen(name);
++ if (!nlen || nlen>63) return false;
++ size_t i=0;
++ while (i<maxBytes && list[i]) {
++  while (i<maxBytes && (list[i]==',' || list[i]==' ' || list[i]=='\t' || list[i]=='\r' || list[i]=='\n')) ++i;
++  if (i>=maxBytes || !list[i]) break;
++  size_t start=i;
++  while (i<maxBytes && list[i] && list[i]!=',' && list[i]!=' ' && list[i]!='\t' && list[i]!='\r' && list[i]!='\n') ++i;
++  size_t tlen=i-start;
++  if (tlen==nlen && !strncmp(list+start,name,tlen)) return true;
++ }
++ return false;
++}
++/* Class 1 opt-in foreground allowlist: reads ADT /chosen "fuxi,gpu-clients" first, falling back to boot-arg fuxigpuclients. */
++static bool foregroundAllowedClient(task_t task, const FuxiProcIdentity &id) {
++ if (task!=current_task()) return false;
++ if (id.selfTruncated && !id.hasExecBase) return false;
++ const char *matchName=id.hasExecBase ? id.execBase : id.selfName;
++ if (!matchName || !*matchName || fuxiGpuForbiddenProcess(matchName)) return false;
++ if (id.hasCsIdent && fuxiGpuForbiddenProcess(id.csIdent)) return false;
++ bool listed=false;
++ DTEntry chosen; const void *prop=nullptr; unsigned bytes=0;
++ if (SecureDTLookupEntry(nullptr,"/chosen",&chosen)==kSuccess &&
++     SecureDTGetProperty(chosen,"fuxi,gpu-clients",&prop,&bytes)==kSuccess && prop && bytes) {
++  const char *s=static_cast<const char *>(prop);
++  if (bytes<256 && memchr(s,0,bytes)!=nullptr)
++   listed=foregroundAllowlistMatch(s,bytes,matchName);
++ } else {
++  char argBuf[256]={};
++  if (PE_parse_boot_argn("fuxigpuclients",argBuf,sizeof(argBuf)))
++   listed=foregroundAllowlistMatch(argBuf,sizeof(argBuf),matchName);
++ }
++ if (!listed) return false;
++ bool signedOk=id.platformBinary || id.hasCodeBlob;
++ IOLog("FUXI GPU ABI: non-root foreground client '%s' pid %d signed %d -> %s\n",matchName,id.pid,(int)signedOk,signedOk?"admit(Class1)":"deny");
++ return signedOk;
 +}
  class IOAcceleratorES : public IOService {
   OSDeclareDefaultStructors(IOAcceleratorES)
  };
-@@ -412,7 +432,8 @@ public:
+@@ -771,9 +916,33 @@
    if (!handler) return kIOReturnBadArgument;
    *handler=nullptr;
    if (type!=0x4147 && type!=0) return kIOReturnUnsupported;
 -  if (IOUserClient::clientHasPrivilege(securityID,kIOClientPrivilegeAdministrator)!=kIOReturnSuccess) return kIOReturnNotPrivileged;
-+  if (IOUserClient::clientHasPrivilege(securityID,kIOClientPrivilegeAdministrator)!=kIOReturnSuccess &&
-+      !backboardClient(task)) return kIOReturnNotPrivileged;
++  FuxiProcIdentity id={};
++  if (!fuxiResolveProcessIdentity(task,id)) return kIOReturnNotPrivileged;
++  if ((id.selfName[0] && fuxiGpuForbiddenProcess(id.selfName)) ||
++      (id.commName[0] && fuxiGpuForbiddenProcess(id.commName)) ||
++      (id.hasExecBase && fuxiGpuForbiddenProcess(id.execBase)) ||
++      (id.hasCsIdent && fuxiGpuForbiddenProcess(id.csIdent)) ||
++      id.execTruncated || id.csTruncated) {
++   IOLog("FUXI GPU ABI: U-026 blacklist denied '%s' exec='%s' id='%s' pid %d\n",
++       id.selfName,id.hasExecBase?id.execBase:"",id.hasCsIdent?id.csIdent:"",id.pid);
++   return kIOReturnNotPrivileged;
++  }
++  if (id.selfTruncated && !id.hasExecBase && !id.hasCsIdent) {
++   IOLog("FUXI GPU ABI: truncated proc name denied fail-closed '%s' pid %d\n",id.selfName,id.pid);
++   return kIOReturnNotPrivileged;
++  }
++  unsigned clientClass=FG_CLASS_COMPOSITOR;
++  if (IOUserClient::clientHasPrivilege(securityID,kIOClientPrivilegeAdministrator)==kIOReturnSuccess ||
++      backboardClient(task,id)) {
++   clientClass=FG_CLASS_COMPOSITOR;
++  } else if (foregroundAllowedClient(task,id)) {
++   clientClass=FG_CLASS_APP;
++  } else {
++   return kIOReturnNotPrivileged;
++  }
    auto *uc=new FuxiAdrenoUserClient;
    if (!uc) return kIOReturnNoMemory;
++  uc->setClientClass(clientClass);
    if (!uc->initWithTask(task,securityID,type)) { uc->release(); return kIOReturnNoMemory; }
+   if (!uc->attach(this)) { uc->release(); return kIOReturnNoResources; }
+   if (!uc->start(this) || !uc->mount()) { uc->detach(this); uc->release(); return kIOReturnBusy; }

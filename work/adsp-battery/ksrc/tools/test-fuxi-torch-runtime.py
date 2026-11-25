@@ -13,6 +13,11 @@ source = r'''
 int main(void) {
     assert(fuxi_torch_caller_allowed(1,0,NULL));
     assert(fuxi_torch_caller_allowed(0,1,"SpringBoard"));
+    assert(fuxi_torch_caller_allowed(0,1,"mediaserverd"));
+    assert(!fuxi_torch_caller_allowed(0,0,"mediaserverd"));
+    assert(!fuxi_torch_caller_allowed(0,1,"mediaserverdX"));
+    assert(!fuxi_torch_caller_allowed(0,1,"mediaserver"));
+    assert(!fuxi_torch_caller_allowed(0,1,"Mediaserverd"));
     assert(!fuxi_torch_caller_allowed(0,0,"SpringBoard"));
     assert(!fuxi_torch_caller_allowed(0,1,"SpringBoardX"));
     assert(!fuxi_torch_caller_allowed(0,1,"Spring"));

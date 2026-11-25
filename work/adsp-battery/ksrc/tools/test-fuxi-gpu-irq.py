@@ -182,13 +182,17 @@ static uint64_t mach_absolute_time() { return now; }
 static void nanoseconds_to_absolutetime(uint64_t ns, uint64_t *t) { *t = ns; }
 static int polls[64], npoll, pollAt, irqArmed, sleepRet[64], nsleep, sleepAt, pauses, stats, setups;
 static uint32_t seqNow, sleepSeq[64];
+struct fuxi_gpu_vm;
 static int fuxi_gpu_abi_poll(uint64_t) { now += 1000; return pollAt < npoll ? polls[pollAt++] : 0; }
+static int fuxi_gpu_abi_vm_poll(struct fuxi_gpu_vm *, uint64_t f) { return fuxi_gpu_abi_poll(f); }
 static int fuxi_gpu_irq_setup() { setups++; return irqArmed; }
 static uint32_t fuxi_gpu_irq_seq() { return seqNow; }
 static int fuxi_gpu_irq_sleep(uint32_t seq, uint64_t fence, unsigned us) { assert(fence == 9 && us == 1000); sleepSeq[sleepAt] = seq; now += 50000; return sleepRet[sleepAt++]; }
+static int fuxi_gpu_irq_sleep_vm(struct fuxi_gpu_vm *, uint32_t seq, uint64_t fence, unsigned us) { return fuxi_gpu_irq_sleep(seq, fence, us); }
 static void abiPause() { pauses++; now += 100000; }
 static void abiStat(unsigned slot, uint64_t) { assert(slot == FG_ABI_STAT_SLEEP); stats++; }
 struct Client {
+ struct fuxi_gpu_vm *vm_ = nullptr;
  static void waitStat(uint64_t, uint64_t) {}
 %s
 };
@@ -209,6 +213,9 @@ int main() {
  reset(1); polls[0] = -3; npoll = 1; assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnTimeout);
  reset(1); polls[0] = 1; polls[1] = -2; npoll = 2; assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnIOError);
  reset(1); for (int i = 0; i < 64; i++) { polls[i] = 1; sleepRet[i] = 0; } npoll = 64; assert(c.spin(9, 200000, &retired, &first) == kIOReturnTimeout && sleepAt < 8);
+ c.vm_ = (struct fuxi_gpu_vm *)0x1;
+ reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
+ assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnSuccess && setups == 1 && sleepAt == 1);
  puts("PASS: actual WaitFence spin: interrupt sleep while unwritten, poll when written/unarmed/off, one setup, retire stamp, errors and deadline");
 }
 '''

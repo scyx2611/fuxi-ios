@@ -39,7 +39,7 @@
  bsd/dev/unix_startup.c			standard
 --- /dev/null
 +++ b/bsd/dev/fuxi_adsp.c
-@@ -0,0 +1,1034 @@
+@@ -0,0 +1,1037 @@
 +/* SPDX-License-Identifier: BSD-2-Clause-Patent */
 +/* FUXI audio DSP (ADSP, LPASS) owner. Boot argument fuxiadsp (or ADT /chosen u32 "fuxi,adsp" when the command line is full):
 + *   1  survey what the boot stages left (SMEM partition and items, the DSP's SMP2P state, the AOSS mailbox, the RSC, the GIC
@@ -118,7 +118,7 @@
 +extern void fuxi_audio_spf_poll(void);
 +extern unsigned fuxi_gpu_access(uintptr_t, uint64_t *, unsigned, unsigned);
 +extern volatile int32_t native_qrtr_stats[16];
-+extern char native_qrtr_text[96];
++extern char native_qrtr_text[256];
 +void fuxi_adsp_init(void);
 +
 +enum Stage {
@@ -160,8 +160,8 @@
 +#define EV_GLINK 2u
 +#define EV_AOP 4u
 +#define EV_SEND 16u
-+#define FA_CLIENTS 4u
-+#define FA_QUEUE 8u
++#define FA_CLIENTS 6u
++#define FA_QUEUE 16u
 +#define FA_FAST_MS 500u /* fast polling after the last traffic */
 +
 +/* ---- state, all owned by the thread except where noted ---- */
@@ -908,9 +908,12 @@
 +static void report(void)
 +{
 +    printf("FUXI ADSP: stage=%d ipcc=%u other=%u glink in=%u out=%u unknown_opens=%u (%s) qrtr stage=%d in=%d out=%d "
-+        "locator=%d/%d dsp_node=%d services=%d [%s]\n", gStage, gIpccEvents, gIpccOther, gGlink.rx_messages, gGlink.tx_messages,
++        "locator=%d/%d dsp_node=%d services=%d\n", gStage, gIpccEvents, gIpccOther, gGlink.rx_messages, gGlink.tx_messages,
 +        gGlink.unknown_opens, gGlink.unknown_names, native_qrtr_stats[0], native_qrtr_stats[1], native_qrtr_stats[4],
-+        native_qrtr_stats[6], native_qrtr_stats[7], native_qrtr_stats[8], native_qrtr_stats[9], native_qrtr_text);
++        native_qrtr_stats[6], native_qrtr_stats[7], native_qrtr_stats[8], native_qrtr_stats[9]);
++    if (native_qrtr_stats[9] > 0) {
++        printf("FUXI ADSP QRTR: services=%d [%s]\n", native_qrtr_stats[9], native_qrtr_text);
++    }
 +}
 +
 +static void adspThread(void *arg, wait_result_t result)
@@ -5013,7 +5016,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/QcomQrtr.c
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,270 @@
 +/* SPDX-License-Identifier: BSD-2-Clause-Patent */
 +#include "QcomQrtr.h"
 +
@@ -5023,7 +5026,7 @@
 +static void put32(uint8_t *p, uint32_t v) {put16(p, v); put16(p + 2, v >> 16);}
 +
 +#define CTRL_BYTES 20u  /* command and four words */
-+#define MAX_PACKET 512u
++#define MAX_PACKET 560u
 +
 +void qcom_qrtr_init(QcomQrtr *q, uint32_t local_node, QcomQrtrSend send, void *send_context)
 +{
@@ -5070,11 +5073,30 @@
 +int qcom_qrtr_add_service(QcomQrtr *q, uint32_t service, uint32_t instance, uint32_t port, QcomQrtrReceive receive, void *context)
 +{
 +    if (q->local_count == QCOM_QRTR_MAX_LOCAL || port == QCOM_QRTR_PORT_CTRL) return -1;
++    for (uint32_t k = 0; k < q->local_count; ++k) if (q->local[k].port == port) return -1;
 +    const unsigned i = q->local_count++;
 +    q->local[i].service = service; q->local[i].instance = instance; q->local[i].port = port;
++    q->local[i].announced = 1;
 +    q->local[i].receive = receive; q->local[i].context = context;
 +    if (q->hello_received) announce(q, i);
 +    return 0;
++}
++
++int qcom_qrtr_add_client(QcomQrtr *q, uint32_t port, QcomQrtrReceive receive, void *context)
++{
++    if (q->local_count == QCOM_QRTR_MAX_LOCAL || !port || port == QCOM_QRTR_PORT_CTRL || !receive) return -1;
++    for (uint32_t k = 0; k < q->local_count; ++k) if (q->local[k].port == port) return -1;
++    const unsigned i = q->local_count++;
++    q->local[i].service = 0; q->local[i].instance = 0; q->local[i].port = port;
++    q->local[i].announced = 0;
++    q->local[i].receive = receive; q->local[i].context = context;
++    return 0;
++}
++
++void qcom_qrtr_set_server_notify(QcomQrtr *q, QcomQrtrNotify notify, void *context)
++{
++    q->on_server = notify;
++    q->on_server_context = context;
 +}
 +
 +void qcom_qrtr_start(QcomQrtr *q)
@@ -5088,20 +5110,39 @@
 +    return -1;
 +}
 +
++int qcom_qrtr_find_remote_any(const QcomQrtr *q, uint32_t service, uint32_t *node, uint32_t *port, uint32_t *instance)
++{
++    const int index = qcom_qrtr_find_remote(q, service);
++    if (index < 0) return -1;
++    if (node) *node = q->remote[index].node;
++    if (port) *port = q->remote[index].port;
++    if (instance) *instance = q->remote[index].instance;
++    return 0;
++}
++
 +static void remote_server(QcomQrtr *q, const uint8_t *w, int add)
 +{
 +    const uint32_t service = le32(w), instance = le32(w + 4), node = le32(w + 8), port = le32(w + 12);
 +    if (!service && !instance && !node && !port) return;  /* the end of a listing */
 +    for (uint32_t i = 0; i < q->remote_count; ++i) {
 +        if (q->remote[i].node != node || q->remote[i].port != port) continue;
-+        if (add) {q->remote[i].service = service; q->remote[i].instance = instance; return;}
++        if (add) {
++            q->remote[i].service = service; q->remote[i].instance = instance;
++            q->remote_generation++;
++            if (q->on_server) q->on_server(q->on_server_context);
++            return;
++        }
 +        q->remote[i] = q->remote[--q->remote_count];
++        q->remote_generation++;
++        if (q->on_server) q->on_server(q->on_server_context);
 +        return;
 +    }
 +    if (!add || q->remote_count == QCOM_QRTR_MAX_REMOTE) return;
 +    q->remote[q->remote_count].service = service; q->remote[q->remote_count].instance = instance;
 +    q->remote[q->remote_count].node = node; q->remote[q->remote_count].port = port;
 +    q->remote_count++;
++    q->remote_generation++;
++    if (q->on_server) q->on_server(q->on_server_context);
 +}
 +
 +int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length)
@@ -5119,8 +5160,12 @@
 +        if (i < q->local_count) q->local[i].receive(q->local[i].context, q, dst_port, src_node, src_port, data, size);
 +        else q->rx_unrouted++;
 +        if (confirm) {  /* the sender waits for this before it sends more to the port */
-+            const uint32_t words[4] = {src_node, src_port, 0, 0};
-+            if (!control(q, QCOM_QRTR_RESUME_TX, words)) q->resumes_sent++;
++            uint8_t pkt[CTRL_BYTES] = {0};
++            put32(pkt, QCOM_QRTR_RESUME_TX);
++            put32(pkt + 4, q->local_node);
++            put32(pkt + 8, dst_port);
++            if (!emit(q, QCOM_QRTR_RESUME_TX, QCOM_QRTR_PORT_CTRL, src_node, QCOM_QRTR_PORT_CTRL, pkt, sizeof pkt))
++                q->resumes_sent++;
 +        }
 +        return 0;
 +    }
@@ -5131,7 +5176,7 @@
 +        q->remote_node = src_node;
 +        if (!q->hello_sent) qcom_qrtr_start(q);
 +        q->hello_received = 1;
-+        for (unsigned i = 0; i < q->local_count; ++i) announce(q, i);
++        for (unsigned i = 0; i < q->local_count; ++i) if (q->local[i].announced) announce(q, i);
 +        break;
 +    case QCOM_QRTR_NEW_SERVER:
 +    case QCOM_QRTR_DEL_SERVER:
@@ -5140,6 +5185,8 @@
 +    case QCOM_QRTR_BYE:
 +        q->remote_count = 0;
 +        q->hello_received = 0;
++        q->remote_generation++;
++        if (q->on_server) q->on_server(q->on_server_context);
 +        break;
 +    default:  /* DEL_CLIENT, RESUME_TX (we never ask), PING, lookups (the remote keeps its own name service) */
 +        break;
@@ -5763,7 +5810,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/ShengQrtr.c
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,251 @@
 +/* SPDX-License-Identifier: BSD-2-Clause-Patent */
 +/* The IPC router link to the audio DSP (GLINK channel "IPCRTR", which the DSP opens) and the service locator on it. The DSP's protection
 + * domains (audio, charger, sensors) ask the application processor's locator which domains provide a service before they start; the
@@ -5771,8 +5818,10 @@
 + * handled at once and any answer is queued with sheng_adsp_send, so nothing here waits. */
 +#include <stddef.h>
 +#include <stdint.h>
++#include <kern/locks.h>
 +#include "QcomQrtr.h"
 +#include "ShengAdsp.h"
++#include "ShengQrtr.h"
 +
 +/* [0] stage (1 channel registered, 2 link up, 3 the DSP's hello, negative: registration failed), [1] packets in, [2] data packets in,
 + * [3] bad packets, [4] packets out, [5] sends refused, [6] locator requests, [7] locator answers, [8] the DSP's node, [9] services the
@@ -5780,9 +5829,9 @@
 + * length | its first byte << 8 */
 +volatile int32_t native_qrtr_stats[16];
 +/* the services the DSP announced, as service:instance in hex */
-+char native_qrtr_text[96];
++char native_qrtr_text[256];
 +
-+enum {kLocalNode = 1, kLocatorPort = 1};
++enum {kLocalNode = 1, kLocatorPort = 1, kClientPortBase = 0x100, kMaxClients = 12, kMaxWatchers = 4};
 +
 +static const char *const kAudio[] = {"avs/audio", NULL};
 +static const char *const kGps[] = {"gps/gps_service", NULL};
@@ -5793,6 +5842,52 @@
 +
 +static QcomQrtr gQrtr;
 +static ShengAdspChannel *gChannel;
++static int gQrtrReady;
++static LCK_GRP_DECLARE(gQrtrGrp, "fuxi_qrtr");
++static LCK_MTX_DECLARE(gQrtrLock, &gQrtrGrp);
++
++struct ShengQrtrPort {
++    uint32_t port;
++    ShengQrtrReceive receive;
++    void *context;
++};
++static struct ShengQrtrPort gClientPorts[kMaxClients];
++static uint32_t gClientCount;
++struct ShengQrtrWatcher {
++    ShengQrtrServerNotify notify;
++    void *context;
++};
++static struct ShengQrtrWatcher gWatchers[kMaxWatchers];
++static uint32_t gWatcherCount;
++static int gServerDirty;
++
++static void notifyWatchers(void)
++{
++    struct ShengQrtrWatcher snapshot[kMaxWatchers];
++    uint32_t count = 0;
++    lck_mtx_lock(&gQrtrLock);
++    count = gWatcherCount;
++    for (uint32_t i = 0; i < count; ++i) snapshot[i] = gWatchers[i];
++    lck_mtx_unlock(&gQrtrLock);
++    for (uint32_t i = 0; i < count; ++i) {
++        if (snapshot[i].notify) snapshot[i].notify(snapshot[i].context);
++    }
++}
++
++static void onServerChange(void *context)
++{
++    (void)context;
++    gServerDirty = 1;
++}
++
++static void clientReceiveAdapter(void *context, QcomQrtr *q, uint32_t port, uint32_t node, uint32_t from,
++                                 const uint8_t *data, uint32_t length)
++{
++    (void)q;
++    (void)port;
++    struct ShengQrtrPort *client = (struct ShengQrtrPort *)context;
++    if (client && client->receive) client->receive(client->context, node, from, data, length);
++}
 +
 +static int send(void *context, const uint8_t *packet, uint32_t length)
 +{
@@ -5848,35 +5943,124 @@
 +static void linkState(void *context, int up)
 +{
 +    (void)context;
++    int changed = 0;
++    lck_mtx_lock(&gQrtrLock);
 +    if (up) {
 +        native_qrtr_stats[10]++;
 +        /* a fresh link: forget the old one's hello and services, keep ours */
 +        gQrtr.hello_sent = gQrtr.hello_received = 0;
 +        gQrtr.remote_count = 0;
 +        gQrtr.remote_node = QCOM_QRTR_NODE_BROADCAST;
++        gQrtr.remote_generation++;
 +        native_qrtr_stats[0] = 2;
 +        qcom_qrtr_start(&gQrtr);
++        changed = 1;
 +    } else {
 +        native_qrtr_stats[11]++;
++        gQrtr.remote_count = 0;
++        gQrtr.hello_received = 0;
++        gQrtr.remote_generation++;
 +        native_qrtr_stats[0] = 1;
++        changed = 1;
 +    }
 +    counters();
++    lck_mtx_unlock(&gQrtrLock);
++    if (changed) notifyWatchers();
 +}
 +
 +static void linkReceive(void *context, const uint8_t *data, uint32_t length)
 +{
 +    (void)context;
++    lck_mtx_lock(&gQrtrLock);
++    gServerDirty = 0;
 +    qcom_qrtr_receive(&gQrtr, data, length);
 +    counters();
++    const int dirty = gServerDirty;
++    lck_mtx_unlock(&gQrtrLock);
++    if (dirty) notifyWatchers();
++}
++
++ShengQrtrPort *sheng_qrtr_open_client(ShengQrtrReceive receive, void *context)
++{
++    if (!receive) return NULL;
++    lck_mtx_lock(&gQrtrLock);
++    if (!gQrtrReady || gClientCount >= kMaxClients) {
++        lck_mtx_unlock(&gQrtrLock);
++        return NULL;
++    }
++    struct ShengQrtrPort *slot = &gClientPorts[gClientCount];
++    const uint32_t port = kClientPortBase + gClientCount;
++    slot->port = port;
++    slot->receive = receive;
++    slot->context = context;
++    if (qcom_qrtr_add_client(&gQrtr, port, clientReceiveAdapter, slot) != 0) {
++        lck_mtx_unlock(&gQrtrLock);
++        return NULL;
++    }
++    gClientCount++;
++    lck_mtx_unlock(&gQrtrLock);
++    return slot;
++}
++
++uint32_t sheng_qrtr_port_number(const ShengQrtrPort *port)
++{
++    return port ? port->port : 0;
++}
++
++int sheng_qrtr_send(ShengQrtrPort *port, uint32_t node, uint32_t dst_port, const void *data, uint32_t length)
++{
++    if (!port || !data || !length) return -1;
++    lck_mtx_lock(&gQrtrLock);
++    if (!gQrtrReady || !gChannel) {
++        lck_mtx_unlock(&gQrtrLock);
++        return -1;
++    }
++    const int rc = qcom_qrtr_send_data(&gQrtr, port->port, node, dst_port, (const uint8_t *)data, length);
++    counters();
++    lck_mtx_unlock(&gQrtrLock);
++    return rc;
++}
++
++int sheng_qrtr_find_service(uint32_t service, uint32_t *node, uint32_t *port, uint32_t *instance, uint32_t *generation)
++{
++    lck_mtx_lock(&gQrtrLock);
++    if (!gQrtrReady) {
++        if (generation) *generation = 0;
++        lck_mtx_unlock(&gQrtrLock);
++        return 0;
++    }
++    if (generation) *generation = gQrtr.remote_generation;
++    const int found = qcom_qrtr_find_remote_any(&gQrtr, service, node, port, instance) == 0;
++    lck_mtx_unlock(&gQrtrLock);
++    return found;
++}
++
++int sheng_qrtr_watch(ShengQrtrServerNotify notify, void *context)
++{
++    if (!notify) return -1;
++    lck_mtx_lock(&gQrtrLock);
++    if (gWatcherCount >= kMaxWatchers) {
++        lck_mtx_unlock(&gQrtrLock);
++        return -1;
++    }
++    gWatchers[gWatcherCount].notify = notify;
++    gWatchers[gWatcherCount].context = context;
++    gWatcherCount++;
++    lck_mtx_unlock(&gQrtrLock);
++    return 0;
 +}
 +
 +void sheng_qrtr_start(void)
 +{
 +    static const ShengAdspClient client = {linkState, linkReceive};
++    lck_mtx_lock(&gQrtrLock);
 +    qcom_qrtr_init(&gQrtr, kLocalNode, send, NULL);
 +    qcom_qrtr_add_service(&gQrtr, QCOM_SERVLOC_SERVICE, QCOM_SERVLOC_INSTANCE, kLocatorPort, locator, NULL);
-+    gChannel = sheng_adsp_channel("IPCRTR", 1024, 8, 0, &client, NULL);
++    qcom_qrtr_set_server_notify(&gQrtr, onServerChange, NULL);
++    gChannel = sheng_adsp_channel("IPCRTR", 2048, 12, 0, &client, NULL);
++    gQrtrReady = gChannel != NULL;
 +    native_qrtr_stats[0] = gChannel ? 1 : -1;
++    lck_mtx_unlock(&gQrtrLock);
 +}
 --- /dev/null
 +++ b/bsd/dev/GeniI2c.c
@@ -13139,7 +13323,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/QcomQrtr.h
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,89 @@
 +/* SPDX-License-Identifier: BSD-2-Clause-Patent */
 +/* The IPC router (QRTR, version 1 headers) on one link to one remote node, with the name service duties of this side: say hello, announce
 + * our services to the remote once it has said hello, answer flow control, and keep the list of the services the remote announces. Our
@@ -13155,7 +13339,7 @@
 +#define QCOM_QRTR_HEADER 32u
 +#define QCOM_QRTR_PORT_CTRL 0xfffffffeu
 +#define QCOM_QRTR_NODE_BROADCAST 0xffffffffu
-+#define QCOM_QRTR_MAX_LOCAL 4u
++#define QCOM_QRTR_MAX_LOCAL 16u
 +#define QCOM_QRTR_MAX_REMOTE 32u
 +
 +enum {
@@ -13170,16 +13354,20 @@
 +/* A data packet for one of our ports from node:port. */
 +typedef void (*QcomQrtrReceive)(void *context, QcomQrtr *q, uint32_t port, uint32_t node, uint32_t from_port, const uint8_t *data,
 +                                uint32_t length);
++typedef void (*QcomQrtrNotify)(void *context);
 +
 +struct QcomQrtr {
 +    uint32_t local_node, remote_node;  /* remote_node: QCOM_QRTR_NODE_BROADCAST until the remote's hello */
 +    uint8_t hello_sent, hello_received;
 +    QcomQrtrSend send;
 +    void *send_context;
-+    struct {uint32_t service, instance, port; QcomQrtrReceive receive; void *context;} local[QCOM_QRTR_MAX_LOCAL];
++    struct {uint32_t service, instance, port; uint8_t announced; QcomQrtrReceive receive; void *context;} local[QCOM_QRTR_MAX_LOCAL];
 +    uint32_t local_count;
 +    struct {uint32_t service, instance, node, port;} remote[QCOM_QRTR_MAX_REMOTE];
 +    uint32_t remote_count;
++    uint32_t remote_generation;
++    QcomQrtrNotify on_server;
++    void *on_server_context;
 +    /* counters for the log */
 +    uint32_t rx_packets, rx_data, rx_bad, rx_unrouted, tx_packets, tx_refused, resumes_sent;
 +};
@@ -13188,6 +13376,10 @@
 +/* Adds one of our services (instance as announced: version | instance << 8) on port; announced to the remote after its hello, or at
 + * once when that has been. Returns 0, or -1 when full. */
 +int qcom_qrtr_add_service(QcomQrtr *q, uint32_t service, uint32_t instance, uint32_t port, QcomQrtrReceive receive, void *context);
++/* Adds a local client-only port (not announced via NEW_SERVER). Returns 0, or -1 when full or duplicate. */
++int qcom_qrtr_add_client(QcomQrtr *q, uint32_t port, QcomQrtrReceive receive, void *context);
++/* Registers a callback invoked whenever remote services change (NEW_SERVER, DEL_SERVER, BYE). */
++void qcom_qrtr_set_server_notify(QcomQrtr *q, QcomQrtrNotify notify, void *context);
 +/* The link is up: says hello. */
 +void qcom_qrtr_start(QcomQrtr *q);
 +/* One received packet. Returns 0, or -1 when it was not a valid packet. */
@@ -13196,6 +13388,8 @@
 +int qcom_qrtr_send_data(QcomQrtr *q, uint32_t from_port, uint32_t node, uint32_t port, const uint8_t *data, uint32_t length);
 +/* Index of a remote service in the list, -1 when not announced. */
 +int qcom_qrtr_find_remote(const QcomQrtr *q, uint32_t service);
++/* Finds any announced instance of service and outputs its node, port and instance. Returns 0 when found, -1 otherwise. */
++int qcom_qrtr_find_remote_any(const QcomQrtr *q, uint32_t service, uint32_t *node, uint32_t *port, uint32_t *instance);
 +
 +/* ---- QMI messages carried in data packets: a 7-byte header (type, transaction, message id, length) and TLVs ---- */
 +#define QCOM_QMI_HEADER 7u
@@ -13413,6 +13607,38 @@
 +#endif
 +#endif
 --- /dev/null
++++ b/bsd/dev/ShengQrtr.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/* Client ports and remote service lookup on the ADSP IPC router (ShengQrtr.c). */
++#ifndef SHENG_QRTR_H
++#define SHENG_QRTR_H
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct ShengQrtrPort ShengQrtrPort;
++typedef void (*ShengQrtrReceive)(void *context, uint32_t node, uint32_t from_port, const uint8_t *data, uint32_t length);
++typedef void (*ShengQrtrServerNotify)(void *context);
++
++/* Opens a local client-only QRTR port. Safe to call after sheng_qrtr_start(). Returns NULL if full or not started. */
++ShengQrtrPort *sheng_qrtr_open_client(ShengQrtrReceive receive, void *context);
++/* Returns the allocated local port number (0 on NULL). */
++uint32_t sheng_qrtr_port_number(const ShengQrtrPort *port);
++/* Sends a QRTR DATA packet from this client port to node:dst_port. Returns 0 when queued. */
++int sheng_qrtr_send(ShengQrtrPort *port, uint32_t node, uint32_t dst_port, const void *data, uint32_t length);
++/* Queries any announced remote instance of service. Always outputs current generation if non-NULL.
++ * Returns 1 when found (node/port/instance populated), 0 when absent or router not started. */
++int sheng_qrtr_find_service(uint32_t service, uint32_t *node, uint32_t *port, uint32_t *instance, uint32_t *generation);
++/* Registers a server-table change watcher (called from the DSP thread without holding the QRTR lock). Returns 0 or -1. */
++int sheng_qrtr_watch(ShengQrtrServerNotify notify, void *context);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
 +++ b/bsd/dev/fuxi_adsp_battery.h
 @@ -0,0 +1,38 @@
 +/* SPDX-License-Identifier: BSD-2-Clause-Patent */
@@ -13561,7 +13787,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/fuxi_torch_runtime.h
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,41 @@
 +#ifndef FUXI_TORCH_RUNTIME_H
 +#define FUXI_TORCH_RUNTIME_H
 +#include <stdint.h>
@@ -13573,16 +13799,20 @@
 +    uint64_t deadline;
 +} FuxiTorchRuntime;
 +
-+static inline int fuxi_torch_caller_allowed(unsigned root, unsigned platform, const char *name)
++static inline int fuxi_torch_name_eq(const char *name, const char *expected)
 +{
-+    if (root) return 1;
-+    if (!platform || !name) return 0;
-+    const char expected[] = "SpringBoard";
 +    unsigned index = 0;
 +    for (; expected[index]; index++) {
 +        if (name[index] != expected[index]) return 0;
 +    }
 +    return name[index] == 0;
++}
++
++static inline int fuxi_torch_caller_allowed(unsigned root, unsigned platform, const char *name)
++{
++    if (root) return 1;
++    if (!platform || !name) return 0;
++    return fuxi_torch_name_eq(name, "SpringBoard") || fuxi_torch_name_eq(name, "mediaserverd");
 +}
 +
 +static inline int fuxi_torch_request(FuxiTorchRuntime *state, unsigned level, uint64_t now)

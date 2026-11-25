@@ -8,6 +8,7 @@ trap 'echo LAUNCHD_STAGE_FAILED' EXIT
 P=/mnt/share/hfs-journal-block-probe.py
 [ "$(cat /sys/block/vda/ro)" = 0 ]
 [ "$(cat /sys/block/vda/size)" = 41943040 ]
+[ "$(wc -l < /mnt/share/job.txt)" = 1 ]
 grep -qxE 'com\.apple\.[A-Za-z0-9.]+' /mnt/share/job.txt
 
 check() {

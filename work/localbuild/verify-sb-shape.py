@@ -63,9 +63,11 @@ def inspect(data, *, audio_bundle=False):
         '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',
     }
     normalized = {name.replace('/IOKit.framework/Versions/A/', '/IOKit.framework/') for name in dependencies}
+    # 2026-11-20 起 FuxiAudio 也讀 ADT /chosen fuxi,hal-haptic，同樣連 IOKit。
+    if not audio_bundle or b'fuxi,hal-haptic\0' in data:
+        expected_dependencies.add('/System/Library/Frameworks/IOKit.framework/IOKit')
     if not audio_bundle:
-        expected_dependencies.update({'/usr/lib/libobjc.A.dylib',
-            '/System/Library/Frameworks/IOKit.framework/IOKit'})
+        expected_dependencies.add('/usr/lib/libobjc.A.dylib')
     require(normalized == expected_dependencies, 'Unexpected dependencies')
     signature_offset, signature_size = signature
     require(signature_offset >= commands_end and signature_offset + signature_size <= len(data),

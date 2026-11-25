@@ -41,8 +41,35 @@ DAILY_FIT_PAYLOAD = "11ae7cec2a23f31265060e9912ce745d18de254a3fafc8c28d27cf34e7a
 # 1125×2500 兩軸均縮到 96%，趟 43 暫時開機驗證。
 DAILY_ASPECT_PIN = "f2080657c34166b492533ddee82ffab79a7d8b11b6eb75d68e7ac5ce897bd8cf"
 DAILY_ASPECT_PAYLOAD = "c6e87393379d2b884cafa4de67a3bf62e87ab9eb19f5d451b6c56cbaa6695928"
+# B-016 動態 RTC 日常版（Plan A persist:/time/ats_2 + Plan B timed 持久化，沿用 B-015 全功能，不帶靜態 fuxi,rtc-offset）。
+DAILY_RTC_PIN = "8758a8e62417e2edff1ce23d81f4ad9c26bc59e3f7dcefb9786480ea7b234a22"
+DAILY_RTC_PAYLOAD = "6ea24bcb20921cb79ebad766e8f085d1ddc2c6764fafae2cfb3e3d232b0c04ec"
+# B-017 音訊／麥克風／震動／右側音量條日常版（沿用 B-016 全功能，加入 CS35L41 mode 8＋idle-pdn=600、WCD9385 mic、HAP525 mode 9/hal 6、VolHUD 238×128）。
+DAILY_AUDIO_HAP_PIN = "885b73f29e13f1bbbeadd41ae8e2b14cf157e94c1646907115603e777b714869"
+DAILY_AUDIO_HAP_PAYLOAD = "4533de868349d0ce79a01c4ea82fd0f113b279b491c555359038158f663231b3"
+# B-018 音訊／手電筒零轉子／hap8 核心日常原點（保留 B-017 全功能與好評之 damp=6，喇叭調為 gain=16/max_db=-4/idle-pdn=1500＋防靜音誤喚醒、audio-mic=1，對齊根映像 FuxiVibrate.c 修復並內建 mode 6/7/8）。
+DAILY_AUDIO_HAP8_M6_PIN = "32c0b26f79db0aab4122bc2ae1dbfd267f757f60a6db1d180abed89a67e665b6"
+DAILY_AUDIO_HAP8_M6_PAYLOAD = "230fafa76a7140d70ab3b856e9fc6a2485d1629f262762e0649f848509460018"
+# B-019 系統模糊背景去紫修復日常版（完整保留 B-018 全功能並啟用 U-026 ADT fuxi,atx-fix=1）。
+DAILY_ATXFIX_PIN = "a326460ef5747ed20ab3e50581fa3a745ccc95b9505fd08a53b6106085551f92"
+DAILY_ATXFIX_PAYLOAD = "2c022930a8f3491db3f038ba24bf6208417f7b2cfe27273453322f7773e5b972"
+# B-019/B-020 整合日常版（完整保留 B-018 與 U-026 去紫 atx-fix 44 項日常參數，疊加 4G＋VoLTE 行動數據與 K-079 WCN7850 SoftAP 個人熱點 ap7）。
+DAILY_CELL_HOTSPOT_AP7_PIN = "fe1e9fcc6b059e05d0578c91cd3634a382fc664524f36137a4ede4ddf7da12dd"
+DAILY_CELL_HOTSPOT_AP7_PAYLOAD = "b72c3a2737d1b288caa84355be78417b67e491555e06eff25b1c70c0864bfd33"
+# B-020 大一統整合日常版（整合 B-019、hap9e Mode 9 v2.2、U-027 錄音聽寫、K-080/U-028 原生相機、感測器 v8、WDA 時序與關熱點 Wi-Fi 穩定性修復）。
+DAILY_B020_PIN = "70f2b2fa0dcd3a34754c92f1a238e1b244a7e76605c8af59211f71b8c3d8946e"
+DAILY_B020_PAYLOAD = "539d8596931b049bbf318fd6c9e98ee8e68c2c55887fc23bb7f5dce7e01a892b"
+# B-021 無 Maps 日常版（整合 IMX800 四攝 C-AF／3.2x 零發紫／閃光燈、GNSS QMI_LOC+PDS、Wi-Fi 掃描與連線加速、GPU Class 0 1280MiB／120Hz TE、FuxiFlashlightLogic 控制中心修復）。
+DAILY_B021_PIN = "babd50b6a48444f62a1e43beb4f33ebd387441e4c77b470b1eee69631eebd087"
+DAILY_B021_PAYLOAD = "4b34b1c67b8c5b078a24dcefa1d733ec29abacdd168d2fadefe07f1acc99e544"
 DAILY_PAYLOADS = {DAILY_WIFI_PIN: DAILY_WIFI_PAYLOAD, DAILY_BT_PIN: DAILY_BT_PAYLOAD,
-                  DAILY_FIT_PIN: DAILY_FIT_PAYLOAD, DAILY_ASPECT_PIN: DAILY_ASPECT_PAYLOAD}
+                  DAILY_FIT_PIN: DAILY_FIT_PAYLOAD, DAILY_ASPECT_PIN: DAILY_ASPECT_PAYLOAD,
+                  DAILY_RTC_PIN: DAILY_RTC_PAYLOAD, DAILY_AUDIO_HAP_PIN: DAILY_AUDIO_HAP_PAYLOAD,
+                  DAILY_AUDIO_HAP8_M6_PIN: DAILY_AUDIO_HAP8_M6_PAYLOAD,
+                  DAILY_ATXFIX_PIN: DAILY_ATXFIX_PAYLOAD,
+                  DAILY_CELL_HOTSPOT_AP7_PIN: DAILY_CELL_HOTSPOT_AP7_PAYLOAD,
+                  DAILY_B020_PIN: DAILY_B020_PAYLOAD,
+                  DAILY_B021_PIN: DAILY_B021_PAYLOAD}
 # 只有已在 RAM 試開驗過 Android 交接的映像可以寫入：雜湊 → (產物, RAM 試開紀錄)。
 VERIFIED_IMAGES = {
     PIN:
@@ -59,10 +86,30 @@ VERIFIED_IMAGES = {
         (DUALBOOT / "menu-daily-fit-20261120", DUALBOOT / "daily-fit-ram-android-20261120"),
     DAILY_ASPECT_PIN:
         (DUALBOOT / "menu-daily-aspect-20261120", DUALBOOT / "daily-aspect-ram-android-20261120"),
+    DAILY_RTC_PIN:
+        (DUALBOOT / "menu-daily-rtc-ab-20261122", DUALBOOT / "daily-rtc-ab-ram-android-20261122"),
+    DAILY_AUDIO_HAP_PIN:
+        (DUALBOOT / "menu-daily-audio-hap6f-20261122", DUALBOOT / "daily-audio-hap6f-ram-android-20261122"),
+    DAILY_AUDIO_HAP8_M6_PIN:
+        (DUALBOOT / "menu-daily-audio-hap8-m6-20261122", DUALBOOT / "daily-audio-hap8-m6-ram-android-20261122"),
+    DAILY_ATXFIX_PIN:
+        (DUALBOOT / "menu-daily-atxfix-20261123", DUALBOOT / "daily-atxfix-ram-android-20261123"),
+    DAILY_CELL_HOTSPOT_AP7_PIN:
+        (DUALBOOT / "menu-daily-cell-hotspot-ap7-20261123", DUALBOOT / "daily-cell-hotspot-ap7-ram-android-20261123"),
+    DAILY_B020_PIN:
+        (DUALBOOT / "menu-daily-b020-v2-20261124", DUALBOOT / "daily-b020-v2-ram-android-20261124"),
+    DAILY_B021_PIN:
+        (DUALBOOT / "menu-daily-b021-20261125", DUALBOOT / "daily-b021-ram-android-20261125"),
 }
 FIRST_INSTALL = "persistent-slot-a-20261118"
 UPGRADE_PINS = {PIN: LAUNCHING_PIN, LAUNCHING_PIN: COUNTDOWN_PIN, COUNTDOWN_PIN: DAILY_WIFI_PIN,
-                DAILY_WIFI_PIN: DAILY_BT_PIN, DAILY_BT_PIN: DAILY_FIT_PIN, DAILY_FIT_PIN: DAILY_ASPECT_PIN}
+                DAILY_WIFI_PIN: DAILY_BT_PIN, DAILY_BT_PIN: DAILY_FIT_PIN, DAILY_FIT_PIN: DAILY_ASPECT_PIN,
+                DAILY_ASPECT_PIN: DAILY_RTC_PIN, DAILY_RTC_PIN: DAILY_AUDIO_HAP_PIN,
+                DAILY_AUDIO_HAP_PIN: DAILY_AUDIO_HAP8_M6_PIN,
+                DAILY_AUDIO_HAP8_M6_PIN: DAILY_CELL_HOTSPOT_AP7_PIN,
+                DAILY_ATXFIX_PIN: DAILY_CELL_HOTSPOT_AP7_PIN,
+                DAILY_CELL_HOTSPOT_AP7_PIN: DAILY_B020_PIN,
+                DAILY_B020_PIN: DAILY_B021_PIN}
 # 保留手動選取 iOS／Recovery 與返回 Android 的操作時間。
 IOS_RETURN_SECONDS = 900
 RESUME_RETURN_SECONDS = 1800
@@ -135,7 +182,7 @@ def prepare_candidate(original, pin=PIN):
     phone.need(report["result"] == trial["result"] == "ok" and trial["action"] == "android" and
                report["candidate"]["sha256"] == phone.digest(image) == pin and
                (trial_pin == pin or (pin == PIN and trial_pin is None)) and
-               trial["validation"]["kernel_code_address"] == "0xa9210000" and
+               trial["validation"]["kernel_code_address"] == hex(0xa8000000 + report["candidate"]["linux_offset"] + 0x10000) and
                size == report["candidate"]["bytes"] and size < original.stat().st_size,
                "Only the verified RAM trial image may be installed")
     if pin == COUNTDOWN_PIN or pin in DAILY_PAYLOADS:

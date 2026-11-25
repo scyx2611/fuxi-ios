@@ -63,6 +63,39 @@ static uint64_t fuxi_gpu_abi_map_work() {return 0;}
 static bool queueOn;static int fuxi_gpu_abi_queue_enabled() {return queueOn;}
 static int submitRc=-1,submitBusy;static unsigned submitCount,submitCalls;static uint64_t submitLast;
 static int fuxi_gpu_abi_submit(const uint64_t *,const uint64_t *b,unsigned n,uint64_t *f) {submitCalls++;submitCount=n;submitLast=b[n-1];*f=submitCalls;if(submitBusy>0){submitBusy--;return 1;}return submitRc;}
+static unsigned vmCreates,lastVmClass,bbWaitPeaks;static int vmCreateRc,bbWaits,vmPoisoned;
+struct fuxi_gpu_vm { unsigned cls; int pid; };
+static fuxi_gpu_vm vmModels[16];
+struct PidQ { int pid; uint32_t bos,imp; uint64_t wired; } pidQs[8];
+static PidQ *findPidQ(int pid,bool create) {
+ if(pid<=0)return nullptr;
+ for(auto &q:pidQs) if(q.pid==pid)return &q;
+ if(!create)return nullptr;
+ for(auto &q:pidQs) if(!q.pid){q={pid,0,0,0};return &q;}
+ return nullptr;
+}
+static int fuxi_gpu_abi_vm_create(unsigned cls,int pid,const char *,struct fuxi_gpu_vm **out) {
+ unsigned idx=vmCreates%16; vmCreates++; lastVmClass=cls; vmModels[idx]={cls,pid}; *out=&vmModels[idx]; return vmCreateRc;
+}
+static int fuxi_gpu_abi_vm_poisoned(struct fuxi_gpu_vm *) {return vmPoisoned;}
+static int fuxi_gpu_abi_vm_reserve_quota(struct fuxi_gpu_vm *vm,uint32_t bos,uint64_t wired,uint32_t imp) {
+ if(!vm || vm->cls!=FG_CLASS_APP || vm->pid<=0)return 0;
+ PidQ *q=findPidQ(vm->pid,true); if(!q)return -1;
+ if(bos>FG_ABI_CLASS1_MAX_BOS-q->bos || imp>FG_ABI_CLASS1_MAX_IMPORTS-q->imp || wired>FG_ABI_CLASS1_MAX_WIRED_BYTES-q->wired)return -1;
+ q->bos+=bos; q->wired+=wired; q->imp+=imp; return 0;
+}
+static void fuxi_gpu_abi_vm_release_quota(struct fuxi_gpu_vm *vm,uint32_t bos,uint64_t wired,uint32_t imp) {
+ if(!vm || vm->cls!=FG_CLASS_APP || vm->pid<=0)return;
+ PidQ *q=findPidQ(vm->pid,false); if(!q)return;
+ q->bos=(q->bos>=bos)?(q->bos-bos):0; q->wired=(q->wired>=wired)?(q->wired-wired):0; q->imp=(q->imp>=imp)?(q->imp-imp):0;
+ if(!q->bos && !q->wired && !q->imp) q->pid=0;
+}
+static int fuxi_gpu_abi_vm_status(struct fuxi_gpu_vm *,uint64_t *f,uint64_t *s) {return fuxi_gpu_abi_status(f,s);}
+static int fuxi_gpu_abi_vm_map(struct fuxi_gpu_vm *,uint64_t va,uintptr_t pa,uint64_t n,unsigned p,unsigned wb,unsigned sh) {return fuxi_gpu_abi_map(va,pa,n,p,wb,sh);}
+static int fuxi_gpu_abi_vm_map_import(struct fuxi_gpu_vm *,uint64_t va,uintptr_t kva,uint64_t n,unsigned fl) {return fuxi_gpu_abi_map_import(va,kva,n,fl);}
+static int fuxi_gpu_abi_vm_submit(struct fuxi_gpu_vm *,const uint64_t *iova,const uint64_t *b,unsigned n,uint64_t *f) {return fuxi_gpu_abi_submit(iova,b,n,f);}
+static int fuxi_gpu_abi_vm_poll(struct fuxi_gpu_vm *,uint64_t f) {return fuxi_gpu_abi_poll(f);}
+static void fuxi_gpu_abi_vm_bb_wait(int d) {bbWaits+=d;if(bbWaits>0 && (unsigned)bbWaits>bbWaitPeaks)bbWaitPeaks=(unsigned)bbWaits;}
 static uint64_t mach_absolute_time() {return 0;}
 static constexpr unsigned NSEC_PER_MSEC=1000000;
 static void clock_interval_to_deadline(unsigned,unsigned,uint64_t *d) {*d=1;}
@@ -163,12 +196,14 @@ int main() {
  assert(!c.clientClose() && !c.wired_ && !descriptors && !maps);
  // Rounded allocation shares the wired quota with imported BOs; refusal
  // occurs before allocating backing storage, including corrupt accounting.
- c.live_=true;c.wired_=FG_ABI_MAX_WIRED_BYTES-16384;
- assert(!call(c,2,&alloc,&out) && c.wired_==FG_ABI_MAX_WIRED_BYTES);
+ c.live_=true;c.wired_=FG_ABI_COMPOSITOR_MAX_WIRED_BYTES-16384;
+ assert(!call(c,2,&alloc,&out) && c.wired_==FG_ABI_COMPOSITOR_MAX_WIRED_BYTES);
  assert(call(c,2,&alloc,&out)==kIOReturnNoResources);
- assert(!c.drop(c.bos_[0]));c.wired_=FG_ABI_MAX_WIRED_BYTES-4096;
+ assert(compWiredCur==FG_ABI_COMPOSITOR_MAX_WIRED_BYTES && compWiredPeak>=FG_ABI_COMPOSITOR_MAX_WIRED_BYTES);
+ assert(!c.drop(c.bos_[0]));c.wired_=FG_ABI_COMPOSITOR_MAX_WIRED_BYTES-4096;
+ assert(compWiredCur==FG_ABI_COMPOSITOR_MAX_WIRED_BYTES-16384);
  assert(call(c,2,&alloc,&out)==kIOReturnNoResources);
- c.wired_=FG_ABI_MAX_WIRED_BYTES+1;assert(call(c,2,&alloc,&out)==kIOReturnNoResources);c.wired_=0;
+ c.wired_=FG_ABI_COMPOSITOR_MAX_WIRED_BYTES+1;assert(call(c,2,&alloc,&out)==kIOReturnNoResources);c.wired_=0;compWiredCur=0;
  c.nextToken_=UINT32_MAX;assert(call(c,2,&alloc,&out)==kIOReturnNoResources);c.nextToken_=1;
  c.nextHandle_=UINT64_MAX;assert(call(c,2,&alloc,&out)==kIOReturnNoResources);c.nextHandle_=1;
  fail=15;assert(call(c,2,&alloc,&out)==kIOReturnNoMemory && !c.wired_ && !descriptors);
@@ -273,7 +308,74 @@ int main() {
    ccState=0;}
   inputOverride=0;submitRc=-1;b->iova=0;assert(!d.clientClose());
  }
- puts("PASS: actual methods 7/8 dispatch/errors/lengths, 1024 BO allocation/refusal/reuse/close, handle index after churn, 128-IB and legacy 416-byte submit records, shared wired quota, metadata refusal and CPU leases, cached-coherent BOs (device-info flag, gated alloc, WB map attrs, default-cache CPU token)");
+ // M9: Discovery-only calls (Query, GetDeviceInfo, GetStatus, GetTimestamp) never allocate a VM; first render call triggers lazy ensureVm().
+ {
+  Client dc;dc.live_=true;unsigned c0=vmCreates;
+  NativeAdrenoAbiParams qp{};NativeAdrenoAbiDeviceInfo di{};NativeAdrenoAbiStatus st{};NativeAdrenoAbiTimestamp ts2{};
+  assert(!call(dc,1,nullptr,&qp) && !call(dc,15,nullptr,&di) && !call(dc,8,nullptr,&st) && !call(dc,7,nullptr,&ts2));
+  assert(vmCreates==c0 && !dc.vm_);
+  NativeAdrenoAbiBoAlloc al{16384,12,0};NativeAdrenoAbiBoAllocReply out2{};
+  assert(!call(dc,2,&al,&out2) && vmCreates==c0+1 && dc.vm_ && lastVmClass==FG_CLASS_COMPOSITOR);
+  assert(!dc.clientClose() && !dc.vm_);
+ }
+ // M9: Class 0 (FG_CLASS_COMPOSITOR) allows 1280 MiB wired; Class 1 (FG_CLASS_APP) enforces 1024 BO / 1024 MiB wired / 128 import quotas.
+ {
+  Client comp;comp.live_=true;comp.setClientClass(FG_CLASS_COMPOSITOR);
+  assert(comp.maxBos_==FG_ABI_MAX_BOS && comp.maxWired_==(1280ULL<<20) && comp.maxImports_==FG_ABI_MAX_IMPORTS);
+  assert(!comp.clientClose());
+  const uint64_t savedCompCur=compWiredCur, savedCompPeak=compWiredPeak;
+  Client app;app.live_=true;app.setClientClass(FG_CLASS_APP);
+  assert(app.maxBos_==1024 && app.maxWired_==(1024ULL<<20) && app.maxImports_==128);
+  NativeAdrenoAbiBoAlloc one{4096,12,0};NativeAdrenoAbiBoAllocReply out2{};
+  for(unsigned i=0;i<FG_ABI_CLASS1_MAX_BOS;i++) assert(!call(app,2,&one,&out2));
+  assert(call(app,2,&one,&out2)==kIOReturnNoResources && app.liveBos_==1024);
+  assert(!app.clientClose() && !app.liveBos_);
+  app.live_=true;NativeAdrenoAbiBoImport imp{0x100000,16384};
+  for(unsigned i=0;i<FG_ABI_CLASS1_MAX_IMPORTS;i++) assert(!call(app,16,&imp,&out2));
+  assert(call(app,16,&imp,&out2)==kIOReturnNoResources && app.liveImports_==128);
+  assert(!app.clientClose() && !app.liveImports_);
+  app.live_=true;app.wired_=FG_ABI_CLASS1_MAX_WIRED_BYTES-16384;
+  assert(!call(app,2,&one,&out2) && app.wired_==FG_ABI_CLASS1_MAX_WIRED_BYTES);
+  uint64_t saved=out2.handle;NativeAdrenoAbiBoAllocReply outFail{};
+  assert(call(app,2,&one,&outFail)==kIOReturnNoResources);
+  assert(!app.drop(*app.find(saved)));app.wired_=0;
+  assert(!app.clientClose() && !app.wired_);
+  assert(compWiredCur==savedCompCur && compWiredPeak==savedCompPeak);
+ }
+ // M9 BUG-5: poisoned VM blocks BoAlloc, BoImport, BoMap, BoCpuMap, CreateQueue & Submit; per-PID Class 1 quota caps multi-connection totals at 1024 MiB.
+ {
+  Client p; p.live_=true; p.setClientClass(FG_CLASS_APP); p.pid_=777;
+  NativeAdrenoAbiBoAlloc al{16384,12,0}; NativeAdrenoAbiBoAllocReply alOut{};
+  assert(!call(p,2,&al,&alOut) && p.vm_);
+  NativeAdrenoAbiBoImport imp{0x100000,16384}; NativeAdrenoAbiBoAllocReply impOut{};
+  NativeAdrenoAbiBoMap mp{alOut.handle,0x20000000,3,0,2,0}; NativeAdrenoAbiBoMapReply mpOut{};
+  NativeAdrenoAbiBoCpuMap cm{alOut.handle}; NativeAdrenoAbiBoCpuMapReply cmOut{};
+  NativeAdrenoAbiQueue qReq{}; NativeAdrenoAbiQueueReply qOut{};
+  NativeAdrenoAbiSubmit sub{}; sub.buffer_count=1; sub.buffers[0]={alOut.handle,0x20000000,4096}; NativeAdrenoAbiSubmitReply subOut{};
+  vmPoisoned=1;
+  assert(call(p,2,&al,&alOut)==kIOReturnNotReady);
+  assert(call(p,16,&imp,&impOut)==kIOReturnNotReady);
+  assert(call(p,3,&mp,&mpOut)==kIOReturnNotReady);
+  assert(call(p,13,&cm,&cmOut)==kIOReturnNotReady);
+  assert(call(p,11,&qReq,&qOut)==kIOReturnNotReady);
+  assert(call(p,5,&sub,&subOut)==kIOReturnNotReady);
+  vmPoisoned=0;
+  assert(!p.clientClose());
+
+  Client a1,a2; a1.live_=true; a2.live_=true;
+  a1.setClientClass(FG_CLASS_APP); a2.setClientClass(FG_CLASS_APP);
+  a1.pid_=777; a2.pid_=777;
+  NativeAdrenoAbiBoAlloc big{256ULL<<20,12,0}; NativeAdrenoAbiBoAllocReply o1{},o1b{},o2{},o2b{},o3{};
+  assert(!call(a1,2,&big,&o1) && !call(a1,2,&big,&o1b));
+  assert(!call(a2,2,&big,&o2) && !call(a2,2,&big,&o2b));
+  assert(call(a2,2,&al,&o3)==kIOReturnNoResources);
+  NativeAdrenoAbiBoFree fr1{o1.handle},fr2{o2.handle};
+  assert(!call(a1,4,&fr1,nullptr));
+  assert(!call(a2,2,&al,&o3));
+  assert(!call(a2,4,&fr2,nullptr) && !a1.clientClose() && !a2.clientClose());
+ }
+ assert(bbWaits==0 && bbWaitPeaks>=1);
+ puts("PASS: actual methods 7/8 dispatch/errors/lengths, 1024 BO allocation/refusal/reuse/close, handle index after churn, 128-IB and legacy 416-byte submit records, shared wired quota, metadata refusal and CPU leases, cached-coherent BOs, M9 lazy VM & Class 1 quotas");
 }
 '''
 
@@ -284,6 +386,7 @@ HANDLE_STUBS = r'''
 #define IONewZero(T,n) (new (std::nothrow) T[n]())
 #define IODelete(p,T,n) delete[] (p)
 static unsigned peakBos;
+static uint64_t compWiredCur, compWiredPeak;
 #include "FuxiHandleIndex.h"
 '''
 
@@ -291,6 +394,8 @@ static unsigned peakBos;
 def main():
     source = (ROOT/'xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp').read_text()
     prefix = host.PREFIX.replace('#include <cstdio>', '#include <cstdio>\n#include <cstdlib>').replace('static void cboStat(int,uint64_t){}', '')\
+        .replace('static int fuxi_gpu_abi_vm_reserve_quota(struct fuxi_gpu_vm *,uint32_t,uint64_t,uint32_t) { return 0; }\n', '')\
+        .replace('static void fuxi_gpu_abi_vm_release_quota(struct fuxi_gpu_vm *,uint32_t,uint64_t,uint32_t) {}\n', '')\
         .replace(' assert(va==0x20000000 && bytes==32768);', ' assert((va==0x20000000 && bytes==32768) || (va>=0x20100000 && va<0x20300000)); /* the latter: cached-BO block */')
     start = prefix.index('struct IOBufferMemoryDescriptor {')
     end = prefix.index('static int fuxi_gpu_abi_unmap', start)
@@ -309,16 +414,20 @@ def main():
     # The real waitUnlocked must release the client lock around the sleep loop.
     wait += ' IOReturn spin(uint64_t,uint64_t,uint64_t *,bool *) {spins++;waits++;lastSpinDepth=lockDepth;if(spinKill)*spinKill=false;return 0;}\n'
     prefix = prefix.replace('static void IOLockLock(int *){}','static int lockDepth;static void IOLockLock(int *){lockDepth++;}').replace('static void IOLockUnlock(int *){}','static void IOLockUnlock(int *){lockDepth--;}')
+    set_class_start = source.index(' void setClientClass(')
+    set_class = source[set_class_start:source.index(' bool initWithTask(')]
+    ensure_vm = host.method(source, 'ensureVm')
     model = prefix+EXTRA+HANDLE_STUBS+helper+'struct Client {\n'+bo+r'''
  /* The kernel allocates the table in initWithTask; the model owns it inline. */
  Bo storage_[MaxBos]={};
  Client(){bos_={storage_,storage_+MaxBos};assert(index_.allocate());}
  ~Client(){index_.release();}
- task_t task_=7;uint64_t nextHandle_=1,wired_=0,lastFence_=0,firstFence_=0,submitAt_[16]={};
+ task_t task_=7;struct fuxi_gpu_vm *vm_=nullptr;char procName_[32]={};
+ uint64_t nextHandle_=1,wired_=0,lastFence_=0,firstFence_=0,submitAt_[16]={};
  uint32_t nextToken_=1;bool queues_[8]={true};
  int *lock_=&clientLock;bool live_=true;int pid_=0;
  void terminate(){} void result(){}
- '''+find+wait+''.join(host.method(source, n) for n in ('allocate', 'importHost', 'drop', 'run'))+memory+close+external+TEST
+ '''+set_class+ensure_vm+find+wait+''.join(host.method(source, n) for n in ('allocate', 'importHost', 'drop', 'run'))+memory+close+external+TEST
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp)/'k1.cpp';path.write_text(model)
         exe = path.with_suffix('')

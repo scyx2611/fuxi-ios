@@ -31,6 +31,7 @@
 #include <sys/systm.h>
 #include <sys/errno.h>
 #include <sys/kauth.h>
+#include <sys/proc.h>
 #include <sys/sysctl.h>
 #include <kern/clock.h>
 #include <kern/locks.h>
@@ -42,12 +43,15 @@
 #include <pexpert/device_tree.h>
 #include "sweet_spmi_bus.h"
 #include "fuxi_key_state.h"
+#include "fuxi_rtc_persist.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 extern void sweet_hid_key_at(int key, int down, uint64_t timestamp);
 extern int sweet_hid_touch_mode(void);
 extern void fuxi_perf_input(void);
+extern int fuxi_ufs_persist_find(uint64_t *first, uint64_t *blocks);
+extern int fuxi_ufs_persist_read(uint64_t rel_lba, uint32_t blocks, void *dst);
 void fuxi_keys_init(void);
 bool fuxi_keys_touch_wake(void);
 
@@ -77,10 +81,27 @@ static const char *const fk_names[FUXI_KEYS] = {"power", "volume-up", "volume-do
 
 static LCK_GRP_DECLARE(fk_lck_grp, "fuxi-keys");
 static LCK_MTX_DECLARE(fk_hid_lock, &fk_lck_grp);
+static LCK_MTX_DECLARE(fk_rtc_lock, &fk_lck_grp);
 static struct fuxi_key_arbiter fk_arb;        /* fk_hid_lock */
 static uint64_t fk_tap_last;                  /* fk_hid_lock */
 static thread_call_t fk_inject_call;
 static int fk_inject_chan;
+static struct fuxi_ext4_ro fk_persist_ext4;
+static volatile uint32_t fk_rtc_ready;
+static uint16_t fk_rtc_apid = FK_NO_APID;
+static uint32_t fk_rtc_boot_raw;
+static uint32_t fk_rtc_boot_source;
+static uint32_t fk_rtc_boot_flags;
+static uint64_t fk_rtc_boot_offset_ms;
+static uint64_t fk_rtc_boot_epoch_ms;
+static volatile uint32_t fk_rtc_info_logged;
+
+static int
+fk_persist_read_4k(void *context, uint64_t lba_4k, void *dst_4k)
+{
+	(void)context;
+	return fuxi_ufs_persist_read(lba_4k, 1u, dst_4k) ? 0 : EIO;
+}
 
 static uint64_t
 fk_ms(uint64_t abs)
@@ -292,39 +313,150 @@ fk_rtc_set_clock(void)
 		printf("FUXI RTC: read failed apid=%u st=%#x\n", apid, fk_last_status);
 		return;
 	}
-	unsigned offset = 0;
-	const char *from = "none";
-	if (PE_parse_boot_argn("fuxirtcoffset", &offset, sizeof(offset))) {
-		from = "boot-arg";
-	} else {
-		/* 日常命令列已滿 607 字元：同一個量測值改放 ADT /chosen（4-byte little-endian）。 */
-		DTEntry chosen;
+	unsigned boot_offset = 0;
+	bool has_boot_arg = PE_parse_boot_argn("fuxirtcoffset", &boot_offset, sizeof(boot_offset));
+	uint32_t adt_offset = 0;
+	bool has_adt = false;
+	uint32_t persist_mode = 0;
+	bool has_persist_arg = PE_parse_boot_argn("fuxirtcpersist", &persist_mode, sizeof(persist_mode));
+	DTEntry chosen;
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess) {
 		void *property = NULL;
 		unsigned length = 0;
-		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
-		    SecureDTGetProperty(chosen, "fuxi,rtc-offset", &property, &length) == kSuccess &&
+		if (SecureDTGetProperty(chosen, "fuxi,rtc-offset", &property, &length) == kSuccess &&
 		    property && length == sizeof(uint32_t)) {
-			const uint8_t *b = property;
-			offset = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-			from = "adt";
+			const uint8_t *bytes = property;
+			adt_offset = fuxi_ext4_le32(bytes);
+			has_adt = true;
+		}
+		if (!has_persist_arg &&
+		    SecureDTGetProperty(chosen, "fuxi,rtc-persist", &property, &length) == kSuccess &&
+		    property && length == sizeof(uint32_t)) {
+			const uint8_t *bytes = property;
+			persist_mode = fuxi_ext4_le32(bytes);
 		}
 	}
-	uint64_t epoch = (uint64_t)secs + (uint64_t)offset;
-	printf("FUXI RTC: apid=%u/ee%u raw %02x %02x %02x %02x counter=%u offset=%u (%s) epoch=%llu\n",
-	    apid, owner, raw[0], raw[1], raw[2], raw[3], secs, offset, from,
-	    (unsigned long long)epoch);
-	/* 2023-11 .. 2039-09: a blank or bogus RTC must not move the clock. */
-	if (epoch < 1700000000ull || epoch > 2200000000ull) {
-		printf("FUXI RTC: epoch %llu outside sanity window; clock left alone\n",
-		    (unsigned long long)epoch);
-		return;
+	bool persist_enabled = (persist_mode == 1u);
+	bool persist_ok = false;
+	struct fuxi_rtc_persist_result persist_res = {0};
+	if (!has_boot_arg && persist_enabled) {
+		uint64_t persist_first = 0u, persist_blocks = 0u;
+		if (fuxi_ufs_persist_find(&persist_first, &persist_blocks)) {
+			int persist_rc = fuxi_rtc_persist_read_ats(&fk_persist_ext4, persist_blocks,
+			    fk_persist_read_4k, NULL, &persist_res);
+			if (persist_rc == FUXI_EXT4_OK) {
+				persist_ok = true;
+				printf("FUXI RTC: persist LUN 0 lba=0x%llx blocks=%llu /time/%s=%llu ms dirty=%u\n",
+				    (unsigned long long)persist_first, (unsigned long long)persist_blocks,
+				    persist_res.file_name, (unsigned long long)persist_res.offset_ms,
+				    persist_res.needs_recovery ? 1u : 0u);
+			} else {
+				printf("FUXI RTC: persist /time/ats_2 unavailable (%s, rc=%d); falling back to ADT\n",
+				    fuxi_ext4_errstr(persist_rc), persist_rc);
+			}
+		} else {
+			printf("FUXI RTC: persist partition unavailable; falling back to ADT\n");
+		}
 	}
-	clock_set_calendar_microtime((clock_sec_t)epoch, 0);
-	clock_sec_t now_s = 0;
-	clock_usec_t now_us = 0;
-	clock_get_calendar_microtime(&now_s, &now_us);
-	printf("FUXI RTC: clock set, now=%llu.%06u\n",
-	    (unsigned long long)now_s, (unsigned)now_us);
+	struct fuxi_rtc_selection sel;
+	fuxi_rtc_select_offset(secs, has_boot_arg, (uint32_t)boot_offset,
+	    persist_enabled, persist_ok, persist_res.offset_ms, persist_res.file_name,
+	    has_adt, adt_offset, &sel);
+	if (sel.persist_rejected) {
+		printf("FUXI RTC: persist /time/%s=%llu ms outside sanity window; falling back to ADT\n",
+		    persist_res.file_name, (unsigned long long)persist_res.offset_ms);
+	}
+	printf("FUXI RTC: apid=%u/ee%u raw %02x %02x %02x %02x counter=%u offset=%llu (%s) epoch=%llu\n",
+	    apid, owner, raw[0], raw[1], raw[2], raw[3], secs,
+	    (unsigned long long)sel.offset_s, sel.source,
+	    (unsigned long long)sel.epoch_s);
+	uint32_t bflags = FUXI_RTC_FLAG_VALID_APID;
+	if (persist_enabled) {
+		bflags |= FUXI_RTC_FLAG_PERSIST_ENABLED;
+	}
+	if (sel.persist_rejected) {
+		bflags |= FUXI_RTC_FLAG_PERSIST_REJECTED;
+	}
+	uint64_t boot_offset_ms = 0u;
+	uint64_t boot_epoch_ms = 0u;
+	uint32_t boot_src = FUXI_RTC_SRC_NONE;
+	/* 2023-11 .. 2039-09: a blank or bogus RTC must not move the clock. */
+	if (sel.set_clock) {
+		clock_set_calendar_microtime((clock_sec_t)sel.epoch_s, (clock_usec_t)sel.epoch_us);
+		clock_sec_t now_s = 0;
+		clock_usec_t now_us = 0;
+		clock_get_calendar_microtime(&now_s, &now_us);
+		printf("FUXI RTC: clock set, now=%llu.%06u\n",
+		    (unsigned long long)now_s, (unsigned)now_us);
+		bflags |= FUXI_RTC_FLAG_CLOCK_SET;
+		boot_src = fuxi_rtc_source_code(sel.source);
+		boot_offset_ms = sel.offset_s * 1000ull + (uint64_t)(sel.epoch_us / 1000u);
+		boot_epoch_ms = sel.epoch_s * 1000ull + (uint64_t)(sel.epoch_us / 1000u);
+	} else {
+		printf("FUXI RTC: epoch %llu outside sanity window; clock left alone\n",
+		    (unsigned long long)sel.epoch_s);
+	}
+	fk_rtc_apid = apid;
+	fk_rtc_boot_raw = secs;
+	fk_rtc_boot_source = boot_src;
+	fk_rtc_boot_flags = bflags;
+	fk_rtc_boot_offset_ms = boot_offset_ms;
+	fk_rtc_boot_epoch_ms = boot_epoch_ms;
+	__atomic_store_n(&fk_rtc_ready, 1u, __ATOMIC_RELEASE);
+}
+
+static int
+fk_rtc_read_live(uint32_t *secs_out)
+{
+	if (!__atomic_load_n(&fk_rtc_ready, __ATOMIC_ACQUIRE) || fk_rtc_apid == FK_NO_APID) {
+		return ENODEV;
+	}
+	uint8_t raw[4] = {0};
+	uint32_t secs = 0;
+	lck_mtx_lock(&fk_rtc_lock);
+	bool ok = fk_rtc_read_raw(fk_rtc_apid, &secs, raw);
+	lck_mtx_unlock(&fk_rtc_lock);
+	if (!ok) {
+		return EIO;
+	}
+	*secs_out = secs;
+	return 0;
+}
+
+static int
+fk_sysctl_rtc_raw SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	if (req->newptr != USER_ADDR_NULL) {
+		return EPERM;
+	}
+	uint32_t raw_now = 0;
+	int err = fk_rtc_read_live(&raw_now);
+	return err ? err : SYSCTL_OUT(req, &raw_now, sizeof(raw_now));
+}
+
+static int
+fk_sysctl_rtc_info SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	if (req->newptr != USER_ADDR_NULL) {
+		return EPERM;
+	}
+	uint32_t raw_now = 0;
+	int err = fk_rtc_read_live(&raw_now);
+	if (err) {
+		return err;
+	}
+	struct fuxi_rtc_info info;
+	fuxi_rtc_fill_info(&info, raw_now, fk_rtc_boot_raw, (uint32_t)fk_rtc_apid,
+	    fk_rtc_boot_source, fk_rtc_boot_flags, fk_rtc_boot_offset_ms, fk_rtc_boot_epoch_ms, true);
+	if (__atomic_exchange_n(&fk_rtc_info_logged, 1u, __ATOMIC_ACQ_REL) == 0u) {
+		char pname[32];
+		proc_selfname(pname, (int)sizeof(pname));
+		printf("FUXI RTC: sysctl info first read by %s raw=%u boot=%u src=%u flags=%#x\n",
+		    pname, info.raw_now, info.raw_boot, info.boot_source, info.flags);
+	}
+	return SYSCTL_OUT(req, &info, sizeof(info));
 }
 
 static bool
@@ -1106,6 +1238,10 @@ SYSCTL_PROC(_debug_fuxikeys, OID_AUTO, inject, CTLTYPE_INT | CTLFLAG_RW | CTLFLA
     0, 0, fk_sysctl_inject, "I", "inject a key event (root, boot-arg fuxikeyinject=1)");
 SYSCTL_PROC(_debug_fuxikeys, OID_AUTO, held, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, fk_sysctl_held, "I", "keys held as HID sees them, and by which source");
+SYSCTL_PROC(_kern, OID_AUTO, fuxirtc_raw, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
+    0, 0, fk_sysctl_rtc_raw, "IU", "PMK8550 rtc@6100 raw counter seconds (read-only)");
+SYSCTL_PROC(_kern, OID_AUTO, fuxirtc_info, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
+    0, 0, fk_sysctl_rtc_info, "S,fuxi_rtc_info", "Fuxi PMIC raw RTC live counter and boot metadata (read-only)");
 
 /*
  * Called by bsd/dev/fuxi_touch.c for a new contact while the display is off.

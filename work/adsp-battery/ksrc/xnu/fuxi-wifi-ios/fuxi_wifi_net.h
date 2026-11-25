@@ -58,8 +58,14 @@ bool fuxi_wifi_net_byte_counts(uint64_t *received, uint64_t *sent);
 /* Frames can pass now / can no longer pass. */
 void fuxi_wifi_net_link_state(bool up);
 
+/* Optional SoftAP BSD interface (ap1), enabled when ADT /chosen fuxi,wifi-ap is set. */
+bool fuxi_wifi_ap_net_attach(const struct fuxi_wifi_net_link *link);
+void fuxi_wifi_ap_net_input(const uint8_t *frame, size_t length);
+void fuxi_wifi_ap_net_link_state(bool up);
+
 /* an Apple80211 request (SIOCGA80211, SIOCSA80211) for the interface of a radio: fuxi_wifi_apple80211.c */
 errno_t fuxi_wifi_apple80211_ioctl(u_long command, void *data);
+void fuxi_wifi_apple80211_ap_bridge_ready(bool ready);
 #endif /* KERNEL */
 
 #endif /* _SYS_FUXI_WIFI_NET_H_ */

@@ -28,6 +28,7 @@ _Static_assert(sizeof(struct apple80211req) == 40 && offsetof(struct apple80211r
 #define CHANNEL_5GHZ            0x10u
 #define CHANNEL_ACTIVE          0x80u           /* the radio may send there */
 #define CHANNEL_DFS             0x100u
+#define CHANNEL_80MHZ           0x400u
 
 struct apple80211_channel {
 	uint32_t version, channel, flags;
@@ -149,6 +150,116 @@ _Static_assert(sizeof(struct apple80211_scan_request) == 5456 && offsetof(struct
 _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct apple80211_scan_result, ssid_length) == 0x60 &&
     offsetof(struct apple80211_scan_result, age_ms) == 0x84 && offsetof(struct apple80211_scan_result, elements) == 0x8c,
     "a scan's result as iOS 16.5 has it");
+
+/* ---- SoftAP (Personal Hotspot / ap1) layouts verified against iOS 16.7.16 20H392 IO80211/wifid/hostapd ---- */
+
+/* HOST_AP_MODE (25): 1500 bytes (0x5dc) */
+struct apple80211_apmode_data {
+	uint32_t version;
+	uint16_t mode;                  /* 2: SoftAP, 0x200: hidden SSID */
+	uint16_t auth_lower;
+	uint16_t auth_upper;            /* 0x8: WPA2-PSK */
+	uint16_t unused_0;
+	struct apple80211_channel channel;
+	uint32_t ssid_len;
+	uint8_t  ssid[32];
+	uint32_t key_version;
+	uint32_t key_len;
+	uint32_t key_cipher;
+	uint16_t key_flags;
+	uint16_t key_index;
+	uint8_t  key[64];
+	uint8_t  unused_1[0xd0 - 0x8c];
+	uint32_t phy_mode;
+	uint8_t  unused_2[0x1d8 - 0xd4];
+	uint32_t ie_len;
+	uint8_t  ie[1024];
+};
+
+/* CIPHER_KEY (3) and KEY_RSC (78): 148 bytes (0x94); cipher 0=NONE, 3=TKIP, 5=AES_CCM/IGTK */
+struct apple80211_key {
+	uint32_t version;
+	uint32_t key_len;
+	uint32_t key_cipher_type;
+	uint16_t key_flags;
+	uint16_t key_index;
+	uint8_t  key[64];
+	uint32_t key_rsc_len;
+	uint8_t  key_rsc[8];
+	uint8_t  key_ea[6];
+	uint8_t  unused[0x94 - 0x62];
+};
+
+/* STA_IE_LIST (73): 1040 bytes (0x410); hostapd expects RSN IE (0x30, len, ...) directly at +0x10 */
+struct apple80211_sta_ie_list {
+	uint32_t version;
+	uint8_t  mac[6];
+	uint8_t  unused[2];
+	uint32_t ie_len;
+	uint8_t  ie[1024];
+};
+
+/* STA_AUTHORIZE (74): 20 bytes (0x14) */
+struct apple80211_sta_authorize {
+	uint32_t version;
+	uint32_t authorize;
+	uint8_t  mac[6];
+	uint8_t  unused[6];
+};
+
+/* STA_DISASSOCIATE (75) and STA_DEAUTH (76): 16 bytes (0x10) */
+struct apple80211_sta_deauth {
+	uint32_t version;
+	uint32_t reason;
+	uint8_t  mac[6];
+	uint8_t  unused[2];
+};
+
+/* STATION_LIST (42): 2056 bytes (0x808) */
+struct apple80211_station_entry {
+	uint32_t version;
+	uint8_t  mac[6];
+	uint8_t  unused[2];
+	uint32_t flags;
+};
+
+struct apple80211_station_list {
+	uint32_t version;
+	uint32_t count;
+	struct apple80211_station_entry stations[128];
+};
+
+_Static_assert(sizeof(struct apple80211_apmode_data) == 1500 &&
+    offsetof(struct apple80211_apmode_data, channel) == 0x0c &&
+    offsetof(struct apple80211_apmode_data, ssid_len) == 0x18 &&
+    offsetof(struct apple80211_apmode_data, key_len) == 0x40 &&
+    offsetof(struct apple80211_apmode_data, key) == 0x4c &&
+    offsetof(struct apple80211_apmode_data, phy_mode) == 0xd0 &&
+    offsetof(struct apple80211_apmode_data, ie_len) == 0x1d8 &&
+    offsetof(struct apple80211_apmode_data, ie) == 0x1dc,
+    "HOST_AP_MODE payload as iOS 16.7.16 IO80211/wifid sends it");
+_Static_assert(sizeof(struct apple80211_key) == 148 &&
+    offsetof(struct apple80211_key, key_index) == 0x0e &&
+    offsetof(struct apple80211_key, key) == 0x10 &&
+    offsetof(struct apple80211_key, key_rsc) == 0x54 &&
+    offsetof(struct apple80211_key, key_ea) == 0x5c,
+    "CIPHER_KEY/KEY_RSC payload as iOS 16.7.16 hostapd uses it");
+_Static_assert(sizeof(struct apple80211_sta_ie_list) == 1040 &&
+    offsetof(struct apple80211_sta_ie_list, mac) == 0x04 &&
+    offsetof(struct apple80211_sta_ie_list, ie_len) == 0x0c &&
+    offsetof(struct apple80211_sta_ie_list, ie) == 0x10,
+    "STA_IE_LIST payload as iOS 16.7.16 hostapd reads it");
+_Static_assert(sizeof(struct apple80211_sta_authorize) == 20 &&
+    offsetof(struct apple80211_sta_authorize, mac) == 0x08,
+    "STA_AUTHORIZE payload as iOS 16.7.16 hostapd sends it");
+_Static_assert(sizeof(struct apple80211_sta_deauth) == 16 &&
+    offsetof(struct apple80211_sta_deauth, mac) == 0x08,
+    "STA_DEAUTH/STA_DISASSOCIATE payload as iOS 16.7.16 hostapd sends it");
+_Static_assert(sizeof(struct apple80211_station_list) == 2056 &&
+    offsetof(struct apple80211_station_list, stations) == 0x08 &&
+    offsetof(struct apple80211_station_entry, mac) == 0x04 &&
+    offsetof(struct apple80211_station_entry, flags) == 0x0c,
+    "STATION_LIST payload as iOS 16.7.16 IO80211 reads it");
 
 
 #endif

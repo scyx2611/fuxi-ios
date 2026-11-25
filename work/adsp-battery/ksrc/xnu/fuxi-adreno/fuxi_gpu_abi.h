@@ -55,6 +55,23 @@ int fuxi_gpu_irq_sleep(uint32_t seq0, uint64_t fence, unsigned us);
 enum { FG_IRQ_N, FG_IRQ_EMPTY, FG_IRQ_FOREIGN, FG_IRQ_WAKES, FG_IRQ_TIMEOUTS, FG_IRQ_RACES, FG_IRQ_MASKFIX, FG_IRQ_WRITTEN, FG_IRQ_STATS };
 /* Counters and why it was masked (1 empty run, 2 burst, 3 isolation, 4 no delivery); returns 0 off, 1 armed, 2 attach failed, 3 masked, 4 attaching. */
 unsigned fuxi_gpu_irq_stats(uint64_t s[FG_IRQ_STATS], unsigned *why);
+/* Per-process VM lifecycle and isolated GPU operations (M9 multi-client). */
+struct fuxi_gpu_vm;
+int fuxi_gpu_abi_vm_create(unsigned client_class, int pid, const char *name, struct fuxi_gpu_vm **vm_out);
+void fuxi_gpu_abi_vm_destroy(struct fuxi_gpu_vm *vm);
+int fuxi_gpu_abi_vm_map(struct fuxi_gpu_vm *vm, uint64_t iova, uintptr_t source, uint64_t bytes,
+    unsigned permissions, unsigned writeback, unsigned shareability);
+int fuxi_gpu_abi_vm_map_import(struct fuxi_gpu_vm *vm, uint64_t iova, uintptr_t source, uint64_t bytes, unsigned permissions);
+int fuxi_gpu_abi_vm_unmap(struct fuxi_gpu_vm *vm, uint64_t iova, uint64_t bytes);
+int fuxi_gpu_abi_vm_submit(struct fuxi_gpu_vm *vm, const uint64_t *iovas, const uint64_t *sizes,
+    unsigned count, uint64_t *fence);
+int fuxi_gpu_abi_vm_poll(struct fuxi_gpu_vm *vm, uint64_t fence);
+int fuxi_gpu_abi_vm_status(struct fuxi_gpu_vm *vm, uint64_t *faults, uint64_t *suspends);
+int fuxi_gpu_abi_vm_poisoned(struct fuxi_gpu_vm *vm);
+int fuxi_gpu_abi_vm_reserve_quota(struct fuxi_gpu_vm *vm, uint32_t bos, uint64_t wired, uint32_t imports);
+void fuxi_gpu_abi_vm_release_quota(struct fuxi_gpu_vm *vm, uint32_t bos, uint64_t wired, uint32_t imports);
+void fuxi_gpu_abi_vm_bb_wait(int delta);
+int fuxi_gpu_irq_sleep_vm(struct fuxi_gpu_vm *vm, uint32_t seq0, uint64_t fence, unsigned us);
 #ifdef __cplusplus
 }
 #endif

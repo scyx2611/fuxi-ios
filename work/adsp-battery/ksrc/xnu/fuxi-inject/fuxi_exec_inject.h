@@ -18,6 +18,9 @@
  *   bit 5 (32) /usr/sbin/BlueTool: the library answers com.apple.BlueTool for the WCN7850 that
  *              fuxi,bt=5 has booted (the stock tool only knows Broadcom); FuxiBlueTool.c.
  *   bit 6 (64) /usr/sbin/bluetoothd: diagnostics and the Qualcomm controller hooks.
+ *   bit 7 (128) VoiceMemos / voicememod: recording diagnostics (FuxiBluetoothLog.c).
+ *   bit 8 (256) /usr/libexec/timed: Plan B iOS self-persisted RTC offset (FuxiRtcPersist.c).
+ *   bit 9 (512) assistantd / assistant_service / corespeechd / kbd: dictation diagnostics (FuxiBluetoothLog.c).
  *
  * dyld honours it because the H1 AMFI dyld policy answer (patch 0103, request 0x5a) allows everything,
  * including a library that is missing. The variable follows the program's own environment.
@@ -30,9 +33,13 @@
 #define FUXI_INJECT_WIFI_PROMPT 16u
 #define FUXI_INJECT_BLUETOOL    32u
 #define FUXI_INJECT_BLUETOOTHD  64u
+#define FUXI_INJECT_VOICEMEMOS  128u
+#define FUXI_INJECT_TIMED       256u
+#define FUXI_INJECT_DICTATION   512u
 #define FUXI_INJECT_ALL         (FUXI_INJECT_APPS | FUXI_INJECT_SPRINGBOARD | FUXI_INJECT_MEDIASERVER | \
                                 FUXI_INJECT_WIFI_AUDIT | FUXI_INJECT_WIFI_PROMPT | FUXI_INJECT_BLUETOOL | \
-                                FUXI_INJECT_BLUETOOTHD)
+                                FUXI_INJECT_BLUETOOTHD | FUXI_INJECT_VOICEMEMOS | FUXI_INJECT_TIMED | \
+                                FUXI_INJECT_DICTATION)
 #define FUXI_INJECT_APP_LIB     "/usr/local/lib/fuxi/libfuxi-app.dylib"
 #define FUXI_INJECT_SB_LIB      "/usr/local/lib/fuxi/libfuxi-sb.dylib"
 #define FUXI_INJECT_ENV_MAX     128
@@ -80,8 +87,28 @@ fuxi_inject_library(unsigned mode, const char *path, const char *name)
 		return (mode & FUXI_INJECT_BLUETOOTHD) != 0 && strcmp(path, "/usr/sbin/bluetoothd") == 0 ?
 		       FUXI_INJECT_SB_LIB : NULL;
 	}
+	if (strcmp(name, "timed") == 0) {
+		return (mode & FUXI_INJECT_TIMED) != 0 && strcmp(path, "/usr/libexec/timed") == 0 ?
+		       FUXI_INJECT_SB_LIB : NULL;
+	}
 	if ((mode & FUXI_INJECT_WIFI_PROMPT) && strcmp(name, "Preferences") == 0 &&
 	    strcmp(path, "/Applications/Preferences.app/Preferences") == 0) {
+		return FUXI_INJECT_SB_LIB;
+	}
+	if ((mode & FUXI_INJECT_VOICEMEMOS) != 0 &&
+	    ((strcmp(name, "VoiceMemos") == 0 && strcmp(path, "/Applications/VoiceMemos.app/VoiceMemos") == 0) ||
+	     (strcmp(name, "voicememod") == 0 &&
+	      strcmp(path, "/System/Library/PrivateFrameworks/VoiceMemos.framework/Support/voicememod") == 0))) {
+		return FUXI_INJECT_SB_LIB;
+	}
+	if ((mode & FUXI_INJECT_DICTATION) != 0 &&
+	    ((strcmp(name, "assistantd") == 0 &&
+	      strcmp(path, "/System/Library/PrivateFrameworks/AssistantServices.framework/assistantd") == 0) ||
+	     (strcmp(name, "assistant_service") == 0 &&
+	      strcmp(path, "/System/Library/PrivateFrameworks/AssistantServices.framework/assistant_service") == 0) ||
+	     (strcmp(name, "corespeechd") == 0 &&
+	      strcmp(path, "/System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd") == 0) ||
+	     (strcmp(name, "kbd") == 0 && strcmp(path, "/System/Library/TextInput/kbd") == 0))) {
 		return FUXI_INJECT_SB_LIB;
 	}
 	return (mode & FUXI_INJECT_APPS) != 0 && fuxi_inject_is_app(path) ? FUXI_INJECT_APP_LIB : NULL;

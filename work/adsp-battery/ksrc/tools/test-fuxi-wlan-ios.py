@@ -77,6 +77,8 @@ bool fuxi_wifi_sta_powered(void) { return test_powered; }
 bool fuxi_wifi_sta_power_off_pending(void) { return test_off_pending; }
 static unsigned test_ux;                        /* ADT fuxi,wifi-ux；bootstrap() 時讀進 wli.ux */
 unsigned fuxi_wifi_ux(void) { return test_ux; }
+static bool test_ap_enabled;
+bool fuxi_wifi_ap_enabled(void) { return test_ap_enabled; }
 int fuxi_wifi_sta_ask_power(bool on) { (void)on; return 0; }
 struct fuxi_wifi_sta_scan;
 struct fuxi_wifi_sta_bss;
@@ -136,6 +138,25 @@ int nw_wifi_tx(const uint8_t *frame, size_t length) {
 static unsigned phy_reads;
 void nw_wifi_link_state(char *text,int size) { phy_reads++; snprintf(text,(size_t)size,"fixture rate"); }
 bool fuxi_wifi_ios_native_ready(void) { return ready; }
+static unsigned ap_start_calls, ap_stop_calls;
+static int ap_start_status;
+void nw_wifi_ap_set_events(const struct nw_ap_events *ev) { (void)ev; }
+int nw_wifi_ap_start(const struct nw_ap_config *cfg, uint32_t *freq) {
+    (void)cfg; ap_start_calls++; if (freq) *freq = 2437; return ap_start_status;
+}
+int nw_wifi_ap_stop(void) { ap_stop_calls++; return 0; }
+int nw_wifi_ap_set_key(const uint8_t *mac, uint8_t idx, uint32_t cipher,
+    const uint8_t *key, size_t klen, const uint8_t *seq, size_t slen, int del) {
+    (void)mac; (void)idx; (void)cipher; (void)key; (void)klen; (void)seq; (void)slen; (void)del; return 0;
+}
+int nw_wifi_ap_get_key_seq(const uint8_t *mac, uint8_t idx, uint8_t out[8]) {
+    (void)mac; (void)idx; memset(out, 0, 8); return 0;
+}
+int nw_wifi_ap_sta_authorize(const uint8_t *mac, int auth) { (void)mac; (void)auth; return 0; }
+int nw_wifi_ap_sta_deauth(const uint8_t *mac, uint16_t reason, int disassoc) {
+    (void)mac; (void)reason; (void)disassoc; return 0;
+}
+int nw_wifi_ap_tx(const uint8_t *eth, size_t len) { (void)eth; (void)len; return 0; }
 '''
 
 TEST = r'''
@@ -171,6 +192,7 @@ static void reset_peer(void) {
     memset(&wli_backend,0,sizeof(wli_backend)); memset(&wli_target,0,sizeof(wli_target));
     wli.session = 9; wli_bss_count = wli_channel_count = 0; wli_input = NULL; events = NULL;
     captured_length = 0; power_calls = attachments = 0; fake_now = 1;
+    ap_start_calls = ap_stop_calls = 0; ap_start_status = 0;
 }
 static size_t header(uint8_t *bytes, unsigned kind, unsigned operation, uint64_t generation) {
     memset(bytes,0,MESSAGE);
@@ -616,6 +638,20 @@ static void event_lost(const uint8_t *bssid,unsigned reason,unsigned local) {
     length=wli_put(bytes,length,3,bssid,6); length=put32(bytes,length,8,reason);
     length=put32(bytes,length,39,local); assert(!deliver(bytes,length));
 }
+static void event_eapol_status(unsigned acked) {
+    uint8_t bytes[MESSAGE], frame[14]={0};
+    size_t length=header(bytes,3,0x107,wli.generation);
+    length=wli_put(bytes,length,26,frame,sizeof(frame));
+    length=put32(bytes,length,41,acked);
+    assert(!deliver(bytes,length));
+}
+static void event_power(bool on,uint64_t generation) {
+    uint8_t bytes[MESSAGE], value[4]={0};
+    size_t length=header(bytes,3,0x10a,generation);
+    fwc_write(value,on,4);
+    length=wli_put(bytes,length,32,value,4);
+    assert(!deliver(bytes,length));
+}
 static void ask_join(const char *ssid,const char *passphrase,int security) {
     memset(&caller_join,0,sizeof(caller_join));
     caller_join.ssid_length=(uint8_t)strlen(ssid); memcpy(caller_join.ssid,ssid,caller_join.ssid_length);
@@ -929,6 +965,346 @@ static void keep_tests(void) {
     test_ux=0; wli_bss_count=0;
     puts("PASS fuxi,wifi-ux bit 2: same access point kept, unheard rescan kept, better one switched, default leaves");
 }
+static atomic_bool ap_starter_done;
+static int ap_starter_result;
+static void *ap_starter_thread(void *context) {
+    (void)context;
+    struct fuxi_wifi_ap_config cfg={0};
+    memcpy(cfg.ssid,"Hotspot",7); cfg.ssid_len=7; cfg.wpa2=1;
+    uint32_t freq=0;
+    ap_starter_result=wli_ap_start_op(&cfg,&freq);
+    atomic_store(&ap_starter_done,true);
+    return NULL;
+}
+static void softap_recovery_tests(void) {
+    struct fuxi_wifi_ap_config cfg={0};
+    memcpy(cfg.ssid,"Hotspot",7); cfg.ssid_len=7; cfg.wpa2=1;
+    uint32_t freq=0;
+    test_ap_enabled=true;
+    bootstrap();
+    assert(wli_backend.ap == &wli_ap_ops);
+    memset(&caller_scan,0,sizeof(caller_scan));
+    pthread_t thread=begin(2,false); step(); expect_request(2); scan_accept(true); serve_bss(6,0);
+    assert(!pthread_join(thread,NULL) && !caller_result && wli_bss_count==5);
+
+    /* 1. SoftAP start/stop does not call nw_wifi_power on stop (fast band switch safe),
+     *    but transparently recycles primary netdev on next direct STA join without clearing BSS or flashing OFF. */
+    unsigned pcalls=power_calls, downs=link_downs;
+    assert(!wli_ap_start_op(&cfg,&freq) && ap_start_calls==1 && wli.ap_active && wli.sta_reset_needed);
+    assert(!wli_ap_stop_op() && ap_stop_calls==1 && !wli.ap_active && wli.sta_reset_needed);
+    assert(power_calls==pcalls);
+    ask_join("IEEE","password",FUXI_WIFI_STA_WPA2_PSK);
+    thread=begin(3,false);
+    step();
+    assert(power_calls==pcalls+1 && requested_power==0 && wli.reset_stage==WLI_RESET_OFF_WAIT);
+    assert(wli_state.phase==FUXI_WIFI_STA_JOINING && wli_bss_count==5 && link_downs==downs);
+    event_power(false,wli.generation+1);
+    assert(wli.reset_stage==WLI_RESET_ON_SEND && wli_state.phase==FUXI_WIFI_STA_JOINING && wli_bss_count==5);
+    step();
+    assert(power_calls==pcalls+2 && requested_power==1 && wli.reset_stage==WLI_RESET_ON_WAIT);
+    event_power(true,wli.generation+1);
+    assert(wli.reset_stage==WLI_RESET_DONE && !wli.sta_reset_needed && link_downs==downs);
+    /* Next step finishes recycle and immediately sends AUTHENTICATE (through_association). */
+    through_association(); message_two(true); keys_and_port();
+    assert(!pthread_join(thread,NULL) && !caller_result && wli_state.phase==FUXI_WIFI_STA_JOINED);
+    assert(link_downs==downs);
+
+    /* 2. ap_start waits for an in-flight WLI_LEAVE before starting SoftAP. */
+    unsigned starts_before=ap_start_calls;
+    thread=begin(4,false);
+    atomic_store(&ap_starter_done,false);
+    pthread_t ap_thread;
+    assert(!pthread_create(&ap_thread,NULL,ap_starter_thread,NULL));
+    struct timespec pause={.tv_nsec=20000000}; nanosleep(&pause,NULL);
+    assert(!atomic_load(&ap_starter_done) && ap_start_calls==starts_before);
+    step(); expect_request(6); respond(6,0); step();
+    assert(!pthread_join(thread,NULL) && !caller_result);
+    assert(!pthread_join(ap_thread,NULL) && !ap_starter_result && ap_start_calls==starts_before+1);
+    assert(wli.ap_active && wli.sta_reset_needed);
+
+    /* 3. Fast ap_stop -> ap_start (Maximize Compatibility toggle) triggers zero power recycles,
+     *    and the first subsequent WLI_SCAN performs one transparent recycle before scanning. */
+    pcalls=power_calls;
+    assert(!wli_ap_stop_op() && !wli.ap_active);
+    assert(!wli_ap_start_op(&cfg,&freq) && wli.ap_active);
+    assert(!wli_ap_stop_op() && !wli.ap_active);
+    assert(power_calls==pcalls);
+    memset(&caller_scan,0,sizeof(caller_scan));
+    thread=begin(2,false);
+    step(); assert(power_calls==pcalls+1 && requested_power==0 && wli.reset_stage==WLI_RESET_OFF_WAIT);
+    assert(wli_state.phase==FUXI_WIFI_STA_SCANNING);
+    event_power(false,wli.generation+1);
+    step(); assert(power_calls==pcalls+2 && requested_power==1 && wli.reset_stage==WLI_RESET_ON_WAIT);
+    event_power(true,wli.generation+1);
+    step(); expect_request(2);
+    scan_accept(false); serve_bss(6,0);
+    assert(!pthread_join(thread,NULL) && !caller_result && wli_bss_count==5 && !wli.sta_reset_needed);
+
+    /* 4. Manual radio off clears sta_reset_needed so no redundant recycle happens afterwards. */
+    assert(!wli_ap_start_op(&cfg,&freq) && !wli_ap_stop_op() && wli.sta_reset_needed);
+    power_test(false,wli.generation+1);
+    assert(!wli.sta_reset_needed);
+    power_test(true,wli.generation+1);
+    pcalls=power_calls;
+    memset(&caller_scan,0,sizeof(caller_scan));
+    thread=begin(2,false); step(); expect_request(2); scan_accept(true); serve_bss(6,0);
+    assert(!pthread_join(thread,NULL) && !caller_result && wli_bss_count==5);
+    assert(power_calls==pcalls);
+
+    /* 5. 0x107 EAPOL TX status telemetry + 2 consecutive Reason 15 timeouts trigger recycle & recovery. */
+    pcalls=power_calls;
+    ask_join("IEEE","password",FUXI_WIFI_STA_WPA2_PSK); thread=begin(3,false);
+    through_association(); message_two(true);
+    event_eapol_status(0); event_eapol_status(1);
+    assert(wlj.eapol_tx_nack==1 && wlj.eapol_tx_ack==1);
+    event_lost(ap,15,0); step(); step();
+    assert(failed_join(thread)==EAUTH && wli.handshake_timeouts==1 && !wli.sta_reset_needed);
+    /* Second consecutive Reason 15 (0x107 silent drop) schedules primary interface recycle. */
+    ask_join("IEEE","password",FUXI_WIFI_STA_WPA2_PSK); thread=begin(3,false);
+    through_association(); message_two(true);
+    assert(wlj.eapol_tx_nack==0 && wlj.eapol_tx_ack==0);
+    event_lost(ap,15,0); step(); step();
+    assert(failed_join(thread)==EAUTH && wli.handshake_timeouts==0 && wli.sta_reset_needed);
+    /* Third attempt transparently recycles primary netdev and succeeds cleanly. */
+    ask_join("IEEE","password",FUXI_WIFI_STA_WPA2_PSK); thread=begin(3,false);
+    step(); assert(power_calls==pcalls+1 && requested_power==0);
+    event_power(false,wli.generation+1);
+    step(); assert(power_calls==pcalls+2 && requested_power==1);
+    event_power(true,wli.generation+1);
+    through_association(); message_two(true); keys_and_port();
+    assert(!pthread_join(thread,NULL) && !caller_result && wli_state.phase==FUXI_WIFI_STA_JOINED);
+    assert(!wli.sta_reset_needed && !wli.handshake_timeouts);
+
+    test_ap_enabled=false;
+    puts("PASS SoftAP recovery: ap_start waits for leave, fast toggle untouched, post-AP recycle on scan/join, 0x107 telemetry & repeated Reason 15 recovery");
+}
+
+static void set_channels_40(unsigned count) {
+    assert(count <= WLI_CHANNEL_MAX);
+    wli_channel_count = 0;
+    for (unsigned i = 0; i < count; i++) {
+        uint16_t freq = i < 13 ? (uint16_t)(2412 + i * 5) : (uint16_t)(5180 + (i - 13) * 20);
+        uint16_t flags = i < 11 ? 0 : FUXI_WIFI_STA_CHANNEL_PASSIVE;
+        wli_channels[wli_channel_count++] = (struct fuxi_wifi_sta_channel){ .frequency = freq, .flags = flags };
+    }
+}
+
+static void join_speed_tests(void) {
+    struct fuxi_wifi_ap_config cfg = {0};
+    memcpy(cfg.ssid, "Hotspot", 7); cfg.ssid_len = 7; cfg.wpa2 = 1;
+    uint32_t freq = 0;
+    size_t size = 0;
+
+    /* T1: Short-window active reuse (type=1), channel subset check, SSID/passive exclusion, timeout */
+    test_ux = FUXI_WIFI_UX_SCAN_REUSE | FUXI_WIFI_UX_SCAN_CHANNELS;
+    test_cache = 0;
+    bootstrap();
+    set_channels_40(40);
+    /* Scan A: 13ch 2.4G active */
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    caller_scan.frequency_count = 13;
+    for (unsigned i = 0; i < 13; i++) caller_scan.frequencies[i] = wli_channels[i].frequency;
+    pthread_t thread = begin(2, false); step(); expect_request(2);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid);
+    unsigned seq = wli.sequence;
+    /* Scan B: 0ch expanded to 40ch -> not covered by 13ch, must perform real scan */
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    thread = begin(2, false); step(); expect_request(2);
+    assert(wli.sequence == seq + 1);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid && wli.scan.frequency_count == 40);
+    seq = wli.sequence;
+    unsigned hits = wli.cache_hits;
+    /* Scan C: 27ch 5G type=1 within 100 ms -> hits 1A short-window reuse without WLI_SCAN */
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    caller_scan.frequency_count = 27;
+    for (unsigned i = 0; i < 27; i++) caller_scan.frequencies[i] = wli_channels[13 + i].frequency;
+    fake_now += 100;
+    assert(!wli_scan(&caller_scan) && wli.sequence == seq && wli.cache_hits == hits + 1 && !wli.busy);
+    /* Exactly at WLI_ACTIVE_REUSE_MS boundary still hits */
+    fake_now = wli.scanned_at + WLI_ACTIVE_REUSE_MS;
+    assert(!wli_scan(&caller_scan) && wli.sequence == seq && wli.cache_hits == hits + 2);
+    /* Past WLI_ACTIVE_REUSE_MS -> must re-scan */
+    fake_now = wli.scanned_at + WLI_ACTIVE_REUSE_MS + 1;
+    thread = begin(2, false); step(); expect_request(2);
+    assert(wli.sequence == seq + 1);
+    scan_accept(true); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    /* Re-establish 40ch active scan, then test passive and SSID exclusions */
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    thread = begin(2, false); step(); scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    seq = wli.sequence;
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    caller_scan.frequency_count = 27;
+    for (unsigned i = 0; i < 27; i++) caller_scan.frequencies[i] = wli_channels[13 + i].frequency;
+    caller_scan.passive = true;
+    fake_now += 50;
+    thread = begin(2, false); step(); expect_request(2);
+    assert(wli.sequence == seq + 1);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    /* Active Scan C must NOT reuse previous passive scan */
+    caller_scan.passive = false;
+    fake_now += 50;
+    thread = begin(2, false); step(); expect_request(2);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    /* Directed SSID scan must NOT reuse and must NOT be reused by non-SSID scan */
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    thread = begin(2, false); step(); scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    caller_scan.frequency_count = 1; caller_scan.frequencies[0] = 5180;
+    caller_scan.ssid_length = 4; memcpy(caller_scan.ssid, "IEEE", 4);
+    fake_now += 50;
+    thread = begin(2, false); step(); expect_request(2);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    caller_scan.ssid_length = 0;
+    fake_now += 50;
+    thread = begin(2, false); step(); expect_request(2);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+
+    /* T2: Zero-Reason-15 guard (ap_active / sta_reset_needed blocks both type=1 and type=3 even if cache_valid==1) */
+    test_cache = 1; test_ap_enabled = true;
+    bootstrap();
+    set_channels_40(40);
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    thread = begin(2, false); step(); scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid);
+    fake_now += 50;
+    /* A. ap_active == 1 with cache_valid == 1 still forces real scan (blocks 1A and type=3) */
+    lck_mtx_lock(&wli_lock); wli.ap_active = 1; lck_mtx_unlock(&wli_lock);
+    caller_scan.cache_allowed = false;
+    thread = begin(2, false); step(); expect_request(2);
+    lck_mtx_lock(&wli_lock); wli.ap_active = 0; lck_mtx_unlock(&wli_lock);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid);
+    fake_now += 50;
+    lck_mtx_lock(&wli_lock); wli.ap_active = 1; lck_mtx_unlock(&wli_lock);
+    caller_scan.cache_allowed = true;
+    thread = begin(2, false); step(); expect_request(2);
+    lck_mtx_lock(&wli_lock); wli.ap_active = 0; lck_mtx_unlock(&wli_lock);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid);
+    /* B. sta_reset_needed == 1 with cache_valid == 1 blocks type=1 and type=3 and triggers power recycle */
+    for (int mode = 0; mode < 2; mode++) {
+        fake_now += 50;
+        lck_mtx_lock(&wli_lock); wli.sta_reset_needed = 1; assert(wli.cache_valid); lck_mtx_unlock(&wli_lock);
+        unsigned pcalls = power_calls;
+        caller_scan.cache_allowed = (mode == 1);
+        thread = begin(2, false);
+        step(); assert(power_calls == pcalls + 1 && requested_power == 0 && wli.reset_stage == WLI_RESET_OFF_WAIT);
+        event_power(false, wli.generation + 1);
+        step(); assert(power_calls == pcalls + 2 && requested_power == 1 && wli.reset_stage == WLI_RESET_ON_WAIT);
+        event_power(true, wli.generation + 1);
+        step(); expect_request(2);
+        scan_accept(false); serve_bss(6, 0);
+        assert(!pthread_join(thread, NULL) && !caller_result && !wli.sta_reset_needed && wli.cache_valid);
+    }
+    /* C. Two consecutive Reason 15 timeouts clear cache_valid and set sta_reset_needed */
+    for (int r = 0; r < 2; r++) {
+        ask_join("IEEE", "password", FUXI_WIFI_STA_WPA2_PSK);
+        thread = begin(3, false);
+        through_association(); message_two(true);
+        event_lost(ap, 15, 0); step(); step();
+        assert(failed_join(thread) == EAUTH);
+    }
+    assert(wli.sta_reset_needed && !wli.cache_valid);
+    unsigned pcalls = power_calls;
+    caller_scan.cache_allowed = false;
+    thread = begin(2, false);
+    step(); assert(power_calls == pcalls + 1 && requested_power == 0);
+    event_power(false, wli.generation + 1);
+    step(); assert(power_calls == pcalls + 2 && requested_power == 1);
+    event_power(true, wli.generation + 1);
+    step(); expect_request(2);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result && !wli.sta_reset_needed);
+
+    /* T3: 1C boot-time ap_stop does not spuriously set sta_reset_needed; real ap_start -> ap_stop does */
+    test_cache = 0; test_ux = 0; test_ap_enabled = true;
+    bootstrap();
+    pcalls = power_calls;
+    assert(!wli_ap_stop_op() && !wli.ap_active && !wli.ap_started && !wli.sta_reset_needed);
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    thread = begin(2, false); step(); expect_request(2);
+    assert(power_calls == pcalls);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    assert(!wli_ap_start_op(&cfg, &freq) && wli.ap_active && wli.ap_started && wli.sta_reset_needed);
+    assert(!wli_ap_stop_op() && !wli.ap_active && !wli.ap_started && wli.sta_reset_needed);
+    /* Complete recycle via scan, then a redundant ap_stop must not set sta_reset_needed again */
+    thread = begin(2, false);
+    step(); assert(power_calls == pcalls + 1 && requested_power == 0);
+    event_power(false, wli.generation + 1);
+    step(); assert(power_calls == pcalls + 2 && requested_power == 1);
+    event_power(true, wli.generation + 1);
+    step(); expect_request(2); scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result && !wli.sta_reset_needed);
+    assert(!wli_ap_stop_op() && !wli.sta_reset_needed);
+    test_ap_enabled = false;
+
+    /* T4: 1B bounded default dwell_ms=110 with 19000 ms batching (31+9), 13ch no regression, 41ch/batch=0 fallback */
+    test_ux = FUXI_WIFI_UX_SCAN_DWELL_110 | FUXI_WIFI_UX_SCAN_CHANNELS;
+    test_dwell = 1; test_batch = 1; offered_features = FWC_FEATURE_SCAN_DWELL_MS;
+    bootstrap();
+    set_channels_40(40);
+    /* 40ch (11 active + 29 passive), dwell_ms=0 -> defaults to 110 ms and batches 31 + 9 */
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    thread = begin(2, false); step(); expect_request(2);
+    assert(wli.scan_count == 40 && wli.scan_limit == 31 && request_u32(FWC_ATTR_SCAN_DWELL_MS) == 110);
+    const uint8_t *freqs = request_attribute(20, &size);
+    assert(freqs && size == 31 * 4);
+    scan_accept(false); step(); expect_request(2);
+    assert(wli.scan_offset == 31 && request_u32(FWC_ATTR_SCAN_DWELL_MS) == 110);
+    freqs = request_attribute(20, &size);
+    assert(freqs && size == 9 * 4);
+    scan_accept(true); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    /* 13ch 2.4G (11 active + 2 passive): passive*44=88 <= active*56=616 -> keeps dwell_ms=0 (no regression) */
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    caller_scan.frequency_count = 13;
+    for (unsigned i = 0; i < 13; i++) caller_scan.frequencies[i] = wli_channels[i].frequency;
+    thread = begin(2, false); step(); expect_request(2);
+    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS, &size));
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    /* 27ch 5G (all passive): applies 110 ms in 1 batch */
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    caller_scan.frequency_count = 27;
+    for (unsigned i = 0; i < 27; i++) caller_scan.frequencies[i] = wli_channels[13 + i].frequency;
+    thread = begin(2, false); step(); expect_request(2);
+    assert(wli.scan_count == 27 && wli.scan_limit == 27 && request_u32(FWC_ATTR_SCAN_DWELL_MS) == 110);
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    /* 41ch (>25000 ms budget) safely falls back to dwell_ms=0 without EINVAL */
+    set_channels_40(41);
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    thread = begin(2, false); step(); expect_request(2);
+    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS, &size));
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    /* batch=0 with 40ch (>19000 ms single-batch budget) safely falls back to dwell_ms=0 */
+    test_batch = 0; bootstrap(); set_channels_40(40);
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    thread = begin(2, false); step(); expect_request(2);
+    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS, &size));
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+    /* No module feature or test_dwell=0 -> dwell_ms=0 still succeeds without FWC_ATTR_SCAN_DWELL_MS */
+    test_batch = 1; offered_features = 0; bootstrap(); set_channels_40(40);
+    thread = begin(2, false); step(); expect_request(2);
+    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS, &size));
+    scan_accept(false); serve_bss(6, 0);
+    assert(!pthread_join(thread, NULL) && !caller_result);
+
+    test_ux = test_dwell = test_cache = test_batch = offered_features = 0;
+    memset(&caller_scan, 0, sizeof(caller_scan));
+    puts("PASS join speed: short-window reuse, Reason-15/SoftAP guards, boot ap_stop no-op, bounded 110ms dwell & batching");
+}
 int main(void) {
     unsigned config_offset;
     assert(!fwa_config_offset(0,4,0,&config_offset));
@@ -954,6 +1330,8 @@ int main(void) {
     join_tests();
     pick_tests();
     keep_tests();
+    softap_recovery_tests();
+    join_speed_tests();
     bootstrap();
     uint8_t bytes[MESSAGE]; size_t length=header(bytes,3,0x102,2);
     assert(deliver(bytes,length)==2 && wli.fatal==EPROTO);

@@ -76,7 +76,7 @@ extern void fuxi_audio_spf_start(void);
 extern void fuxi_audio_spf_poll(void);
 extern unsigned fuxi_gpu_access(uintptr_t, uint64_t *, unsigned, unsigned);
 extern volatile int32_t native_qrtr_stats[16];
-extern char native_qrtr_text[96];
+extern char native_qrtr_text[256];
 void fuxi_adsp_init(void);
 
 enum Stage {
@@ -118,8 +118,8 @@ enum Stage {
 #define EV_GLINK 2u
 #define EV_AOP 4u
 #define EV_SEND 16u
-#define FA_CLIENTS 4u
-#define FA_QUEUE 8u
+#define FA_CLIENTS 6u
+#define FA_QUEUE 16u
 #define FA_FAST_MS 500u /* fast polling after the last traffic */
 
 /* ---- state, all owned by the thread except where noted ---- */
@@ -866,9 +866,12 @@ static int startGlink(void)
 static void report(void)
 {
     printf("FUXI ADSP: stage=%d ipcc=%u other=%u glink in=%u out=%u unknown_opens=%u (%s) qrtr stage=%d in=%d out=%d "
-        "locator=%d/%d dsp_node=%d services=%d [%s]\n", gStage, gIpccEvents, gIpccOther, gGlink.rx_messages, gGlink.tx_messages,
+        "locator=%d/%d dsp_node=%d services=%d\n", gStage, gIpccEvents, gIpccOther, gGlink.rx_messages, gGlink.tx_messages,
         gGlink.unknown_opens, gGlink.unknown_names, native_qrtr_stats[0], native_qrtr_stats[1], native_qrtr_stats[4],
-        native_qrtr_stats[6], native_qrtr_stats[7], native_qrtr_stats[8], native_qrtr_stats[9], native_qrtr_text);
+        native_qrtr_stats[6], native_qrtr_stats[7], native_qrtr_stats[8], native_qrtr_stats[9]);
+    if (native_qrtr_stats[9] > 0) {
+        printf("FUXI ADSP QRTR: services=%d [%s]\n", native_qrtr_stats[9], native_qrtr_text);
+    }
 }
 
 static void adspThread(void *arg, wait_result_t result)

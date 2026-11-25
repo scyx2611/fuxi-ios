@@ -51,11 +51,17 @@ typedef struct {
 /* the iPhone X family's notch, 1125-pixel space */
 static const fx_rect x_notch = { 249.0, 0.0, 627.0, 90.0 };
 
+#include "FuxiFlashlightLogic.h"
+
 static double shape_w = 300.0, shape_h = 98.0;
 static unsigned shape_said;
 static int hooked;                      /* 0 not yet, 1 replaced */
+static bool shape_disabled;
 static IMP original_shape;
 extern bool fuxi_flashlight_hook(void);
+extern bool fuxi_flashlight_metadata_hook(void);
+extern bool fuxi_flashlight_settings_hook(void);
+extern bool fuxi_volhud_hook(void);
 
 static void
 say(const char *format, ...)
@@ -181,12 +187,24 @@ try_hook(void)
 }
 
 static void
+preferences_image_added(const struct mach_header *header, intptr_t slide)
+{
+	(void)header;
+	(void)slide;
+	(void)fuxi_flashlight_metadata_hook();
+	(void)fuxi_flashlight_settings_hook();
+}
+
+static void
 image_added(const struct mach_header *header, intptr_t slide)
 {
 	(void)header;
 	(void)slide;
-	(void)try_hook();
+	if (!shape_disabled) {
+		(void)try_hook();
+	}
 	(void)fuxi_flashlight_hook();
+	(void)fuxi_volhud_hook();
 }
 
 __attribute__((constructor)) static void
@@ -194,22 +212,33 @@ fuxi_shape_init(void)
 {
 	const char *name = getprogname();
 	const char *inserted = getenv("DYLD_INSERT_LIBRARIES");
+	enum fuxi_flashlight_process_mode fl_mode;
 	int arg;
 
-	/* children of SpringBoard do not inherit the library */
+	/* children of injected processes do not inherit the library */
 	if (inserted != NULL && strcmp(inserted, SHAPE_LIB) == 0) {
 		(void)unsetenv("DYLD_INSERT_LIBRARIES");
 	}
-	if (name == NULL || strcmp(name, "SpringBoard") != 0) {
+	fl_mode = fuxi_flashlight_process_mode_for_name(name);
+	if (fl_mode == FUXI_FLASHLIGHT_MODE_METADATA_ONLY) {
+		bool meta_ok = fuxi_flashlight_metadata_hook();
+		bool settings_ok = fuxi_flashlight_settings_hook();
+		if (!meta_ok || !settings_ok) {
+			_dyld_register_func_for_add_image(preferences_image_added);
+		}
+		return;
+	}
+	if (fl_mode != FUXI_FLASHLIGHT_MODE_FULL) {
 		return;
 	}
 	arg = adt_shape(&shape_w, &shape_h);
 	if (arg == 1) {
+		shape_disabled = true;
 		say("fuxi: SpringBoard: fuxi,sbshape=0, status-bar cut-out unchanged\n");
-		return;
-	}
-	if (!try_hook()) {
+	} else if (!try_hook()) {
 		say("fuxi: SpringBoard: -[%s %s] not there yet; waiting for images\n", SHAPE_CLASS, SHAPE_SELECTOR);
 	}
+	(void)fuxi_flashlight_hook();
+	(void)fuxi_volhud_hook();
 	_dyld_register_func_for_add_image(image_added);
 }

@@ -14,6 +14,17 @@
 #define FG_ABI_MAX_WIRED_BYTES (UINT64_C(768) << 20)
 #define FG_ABI_CONTIG_TRY_BYTES (UINT64_C(1) << 20)
 #define FG_ABI_MAX_IMPORTS 512u
+/* Class 0 (compositor) wired quota: below 1.5 GiB FG_ABI_VA_SIZE with headroom for camera+Turnip working set. */
+#define FG_ABI_COMPOSITOR_MAX_WIRED_BYTES (UINT64_C(1280) << 20)
+/* Class 1 (opt-in foreground App) quotas and multi-VM limits. */
+#define FG_ABI_CLASS1_MAX_BOS 1024u
+#define FG_ABI_CLASS1_MAX_WIRED_BYTES (UINT64_C(1024) << 20)
+#define FG_ABI_CLASS1_MAX_IMPORTS 128u
+#define FG_ABI_MAX_CLASS1_CLIENTS 4u
+#define FG_ABI_MAX_CLASS1_VMS_PER_PID 2u
+#define FG_ABI_MAX_VMS 8u
+#define FG_CLASS_COMPOSITOR 0u
+#define FG_CLASS_APP 1u
 /* Internal: bit 8 of the permissions handed to fuxi_gpu_abi_map_import means NativeAdrenoMapGpuOnly was passed in BoMap.reserved. */
 #define FG_ABI_IMPORT_GPU_ONLY 0x100u
 /* fuxi_gpu_abi_clean_split: what the per-submit import clean cost, by class [GPU-writable, read-only] and size bucket, the KiB GPU_ONLY

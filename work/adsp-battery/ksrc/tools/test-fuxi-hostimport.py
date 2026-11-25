@@ -39,10 +39,11 @@ static task_t caller=7;
 static task_t current_task() {return caller;}
 static int roEnabled;static unsigned lastPrepareDir,lastMapRo,wireOut;
 static int fuxi_gpu_abi_roimport() {return roEnabled;}
-static unsigned descriptors,maps,completes,prepares,fail,unmaps,waits;
+static unsigned descriptors,maps,completes,prepares,fail,unmaps,waits,vmDestroys;
+struct fuxi_gpu_vm;
 static bool busy,undrained;
-static bool connected=true;
-static int openLock,clientLock;
+[[maybe_unused]] static int openLock;
+static int clientLock;
 static void IOLockLock(int *){}
 static void IOLockUnlock(int *){}
 static void IOLog(const char *,...){}
@@ -106,6 +107,10 @@ static int fuxi_gpu_abi_unmap(uint64_t va,uint64_t bytes) {
  assert(va==0x20000000 && bytes==32768);unmaps++;
  return undrained?-2:busy?1:0;
 }
+static int fuxi_gpu_abi_vm_unmap(struct fuxi_gpu_vm *,uint64_t va,uint64_t bytes) { return fuxi_gpu_abi_unmap(va,bytes); }
+static void fuxi_gpu_abi_vm_destroy(struct fuxi_gpu_vm *) { vmDestroys++; }
+static int fuxi_gpu_abi_vm_reserve_quota(struct fuxi_gpu_vm *,uint32_t,uint64_t,uint32_t) { return 0; }
+static void fuxi_gpu_abi_vm_release_quota(struct fuxi_gpu_vm *,uint32_t,uint64_t,uint32_t) {}
 '''
 
 TEST = r'''
@@ -157,7 +162,7 @@ int main() {
  assert(!c.importHost(request,out) && !c.bos_[0].importRo && lastPrepareDir==kIODirectionInOut && !lastMapRo);assert(!c.drop(c.bos_[0]));empty();
  fail=0;caller=8;assert(c.importHost(request,out)==kIOReturnBadArgument);empty();caller=7;
  c.task_=kernel_task;assert(c.importHost(request,out)==kIOReturnBadArgument);c.task_=7;
- c.wired_=FG_ABI_MAX_WIRED_BYTES-16384;assert(c.importHost(request,out)==kIOReturnNoResources);c.wired_=0;
+ c.wired_=FG_ABI_COMPOSITOR_MAX_WIRED_BYTES-16384;assert(c.importHost(request,out)==kIOReturnNoResources);c.wired_=0;
  for(auto &b:c.bos_)b.handle=1;
  assert(c.importHost(request,out)==kIOReturnNoResources);
  for(auto &b:c.bos_)b={};
@@ -172,29 +177,30 @@ int main() {
  assert(c.drop(b)==kIOReturnBusy && maps==1 && descriptors==1 && c.wired_==32768);
  busy=false;assert(!c.drop(b));empty();
  // Death/close retires DMA before dropping the descriptor and its wired pages.
- assert(!c.importHost(request,out));b.iova=0x20000000;busy=true;connected=true;
- assert(!c.clientClose() && waits==1 && !c.live_ && !connected);empty();
+ assert(!c.importHost(request,out));b.iova=0x20000000;busy=true;c.vm_=(struct fuxi_gpu_vm *)0x1;
+ assert(!c.clientClose() && waits==1 && !c.live_ && !c.vm_ && vmDestroys==1);empty();
  assert(!c.clientClose() && waits==1); // idempotent, no double complete
  // Unconfirmed hardware drain must preserve both references and pin. A reset
  // is modelled only to reclaim the intentional quarantine for LeakSanitizer.
- c.live_=true;assert(!c.importHost(request,out));b.iova=0x20000000;undrained=true;
+ c.live_=true;assert(!c.importHost(request,out));b.iova=0x20000000;undrained=true;c.vm_=(struct fuxi_gpu_vm *)0x2;
  unsigned before=completes;
- assert(!c.clientClose() && !c.live_ && descriptors==1 && maps==1 && completes==before);
- undrained=false;assert(!c.drop(b));empty();
- // Exhaust the actual expanded BO table, then close drains every entry.
- c.live_=connected=true;c.lastFence_=0;out={};
- for(unsigned i=0;i<FG_ABI_MAX_BOS;i++)assert(!c.importHost(request,out) && out.handle==c.bos_[i].handle);
- assert(FG_ABI_MAX_BOS>=1024 && c.wired_==FG_ABI_MAX_BOS*32768);
+ assert(!c.clientClose() && !c.live_ && descriptors==1 && maps==1 && completes==before && c.vm_ && vmDestroys==1);
+ undrained=false;c.live_=true;assert(!c.clientClose() && !c.vm_ && vmDestroys==2);empty();
+ // Exhaust the per-client import cap, then close drains every entry.
+ c.live_=true;c.lastFence_=0;out={};
+ for(unsigned i=0;i<FG_ABI_MAX_IMPORTS;i++)assert(!c.importHost(request,out) && out.handle==c.bos_[i].handle);
+ assert(FG_ABI_MAX_IMPORTS>=512 && c.liveImports_==FG_ABI_MAX_IMPORTS && c.wired_==FG_ABI_MAX_IMPORTS*32768);
  assert(c.importHost(request,out)==kIOReturnNoResources);
- assert(!c.clientClose() && !c.wired_);empty();
- // Three maximum-sized imports cross the old 256 MiB aggregate cap, reach
- // exactly 768 MiB, and share the same quota as ordinary allocation.
+ assert(!c.clientClose() && !c.wired_ && !c.liveImports_);empty();
+ // Five maximum-sized imports cross the old 768 MiB compositor cap, reach
+ // exactly 1280 MiB, and share the same quota as ordinary allocation.
  c.live_=true;request.bytes=FG_ABI_MAX_BYTES;
- for(unsigned i=0;i<3;i++)assert(!c.importHost(request,out));
- assert(c.wired_==FG_ABI_MAX_WIRED_BYTES && c.wired_==(768ULL<<20));
+ for(unsigned i=0;i<5;i++)assert(!c.importHost(request,out));
+ assert(c.wired_==FG_ABI_COMPOSITOR_MAX_WIRED_BYTES && c.wired_==(1280ULL<<20));
+ assert(compWiredCur==(1280ULL<<20) && compWiredPeak>=(1280ULL<<20));
  request.bytes=16384;assert(c.importHost(request,out)==kIOReturnNoResources);
- assert(!c.clientClose() && !c.wired_);empty();
- c.wired_=FG_ABI_MAX_WIRED_BYTES+1;
+ assert(!c.clientClose() && !c.wired_ && !compWiredCur);empty();
+ c.wired_=FG_ABI_COMPOSITOR_MAX_WIRED_BYTES+1;
  assert(c.importHost(request,out)==kIOReturnNoResources);c.wired_=0;
  c.nextHandle_=UINT64_MAX;assert(c.importHost(request,out)==kIOReturnNoResources);
  assert(prepares>completes); // prepare failure itself never calls complete
@@ -209,6 +215,7 @@ HANDLE_STUBS = r'''
 #define IONewZero(T,n) (new (std::nothrow) T[n]())
 #define IODelete(p,T,n) delete[] (p)
 static unsigned peakBos;
+static uint64_t compWiredCur, compWiredPeak;
 #include "FuxiHandleIndex.h"
 '''
 
@@ -224,7 +231,8 @@ def main():
  Bo storage_[MaxBos]={};
  Client(){bos_={storage_,storage_+MaxBos};assert(index_.allocate());}
  ~Client(){index_.release();}
- task_t task_=7;uint64_t nextHandle_=1,wired_=0,lastFence_=1;
+ task_t task_=7;struct fuxi_gpu_vm *vm_=nullptr;char procName_[32]={};
+ uint64_t nextHandle_=1,wired_=0,lastFence_=1;
  int *lock_=&clientLock;bool live_=true;int pid_=0;
  void terminate(){}
  int wait(uint64_t,uint64_t) {waits++;busy=false;return undrained?kIOReturnIOError:0;}

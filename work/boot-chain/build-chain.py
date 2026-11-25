@@ -81,10 +81,15 @@ for o in ('chain.o', 'probe.o'):
     assert 'R_AARCH64_ABS' not in rel, f'absolute relocation in {o}'
 
 loader_objects = cool if ram9g else ref
-objects = [out / 'start.o', loader_objects / 'loader.o', loader_objects / 'console.o', out / 'probe.o', out / 'chain.o',
+loader_obj = loader_objects / ('loader-speaker.o' if (loader_objects / 'loader-speaker.o').exists() else 'loader.o')
+audio_dma_obj = cool / 'loader-audio-dma.o'
+extra_link_flags = ['--wrap=probe_main'] if audio_dma_obj.exists() else []
+objects = [out / 'start.o', loader_obj, loader_objects / 'console.o', out / 'probe.o', out / 'chain.o',
            cool / 'gpu-fw.o', cool / 'payload.o', out / 'linux.o']
+if audio_dma_obj.exists():
+    objects.append(audio_dma_obj)
 run(tools / 'ld.lld.exe', '-T', src / 'fuxi-loader' / 'loader-chain.ld', '--build-id=none',
-    f'--defsym=LINUX_IMAGE_SIZE={image_size:#x}', *objects, '-o', out / 'loader.elf')
+    f'--defsym=LINUX_IMAGE_SIZE={image_size:#x}', *extra_link_flags, *objects, '-o', out / 'loader.elf')
 run(tools / 'llvm-objcopy.exe', '-O', 'binary', out / 'loader.elf', out / 'Image')
 img = (out / 'Image').read_bytes()
 syms = {l.split()[-1]: int(l.split()[0], 16) for l in subprocess.check_output(
@@ -93,6 +98,14 @@ lin, pay, end = syms['_linux_start'], syms['_payload_start'], syms['_image_end']
 assert img[56:60] == b'ARM\x64' and struct.unpack_from('<Q', img, 16)[0] == end
 assert lin % 0x200000 == 0 and img[lin:lin + len(kernel)] == kernel and len(img) == lin + len(kernel)
 assert end == lin + image_size and img[pay:pay + len(payload)] == payload
+if audio_dma_obj.exists():
+    assert '__wrap_probe_main' in syms and 'audio_dma' in syms
+    assert syms['_bss_start'] <= syms['audio_dma'] and syms['audio_dma'] + 0x10000 <= syms['_bss_end'] <= pay
+    assert syms['audio_dma'] % 0x4000 == 0
+if '_sensor_pack_start' in syms:
+    sp0, sp1 = syms['_sensor_pack_start'], syms['_sensor_pack_end']
+    assert pay + len(payload) <= sp0 < sp1 <= lin and sp0 % 8 == 0
+    assert img[sp0:sp0 + 8] == b'SSCPACK1'
 pinned = dict(l.split()[::-1] for l in (cool / 'sha256.txt').read_text().splitlines())
 assert sha(payload) == pinned['payload.bin']
 print(f'payload at {pay:#x}, linux at {lin:#x} (load base 0xa8000000 -> {0xa8000000 + lin:#x}), image end {end:#x} '

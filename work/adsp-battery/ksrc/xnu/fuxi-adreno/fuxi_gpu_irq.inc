@@ -38,6 +38,12 @@ static void fg_spi_mask(unsigned id)
  *fg_gicd(0x180 + (id/32)*4) = 1u << (id%32);
  __asm__ volatile("dsb sy" ::: "memory");
 }
+__attribute__((unused)) static void fg_spi_unmask(unsigned id)
+{
+ if (!fg_irq_gicd.va || id < 32 || id >= 1020) return;
+ *fg_gicd(0x100 + (id/32)*4) = 1u << (id%32);
+ __asm__ volatile("dsb sy" ::: "memory");
+}
 static void fg_irq_dead(unsigned why)
 {
  fg_spi_mask(FG_IRQ_INTID);
@@ -78,6 +84,23 @@ static void fg_irq_quiesce(void)
  fg_irq_dead(3);
  for (unsigned i = 0; i < 1000000 && __atomic_load_n(&fg_irq_inside, __ATOMIC_SEQ_CST); i++) __asm__ volatile("yield");
  fg_irq_wake();
+}
+__attribute__((unused)) static void fg_irq_quiesce_soft(void)
+{
+ if (!__atomic_load_n(&fg_irq_ok, __ATOMIC_SEQ_CST)) return;
+ __atomic_store_n(&fg_irq_ok, 0, __ATOMIC_SEQ_CST);
+ fg_spi_mask(FG_IRQ_INTID);
+ for (unsigned i = 0; i < 1000000 && __atomic_load_n(&fg_irq_inside, __ATOMIC_SEQ_CST); i++) __asm__ volatile("yield");
+ fg_irq_wake();
+}
+__attribute__((unused)) static int fg_irq_rearm_soft(void)
+{
+ if (__atomic_load_n(&fg_irq_state, __ATOMIC_ACQUIRE) != 1) return 1;
+ if (!g3_gw(0x37, FG_IRQ_BITS) || !g3_gw(0x38, FG_IRQ_BITS) || fg_access_failed) return 0;
+ fg_irq_empty_run = 0;
+ fg_spi_unmask(FG_IRQ_INTID);
+ __atomic_store_n(&fg_irq_ok, 1, __ATOMIC_SEQ_CST);
+ return 1;
 }
 /* armcpu_spi_attach's sequence for one SPI: level, group 1 NS, priority 0xa0, routed to one affinity; readback grp|en<<1|edge<<2|prio<<8. */
 static const char *fg_spi_on(unsigned id, uint64_t affinity, uint32_t *readback, uint64_t *router)
@@ -154,10 +177,14 @@ int fuxi_gpu_irq_setup(void)
 uint32_t fuxi_gpu_irq_seq(void) { return __atomic_load_n(&fg_irq_seq, __ATOMIC_ACQUIRE); }
 /* A client fence retires once its value is written and (non-root client) the ring has drained, and a present copy queued behind it
  * raises no interrupt: once the value is there the caller polls rather than sleep for an interrupt that may not come. */
-int fuxi_gpu_irq_sleep(uint32_t seq0, uint64_t fence, unsigned us)
+#ifndef FG_ABI_VM_FENCE_OFF
+#define FG_ABI_VM_FENCE_OFF(vm) ((void)(vm), FG_ABI_FENCE_OFF)
+#endif
+int fuxi_gpu_irq_sleep_vm(struct fuxi_gpu_vm *vm, uint32_t seq0, uint64_t fence, unsigned us)
 {
  if (__atomic_load_n(&fg_irq_state, __ATOMIC_ACQUIRE) != 1) return -1;
- if (!fg_abi_live || (int32_t)(g3_read(G3_FENCE_PA+FG_ABI_FENCE_OFF+4) - (uint32_t)fence) >= 0) {
+ const uint32_t foff = FG_ABI_VM_FENCE_OFF(vm);
+ if (!fg_abi_live || (int32_t)(g3_read(G3_FENCE_PA+foff+4) - (uint32_t)fence) >= 0) {
   __atomic_fetch_add(&fg_irq_stats[FG_IRQ_WRITTEN], 1, __ATOMIC_RELAXED);
   return -2;
  }
@@ -177,6 +204,10 @@ int fuxi_gpu_irq_sleep(uint32_t seq0, uint64_t fence, unsigned us)
   printf("FUXI GPU IRQ: %u timed-out sleeps and no interrupt, masked; WaitFence polls\n", FG_IRQ_NODELIVERY);
  }
  return 0;
+}
+int fuxi_gpu_irq_sleep(uint32_t seq0, uint64_t fence, unsigned us)
+{
+ return fuxi_gpu_irq_sleep_vm(NULL, seq0, fence, us);
 }
 /* Snapshot for the user client's 600-wait report; also restores RBBM_INT_0_MASK if something rewrote it (counted). */
 unsigned fuxi_gpu_irq_stats(uint64_t s[FG_IRQ_STATS], unsigned *why)

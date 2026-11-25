@@ -32,13 +32,30 @@ transmit(mbuf_t packet, size_t length)
 	       mbuf_copydata(packet, 0, length, frame) == 0 && backend->tx_frame(frame, length);
 }
 
+static bool
+ap_transmit(mbuf_t packet, size_t length)
+{
+	uint8_t frame[FUXI_WIFI_FRAME_MAX];
+	return backend != NULL && backend->ap != NULL && backend->ap->tx_frame != NULL &&
+	       length >= 14 && length <= sizeof(frame) &&
+	       mbuf_copydata(packet, 0, length, frame) == 0 && backend->ap->tx_frame(frame, length);
+}
+
 static struct fuxi_wifi_net_link link = {
 	.name = "synthetic-loopback", .wireless = true, .transmit = transmit,
+};
+static struct fuxi_wifi_net_link ap_link = {
+	.name = "WCN7850-ath12k-ap", .wireless = true, .transmit = ap_transmit,
 };
 static const struct fuxi_wifi_input input = {
 	.rx_frame = fuxi_wifi_net_input, .link_state = fuxi_wifi_net_link_state,
 	.rx_packet = fuxi_wifi_net_input_packet, .rx_flush = fuxi_wifi_net_flush_rx,
 	.byte_counts = fuxi_wifi_net_byte_counts,
+};
+static const struct fuxi_wifi_ap_input ap_input = {
+	.rx_frame = fuxi_wifi_ap_net_input,
+	.sta_arrive = fuxi_wifi_apple80211_ap_sta_arrive,
+	.sta_leave = fuxi_wifi_apple80211_ap_sta_leave,
 };
 
 bool
@@ -59,6 +76,15 @@ fuxi_wifi_ios_attach(const struct fuxi_wifi_backend *ops)
 	if (!fuxi_wifi_sta_present() || !fuxi_wifi_net_attach(&link)) {
 		printf("FUXI WIFI IOS: attach failed; no retry this boot\n");
 		return false;
+	}
+	if (fuxi_wifi_ap_enabled() && ops->ap != NULL && ops->ap->start_cb != NULL &&
+	    ops->ap->ap_start != NULL && ops->ap->ap_stop != NULL && ops->ap->tx_frame != NULL) {
+		memcpy(ap_link.address, ops->ap->address, sizeof(ap_link.address));
+		ops->ap->start_cb(&ap_input);
+		fuxi_wifi_apple80211_ap_attach(ops->ap);
+		if (!fuxi_wifi_ap_net_attach(&ap_link)) {
+			printf("FUXI WIFI IOS: ap1 attach failed; continuing with STA only\n");
+		}
 	}
 	FuxiNetworkStackStart();
 	return true;

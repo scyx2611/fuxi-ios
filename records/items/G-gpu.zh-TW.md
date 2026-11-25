@@ -147,7 +147,7 @@
 - **主機測試**：無（原始紀錄未提）
 - **驗證紀錄**：首次實現持續 GPU 桌面合成（509/613 frames late，忙碌視窗約 **15.7–20.9 Hz**，`gpu_ms` 10–30 ms，`gpu_busy_est_pct` 最高 44.9%）；每幀複製平均 5,270 µs（vs 0011 CPU fallback 15,925 µs 便宜三倍）；發現 GPU 處於 220 MHz（level 0）無 DDR 投票，且無 queue 模式導致每次 submit `retry_sleep` 4.91 ms + 每次清理 66 MB 匯入 cache 2.33 ms。
 - **參考來源**：continuation.md（出現在本項內文，細節見出處）
-- **結論／未完成**：採用（確立持續 GPU 合成基底；開展後續效能瓶頸排查）。
+- **結論／未完成**：採用（確立持續 GPU 合成基底；開展後續效能瓶頸排查）。並記下與 U-026／B-019 之跨線防回歸契約：桌布行程無 Metal 時，`FuxiNativeMetal` 須持續保留本項 Patch 0012（`FUXI_NATIVE_FOREIGN_LINEAR`／`format=204`）以接納 `QuartzCore` 零拷貝；而 CPU 模糊／染色路徑則依賴 `FuxiAtxFix`（`fuxi,atx-fix=1`）辨識全零 watermark 改走線性解碼，後續修 GPU 不可把磁碟 `.atx` 改寫為 `'ASTC'` 或繞過 `FuxiAtxFix`。
 - **出處**：`continuation.md:360-386`，`ASTC_LAYOUT.md:46-54`。（2026-11-18 由 GPU 紀錄盤點逐項整理，Gemini 撰寫、主代理整合與抽查）
 
 ## 流暢度實驗與 native-layout 部署（0013～0024）
@@ -828,7 +828,7 @@
   - 14:53:21–15:02:23 `native-wifi-hotspot-refresh-control-1118-loader` 用同核心、命令列與 dylib 對照，將 `fuxi,wifi-sb` 從 3 改為 1 並校時。第二次切熱點重現 0 格，390 秒 USB 紀錄與無缺段的 mtd boot #105 未見 `DeviceLost` 或 GPU 閘門拒絕。最後 SCANOUT 為 GPU 17,879／17,880 幀，回 Android 後釋鎖。證據在 `work/Codex-Xiaomi13-GPU-20261109/native-hw000wifi-gpu-control-1118/boot.log` 與 `work/adsp-battery/fuxilog/20261118-150313/console.txt`。
   - 15:03:41–15:12:46 `native-wifi-hotspot-refresh-repeat-1118-loader` 重新啟用補查。比對控制版時 RTC offset 與其餘 ADT 相同。390 秒 USB 紀錄未見 `DeviceLost` 或 GPU 閘門拒絕，只捕捉初始家庭網路加入，沒有完成熱點切換重現。已回 Android 並釋鎖。證據在 `work/Codex-Xiaomi13-GPU-20261109/native-hw000wifi-gpu-repeat-1118/boot.log`。
 - **參考來源**：continuation.md（出現在本項內文，細節見出處）
-- **結論／未完成**：`DeviceLost` 後的 GPU 加速停用已定位至顯示程序的同次開機保護機制。較早的 `native-surfrow2-nowait-loader` 也曾留下相同的 Metal 錯誤與重生拒絕紀錄。11 月 18 日這一次的首個 GPU 錯誤仍待取得。
+- **結論／未完成**：`DeviceLost` 後的 GPU 加速停用已定位至顯示程序的同次開機保護機制。較早的 `native-surfrow2-nowait-loader` 也曾留下相同的 Metal 錯誤與重生拒絕紀錄。11 月 18 日這一次的首個 GPU 錯誤仍待取得。防復發備忘：若後續為處理桌布挑選／鎖定自訂等 GPU 議題而開放 Metal 給 `PosterBoard`／`CollectionsPoster`／`SpringBoard`，`FuxiNativeMetal` Patch 0011 之 `MTLTextureLayout` 會寫入非全零 16-byte watermark `Fuxi ASTC pair 1` 的線性 `.atx`，將繞過目前 U-026 的全零 watermark 檢查而使 CPU 模糊再次退回 `decodeRGBXFromTwiddled` 發紫；開放前務必同步讓 `FuxiAtxFix` 識別 `Fuxi ASTC pair 1`（或改採真 hw-twiddled 反解）、清除既有快取並重驗單手模式／通話／Safari 分頁總覽／多工切換器（見 U-026、B-019）。
 - **出處**：`continuation.md:4291-4313`，`STOPLOSS-0043.zh-TW.md:47-55`，`xiaomi13-devicelost-lockscreen.md:1-18`。（2026-11-18 由 GPU 紀錄盤點逐項整理，Gemini 撰寫、主代理整合與抽查）
 
 ### G-050 在 1080 寬面板顯示完整 1125 寬畫面並對齊觸控
@@ -849,6 +849,28 @@
 - **參考來源**：既有 `fg_rect`、SweetFramebuffer、SweetHID、Turnip 的 r2d 矩形及 Mesa a6xx 的 FILTER 欄位。依現行雙／三緩衝路徑選用 GPU 縮放，未變更 DPU QSEED 設定。
 - **結論／未完成**：填滿模式的全寬畫面、無黑邊及邊緣觸點已經使用者驗收。狀態欄依 U-001 續校，震動已有反應、手感仍需調整。
 - **出處**：本機核心產物 `work/Codex-Xiaomi13-GPU-20261109/kernel-local-display-fit-1120-9g-artifact/`，原始建置輸入、43 項 PASS 與 ISA 稽核分別在 INPUTS.txt、logs/tests.txt、ISA.txt。
+
+### G-051 GPU Class 0 1280 MiB 配額、120 Hz TE 鎖定、backboardd 恢復與多用戶端閘門
+
+- **日期**：2026-11-25
+- **狀態**：Class 0（1280 MiB）＋120 Hz TE 鎖定＋相機重進防掉 GPU 已通過並納入 B-021；Class 1（Apple Maps）因仍觸發 `ERROR_DEVICE_LOST`，依指示暫緩排除於 B-021
+- **開關**：ADT `/chosen fuxi,gpu-bb-recover=3`、`fuxi,gpu-ncimport=606385736`、`fuxi,gpu-clients=none`（B-021 日常版安全關閉 Class 1 Maps；實驗開放時另有其他 client 位元）
+- **問題／現象**：
+  1. 長焦鏡頭退出並重新進入時容易觸發 GPU `DeviceLost` 與顯示服務降級。
+  2. Baton #17 嘗試以 NativeMetal Stick-14（CI `45629170472`，Patch `0028`/`0029`）開放 Apple Maps Class 1 Metal 渲染時，Maps 通過 selector 檢查進入渲染，但撞上 512 MiB 舊記憶體配額報 `OutOfMemory(Device)`。
+  3. Baton #18 將 Class 0 擴至 `1280 MiB`、Class 1 擴至 `1024 MiB` 後，相機重進不掉 GPU 且 120 Hz TE 鎖定極穩，但開啟 Apple Maps 時仍觸發 Class 1 GPU hang／SMMU fault，連帶導致 `backboardd` 出現 `ERROR_DEVICE_LOST`。
+- **根因**：多用戶端 Metal 配額規劃與外部 App（Maps Class 1）之著色器／command buffer 提交仍存在造成 GPU hang 與 SMMU fault 的未解邊界；而 Class 0 桌面合成與相機重進問題源於配額不足與恢復狀態機。
+- **做法**：在 `patches/kernel-metal-multiclient.patch` 實作核心多用戶端配額與恢復機制（Class 0 提高至 `1280 MiB`、`fuxi,gpu-bb-recover=3`、120 Hz TE 鎖定），更新 `ksrc:shim/fuxi-probe/gpu.c` 與 `ksrc:tools/fuxi-metal/{BackboardGate.hpp,BackboardGateTests.cpp,ClientGate.hpp,ClientGateTests.cpp,Frontend.mm,NativeSelectionTests.cpp}`、主機測試 `ksrc:tools/test-fuxi-hostimport.py` 與 `ksrc:tools/test-fuxi-m9-multiclient.py`。彙整主分支與日常版 B-021 時，依使用者決策設定 `--gpu-clients none` 暫緩排除 Maps Class 1，保留 Class 0 `1280 MiB`、120 Hz TE 與恢復保護。
+- **復現**：主分支 `ksrc:db86c4e` + `harness:541b10b`，由 `work/adsp-battery/prepare-aio-loader.py --gpu-clients none --gpu-bb-recover 3` 組裝 `native-b021-daily-1125-loader`。
+- **主機測試**：`BackboardGateTests`、`ClientGateTests`、`NativeSelectionTests`、`test-fuxi-hostimport.py`、`test-fuxi-m9-multiclient.py` 隨 56 項 workflow 主機測試全 PASS。
+- **驗證紀錄**：
+  - Baton #16：二次進出相機 0 次掉 GPU，`backboardd frames=4215 failures=0`。
+  - Baton #17（`run-aio-stick14-maps-cam-1125`，`17,029` 行）：`nativemetal-stick14-ci-45629170472`（`0029`）實證 Maps 通過 selector 檢查進入渲染，於 512 MiB 配額撞 OOM；`backboardd frames=4227 failures=0`。
+  - Baton #18（`run-aio-stick15-maps-cam-1125`，`216,141` 行）：`SWEET FB: vsync te-locked=600 fallback=0 period_us 8249..8256`（120 Hz TE 全程鎖定）；開啟 Maps 時發生 Class 1 hang／SMMU fault 導致 `backboardd` `ERROR_DEVICE_LOST`。
+  - B-021 日常短測（`run-daily-b021-smoke-1125`，`8,203` 行，無 Maps）：`FUXI GPU: through stage 16 PASS`、`gpu_fault_lost=0`、`FUXI GPU FIT: mode 3 frames 1 refused 0`、`backboardd frames=135 failures=0`、`SWEET FB: vsync te-locked=600 fallback=0 period_us 8253`。
+- **參考來源**：NativeMetal Stick-14（Run `45629170472` Patch `0028`/`0029`）、`G-050` 與 `BackboardGate`/`ClientGate` 測試框架。
+- **結論／未完成**：Class 0 `1280 MiB` 配額、120 Hz TE 鎖定與 `gpu-bb-recover=3` 已納入 B-021 常駐日常版且驗證無回歸；Maps Class 1 hang／SMMU fault 修復與系統 120 fps 全鏈路優化明確排除於 B-021，列為下一階段獨立專項目標。
+- **出處**：`work/adsp-battery/harness/patches/kernel-metal-multiclient.patch`、`ksrc:shim/fuxi-probe/gpu.c`、`ksrc:tools/fuxi-metal/`、`ksrc:tools/test-fuxi-hostimport.py`、`ksrc:tools/test-fuxi-m9-multiclient.py`、`work/Codex-Xiaomi13-GPU-20261109/run-aio-stick14-maps-cam-1125/`、`work/Codex-Xiaomi13-GPU-20261109/run-aio-stick15-maps-cam-1125/`、`work/Codex-Xiaomi13-GPU-20261109/run-daily-b021-smoke-1125/`。
 
 ## 盤點附註（2026-11-18）
 

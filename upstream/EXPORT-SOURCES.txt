@@ -1,11 +1,11 @@
 # 由工作區 work/repo-export/export-fuxi-ios.py 產生，請勿手改
-harness HEAD f959f54c3d68ae854131712125b2edce658ea301（branch codex/daily-aspect-1120）
-workspace HEAD fd63c4a3371a04d2027ffb2c3d09cc8e3b4a3118（只匯出已提交內容）
+harness HEAD 541b10b0d555dc2693c08f66959ba194536fe54a（branch codex/adsp-battery）
+workspace HEAD e6e0c2e92d233a3a997c38471c5d5a05680d85d3（只匯出已提交內容）
 
 # 核心基底：本機建置（work/localbuild/fuxi-kernel-build.sh）從本倉庫歷史取這個 tree，不連上游
 kernel-base 979e2f08c704677bb75934ae96d4686ba9d1692b 73399c0c833e17e8a3f86f921e9f473a76cd7999 zgl97/ios-fuxi
 
-ios-fuxi/ = bangprovn/ios-fuxi 27f6a31c8b27c6f9127f9cf27092968422579ccf（tree c05b0ff0d5b4d9747ef1b9e4cc9f2a0eda963d98）＋本機修改，匯出 tree 1900017e3044318e694b082240629c3c5c8373b3；本機 HEAD b3579cda7bd46a412752b9188b1f266fbc2c9d99，14 個檔案：
+ios-fuxi/ = bangprovn/ios-fuxi 27f6a31c8b27c6f9127f9cf27092968422579ccf（tree c05b0ff0d5b4d9747ef1b9e4cc9f2a0eda963d98）＋本機修改，匯出 tree 3966a5274932ccbe9821168f532926f91ae65fea；本機 HEAD b3579cda7bd46a412752b9188b1f266fbc2c9d99，14 個檔案：
   shim/fuxi-loader/build.sh
   shim/fuxi-loader/chain.c
   shim/fuxi-loader/fuxi-ram-profile.h
@@ -20,8 +20,8 @@ ios-fuxi/ = bangprovn/ios-fuxi 27f6a31c8b27c6f9127f9cf27092968422579ccf（tree c
   tools/mkadt-fuxi.py
   tools/mkadt-fuxi27.py
   tools/test-fuxi-monitor-framebuffer.py
-work/adsp-battery/ksrc/ = zgl97/ios-fuxi 979e2f08c704677bb75934ae96d4686ba9d1692b（tree 73399c0c833e17e8a3f86f921e9f473a76cd7999）＋本機 commit，ksrc HEAD 36281259a75b2c8c921340ba7563954869625835（tree f693b41b9d5eb7a6ad8181ba3515b96135c3cbb0），相對基底 236 個檔案
-  基底套 18 份核心補丁後與 ksrc HEAD 不同的檔案（都不在 xnu/、xnu27/、shim/）：tools/sync-abi-backend.py
+work/adsp-battery/ksrc/ = zgl97/ios-fuxi 979e2f08c704677bb75934ae96d4686ba9d1692b（tree 73399c0c833e17e8a3f86f921e9f473a76cd7999）＋本機 commit，ksrc HEAD db86c4e6569fbace983904deb3713f4c35cdc462（tree 18817a4bd2bf40f0bc4d5664804860196349265a），相對基底 326 個檔案
+  基底套 25 份核心補丁後與 ksrc HEAD 不同的檔案（都不在 xnu/、xnu27/、shim/）：無
 uefi-fuxi/Resources/Scripts/mkbootimg.py = ljhhkx529/uefi-fuxi 57969ab77d36a982261daef16592741ed4a1d811（AOSP，Apache-2.0，未修改）
 
 去識別化：

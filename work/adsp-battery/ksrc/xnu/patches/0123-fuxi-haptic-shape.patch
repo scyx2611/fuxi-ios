@@ -1,0 +1,226 @@
+--- a/bsd/dev/fuxi_pmic.c
++++ b/bsd/dev/fuxi_pmic.c
+@@ -23,6 +23,7 @@
+ #include "fuxi_haptic_pulse.h"
+ #include "fuxi_haptic_runtime.h"
+ #include "fuxi_haptic_rtp.h"
++#include "fuxi_haptic_shape.h"
+ #include "sweet_spmi_bus.h"
+ 
+ extern kern_return_t pmap_enter_options_addr(pmap_t, vm_map_offset_t, uint64_t, vm_prot_t, vm_prot_t, unsigned, boolean_t,
+@@ -68,6 +69,9 @@
+ static unsigned fp_rtp_pcm_enabled;
+ static unsigned fp_rtp_ready;
+ static uint64_t fp_rtp_deadline;
++/* fuxi,haptic=6：短觸感改播原廠點按（fuxi_haptic_shape.h）；level 為點按依據的請求振幅 */
++static unsigned fp_vibrate_shape, fp_shape_level, fp_shape_clicks, fp_shape_swallowed;
++static FuxiShapeBurst fp_shape_burst;
+ static struct {
+     uint8_t samples[FUXI_RTP_BYTES];
+     unsigned length;
+@@ -613,14 +617,31 @@
+     if (!click && fuxi_vibrate_decode(value, &ms, &level)) return EINVAL;
+     lck_mtx_lock(&fp_vibrate_lock);
+     uint64_t now = fp_torch_now();
+-    if (click && fp_vibrate_state.failed) {
++    unsigned shape = FUXI_SHAPE_PASS;
++    if (click) {
++        fp_shape_level = 0;
++    } else if (fp_vibrate_shape && !fp_vibrate_state.failed && __atomic_load_n(&fp_rtp_ready, __ATOMIC_ACQUIRE)) {
++        shape = fuxi_shape_classify(&fp_shape_burst, now, ms);
++        if (shape == FUXI_SHAPE_CLICK) {
++            /* 與 HAL 的 RTP 點按同一條路：停掉 DIRECT，排 40 ms 內的點按 */
++            click = 1;
++            fp_shape_level = level;
++            ms = level = 0;
++            fp_shape_clicks++;
++        } else if (shape == FUXI_SHAPE_SWALLOW) {
++            fp_shape_swallowed++;
++        }
++    }
++    if (shape == FUXI_SHAPE_SWALLOW) {
++        error = 0;
++    } else if (click && fp_vibrate_state.failed) {
+         error = EIO;
+     } else {
+         error = fuxi_vibrate_request_level(&fp_vibrate_state, ms, level, now) ? EIO : 0;
+         if (!error) fp_rtp_deadline = click ? now + 40000000ull : 0;
+     }
+     lck_mtx_unlock(&fp_vibrate_lock);
+-    if (!error) fp_vibrate_kick_worker();
++    if (!error && shape != FUXI_SHAPE_SWALLOW) fp_vibrate_kick_worker();
+     return error;
+ }
+ 
+@@ -695,6 +716,7 @@
+         uint64_t deadline = fp_vibrate_state.deadline;
+         int click = !playing && !failed && now < fp_rtp_deadline;
+         if (!playing) fp_rtp_deadline = 0;
++        unsigned shape_level = fp_shape_level, shape_clicks = fp_shape_clicks, shape_swallowed = fp_shape_swallowed;
+         if (!click && !want && !playing && !failed && fp_rtp_count) {
+             unsigned slot = fp_rtp_head;
+             queued_ns = fp_rtp_pending[slot].deadline - 40000000ull;
+@@ -721,13 +743,21 @@
+             const uint8_t *wave = pcm_length ? pcm : fp_rtp_wave;
+             unsigned length = pcm_length ? pcm_length : FUXI_RTP_BYTES;
+             unsigned boosted_peak = pcm_length ? fuxi_rtp_pcm_gain(pcm, pcm_length) : 0;
+-            if (!result) result = fuxi_rtp_click(&io, fp_rtp_write, fp_rtp_read_status, wave, length, fp_rtp_vmax, &stats);
++            uint32_t click_vmax = fp_rtp_vmax;
++            if (fp_vibrate_shape && !pcm_length) {
++                uint32_t base = fp_rtp_vmax ? fp_rtp_vmax : fp_vibrate_android_vmax;
++                click_vmax = base <= FUXI_RTP_TEST_VMAX_LIMIT ? fuxi_shape_vmax(shape_level, base) : 0;
++            }
++            if (!result) result = fuxi_rtp_click(&io, fp_rtp_write, fp_rtp_read_status, wave, length, click_vmax, &stats);
+             if (pcm_length && !result) pcm_played++;
+             if (logged < 64 || result) {
+                 logged++;
+                 if (pcm_length) printf("FUXI PMIC: haptic RTP FIFO UI PCM bytes=%u polls=%u rc=%d peak=%u played=%u expired=%u queue_us=%llu service_us=%llu\n",
+                     stats.sent, stats.polls, result, boosted_peak, pcm_played, pcm_expired,
+                     (now >= queued_ns ? now - queued_ns : 0) / 1000ull, (fp_torch_now() - now) / 1000ull);
++                else if (fp_vibrate_shape) printf("FUXI PMIC: haptic RTP FIFO UI click bytes=%u polls=%u rc=%d pre=%u refill=%u last=%u vmax=%#x shape level=%u clicks=%u swallowed=%u\n",
++                    stats.sent, stats.polls, result, stats.before_start, stats.before_refill, stats.last_fill,
++                    click_vmax ? click_vmax : fp_vibrate_android_vmax, shape_level, shape_clicks, shape_swallowed);
+                 else printf("FUXI PMIC: haptic RTP FIFO UI click bytes=%u polls=%u rc=%d pre=%u refill=%u last=%u vmax=%#x\n",
+                     stats.sent, stats.polls, result, stats.before_start, stats.before_refill, stats.last_fill,
+                     fp_rtp_vmax ? fp_rtp_vmax : fp_vibrate_android_vmax);
+@@ -1031,7 +1061,7 @@
+     }
+     fp_torch_audit_enabled = torch_audit == 1 && mode == 3;
+     if ((!mode && !haptic) || __atomic_exchange_n(&fp_started, 1u, __ATOMIC_ACQ_REL)) return;
+-    if (mode > 3 || haptic > 5) {
++    if (mode > 3 || haptic > 6) {
+         printf("FUXI PMIC: unsupported mode=%u haptic=%u; hardware untouched\n", mode, haptic);
+         return;
+     }
+@@ -1050,14 +1080,14 @@
+     fp_survey(7, 0xf200, "haptic-boost");
+     fp_haptic_fifo_survey(mode);
+     if (haptic == 1) fp_haptic_diagnostic();
+-    if (haptic == 5) {
++    if (haptic == 5 || haptic == 6) {
+         if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
+             SecureDTGetProperty(chosen, "fuxi,haptic-rtp", &property, &bytes) != kSuccess ||
+             bytes != FUXI_RTP_BYTES) haptic = 0;
+         else {
+             fp_rtp_wave = property;
+             unsigned hal = 0;
+-            fp_rtp_pcm_enabled = PE_parse_boot_argn("fuxihalhaptic", &hal, sizeof(hal)) && hal == 3;
++            fp_rtp_pcm_enabled = haptic == 5 && PE_parse_boot_argn("fuxihalhaptic", &hal, sizeof(hal)) && hal == 3;
+             if (SecureDTGetProperty(chosen, "fuxi,haptic-rtp-vmax", &property, &bytes) == kSuccess &&
+                 bytes == sizeof(fp_rtp_vmax)) {
+                 memcpy(&fp_rtp_vmax, property, sizeof(fp_rtp_vmax));
+@@ -1065,10 +1095,16 @@
+             }
+         }
+     }
+-    if (haptic >= 2 && haptic <= 5) {
++    if (haptic >= 2 && haptic <= 6) {
+         fp_vibrate_transient = haptic == 4;
+         fp_vibrate_selftest = haptic == 3;
++        fp_vibrate_shape = haptic == 6;
+         fp_vibrate_runtime_start();
++        if (fp_vibrate_shape && __atomic_load_n(&fp_vibrate_ready, __ATOMIC_ACQUIRE))
++            printf("FUXI PMIC: haptic shape on: first request <=%ums plays the RTP click at VMAX %u/256..1 of %#x by level, "
++                "burst swallowed %ums, gap %ums\n", (unsigned)FUXI_SHAPE_CLICK_MS, (unsigned)FUXI_SHAPE_FLOOR,
++                fp_rtp_vmax ? fp_rtp_vmax : fp_vibrate_android_vmax, (unsigned)FUXI_SHAPE_SWALLOW_MS,
++                (unsigned)FUXI_SHAPE_GAP_MS);
+     }
+     if (mode == 2) fp_flash_pulse();
+     if (mode == 3) fp_torch_start();
+--- /dev/null
++++ b/bsd/dev/fuxi_haptic_shape.h
+@@ -0,0 +1,94 @@
++#ifndef FUXI_HAPTIC_SHAPE_H
++#define FUXI_HAPTIC_SHAPE_H
++/*
++ * HAP525 觸感整形（ADT /chosen fuxi,haptic=6；預設關，需同時帶 fuxi,haptic-rtp 原廠點按波形）。
++ *
++ * 2026-11-20 使用者回報 iOS 震動「有些地方有震有些沒有，震感很爛，不是 iOS 的震動」。
++ * iOS HAL（FuxiAudio Actuator）每 10 ms 視窗依 PCM 峰值送一次 DIRECT_PLAY 請求（level<<16 | ms，
++ * level 0..128）。U-021 實機：SpringBoard 的輕觸只有一個 6 ms、level 17 的視窗（amp=0x11），
++ * LRA 約 5.7 ms 一週期，還沒起振就停，感覺不到；重的則是共振頻率的嗡聲加拖尾。
++ * 同機 Android 所有 UI 點按都以 FIFO 24 kHz 播 376 bytes 的 0_click_P_RTP.bin（約 16 ms，含起振與煞車，
++ * U-021 Android 基準）。11-19 mode 5 以固定 VMAX 播同一波形，使用者覺得所有場景強弱相近。
++ *
++ * 整形規則（只看請求的時間、毫秒與 level，不改 HAL）：
++ * - 間隔 ≥ FUXI_SHAPE_GAP_MS 才算新的一段觸感；
++ * - 新的一段若第一個請求 ≤ FUXI_SHAPE_CLICK_MS，改播原廠點按波形，VMAX 依該請求的 level
++ *   取平方根曲線，落在 Android VMAX 的 FUXI_SHAPE_FLOOR/256（約 45%）到 100%（強弱可分，最強不超過
++ *   Android 自己用的強度）；
++ * - 同一段在開始後 FUXI_SHAPE_SWALLOW_MS 內的後續視窗（含停止）屬於同一個 transient，吞掉；
++ * - 超過吞掉期間仍在送，就是連續觸感，交回原本的 DIRECT_PLAY（各視窗 level 照用）。
++ * 第一個請求 > FUXI_SHAPE_CLICK_MS 的（VibePattern 鈴聲、充電 400 ms）整段照舊。
++ */
++#include <stdint.h>
++
++enum {
++    FUXI_SHAPE_CLICK_MS = 20,
++    FUXI_SHAPE_SWALLOW_MS = 40,     /* 點按波形約 16 ms；iOS 較重的 transient 也在 30 ms 內 */
++    FUXI_SHAPE_GAP_MS = 8,
++    FUXI_SHAPE_DEFAULT_LEVEL = 96,  /* level 0（沿用暫存器振幅）的使用端當作中強 */
++    FUXI_SHAPE_MAX_LEVEL = 128,     /* HAL 的 ACTUATOR_MAX_LEVEL */
++    FUXI_SHAPE_FLOOR = 115          /* /256，最弱約 45% */
++};
++enum { FUXI_SHAPE_PASS = 0, FUXI_SHAPE_CLICK = 1, FUXI_SHAPE_SWALLOW = 2 };
++
++typedef struct {
++    uint64_t start, end;  /* 奈秒；end 為這段目前預計的結束時間 */
++    unsigned active;
++    unsigned clicked;     /* 這段已用點按波形代替，且仍在吞掉期間 */
++} FuxiShapeBurst;
++
++static inline unsigned fuxi_shape_isqrt(unsigned value)
++{
++    unsigned root = 0, bit = 1u << 30;
++    while (bit > value) bit >>= 2;
++    while (bit) {
++        if (value >= root + bit) {
++            value -= root + bit;
++            root = (root >> 1) + bit;
++        } else {
++            root >>= 1;
++        }
++        bit >>= 2;
++    }
++    return root;
++}
++
++/* 這次請求在 now（奈秒）送來、要震 ms 毫秒（0 是停止，已經 fuxi_vibrate_decode 檢查）。 */
++static inline unsigned fuxi_shape_classify(FuxiShapeBurst *burst, uint64_t now, unsigned ms)
++{
++    const uint64_t ms_ns = 1000000ull;
++    if (!burst) return FUXI_SHAPE_PASS;
++    int fresh = !burst->active || now < burst->start || now >= burst->end + FUXI_SHAPE_GAP_MS * ms_ns;
++    int swallowing = !fresh && burst->clicked && now - burst->start < FUXI_SHAPE_SWALLOW_MS * ms_ns;
++    if (!ms) {
++        /* 點按還在吞掉期間：不讓停止取消已排定的點按 */
++        if (swallowing) return FUXI_SHAPE_SWALLOW;
++        burst->clicked = 0;
++        if (burst->active && now < burst->end) burst->end = now;
++        return FUXI_SHAPE_PASS;
++    }
++    uint64_t end = now + (uint64_t)ms * ms_ns;
++    if (fresh) {
++        burst->active = 1;
++        burst->start = now;
++        burst->end = end;
++        burst->clicked = ms <= FUXI_SHAPE_CLICK_MS;
++        return burst->clicked ? FUXI_SHAPE_CLICK : FUXI_SHAPE_PASS;
++    }
++    if (end > burst->end) burst->end = end;
++    if (swallowing) return FUXI_SHAPE_SWALLOW;
++    burst->clicked = 0;
++    return FUXI_SHAPE_PASS;
++}
++
++/* level 0..128（0 視為 FUXI_SHAPE_DEFAULT_LEVEL，超過 128 視為 128）換成點按的 VMAX 碼；base 為 Android VMAX。 */
++static inline uint32_t fuxi_shape_vmax(unsigned level, uint32_t base)
++{
++    if (!level) level = FUXI_SHAPE_DEFAULT_LEVEL;
++    if (level > FUXI_SHAPE_MAX_LEVEL) level = FUXI_SHAPE_MAX_LEVEL;
++    if (base > 0xffu) return 0;
++    unsigned root = fuxi_shape_isqrt(level * 512u); /* 0..256 */
++    uint32_t vmax = (base * (FUXI_SHAPE_FLOOR * 256u + (256u - FUXI_SHAPE_FLOOR) * root) + 32768u) / 65536u;
++    return vmax || !base ? vmax : 1u;
++}
++#endif

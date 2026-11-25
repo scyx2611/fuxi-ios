@@ -137,13 +137,19 @@ int main(void) {
             CHECK(!fwa_map(&arena, slot->memory, 1));
             slot->memory = NULL;
         } else {
-            uint32_t sizes[] = {1, 63, 64, 65, 4095, 4096, 4097, 65535, 524289, 1048577};
-            slot->bytes = sizes[random % 10];
+            uint32_t sizes[] = {1, 63, 64, 65, 128, 256, 512, 1024, 2048, 4095, 4096, 4097, 65535, 524289, 1048577};
+            slot->bytes = sizes[random % (sizeof(sizes) / sizeof(sizes[0]))];
             slot->memory = fwa_alloc(&arena, slot->bytes, &slot->bus);
             if (slot->memory) {
                 CHECK(fwa_map(&arena, slot->memory, slot->bytes) == slot->bus);
                 CHECK(fwa_map(&arena, (uint8_t *)slot->memory + slot->bytes - 1, 1) == slot->bus + slot->bytes - 1);
                 CHECK(!fwa_map(&arena, (uint8_t *)slot->memory + slot->bytes - 1, 2));
+                if (slot->bytes <= 4096) {
+                    uint32_t rounded = (slot->bytes + 63u) & ~63u, align = 64u;
+                    while (align < rounded && align < 4096u) { align <<= 1; }
+                    CHECK((slot->bus & (align - 1u)) == 0);
+                    CHECK((slot->bus >> 12) == ((slot->bus + slot->bytes - 1u) >> 12));
+                }
                 const uint8_t *bytes = slot->memory;
                 for (unsigned at = 0; at < slot->bytes; at++) {
                     if (bytes[at]) { CHECK(0); }
@@ -155,6 +161,33 @@ int main(void) {
     }
     for (unsigned index = 0; index < 256; index++) {
         if (slots[index].memory) CHECK(!fwa_free(&arena, slots[index].bytes, slots[index].memory, slots[index].bus));
+    }
+    verify(&arena); CHECK(arena.count == 2);
+    /* Regression: place free space at offset 0xfc0 within a 4 KiB page and ensure sub-page
+     * DMA pool classes (256/512/1024/2048 B) never straddle a 4 KiB boundary and stay 128 B aligned. */
+    void *fillers[63];
+    uint64_t filler_bus[63];
+    for (unsigned index = 0; index < 63; index++) {
+        fillers[index] = fwa_alloc(&arena, 64, &filler_bus[index]);
+        CHECK(fillers[index] != NULL);
+    }
+    CHECK((filler_bus[62] & 4095u) == 0xf80u);
+    uint32_t pool_classes[] = {256, 512, 1024, 2048};
+    void *pool_ptrs[4];
+    uint64_t pool_bus[4];
+    for (unsigned index = 0; index < 4; index++) {
+        uint32_t sz = pool_classes[index];
+        pool_ptrs[index] = fwa_alloc(&arena, sz, &pool_bus[index]);
+        CHECK(pool_ptrs[index] != NULL);
+        CHECK((pool_bus[index] & (sz - 1u)) == 0);
+        CHECK((pool_bus[index] & 127u) == 0);
+        CHECK((pool_bus[index] >> 12) == ((pool_bus[index] + sz - 1u) >> 12));
+    }
+    for (unsigned index = 0; index < 4; index++) {
+        CHECK(!fwa_free(&arena, pool_classes[index], pool_ptrs[index], pool_bus[index]));
+    }
+    for (unsigned index = 0; index < 63; index++) {
+        CHECK(!fwa_free(&arena, 64, fillers[index], filler_bus[index]));
     }
     verify(&arena); CHECK(arena.count == 2);
     CHECK(!fwa_init(&arena, memory, 0xa0000000, 8192, blocks, 2));

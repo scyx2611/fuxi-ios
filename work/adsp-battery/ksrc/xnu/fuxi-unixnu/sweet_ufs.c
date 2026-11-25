@@ -605,7 +605,7 @@ fx_gpt_lookup(const char *want, uint64_t *first, uint64_t *blocks)
 	memcpy(&entry_lba, b + 72, 8);
 	memcpy(&nent, b + 80, 4);
 	memcpy(&esz, b + 84, 4);
-	if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) return ENXIO;
+	if (esz != 128 || nent == 0 || nent > BOUNCE_SIZE / 128) return ENXIO;
 	error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
 	if (error) return error;
 	for (uint32_t i = 0; i < nent; i++) {
@@ -1422,6 +1422,88 @@ fx_log_start(void)
 	} else {
 		fx_log_ok = false;
 	}
+}
+
+static bool fx_persist_probed;
+static bool fx_persist_ok;
+static uint64_t fx_persist_first;
+static uint64_t fx_persist_blocks;
+
+/*
+ * Strictly read-only access to Android's unencrypted LUN 0 GPT partition "persist"
+ * (for opt-in fuxi,rtc-persist=1 /time/ats_2 lookup in bsd/dev/fuxi_keys.c).
+ * Never modifies su.first_block, su.nblocks, su.writable, fx_root, or fx_log;
+ * every I/O is bounds-checked and uses ufs_read_blocks() (SCSI READ(10), write=false).
+ * ufs_scsi() independently enforces EROFS on any write outside fx_root / fx_log.
+ */
+int fuxi_ufs_persist_find(uint64_t *first, uint64_t *blocks);
+int
+fuxi_ufs_persist_find(uint64_t *first, uint64_t *blocks)
+{
+	if (!first || !blocks || !su.ready || su.poisoned || su.unixnu) {
+		return 0;
+	}
+	lck_mtx_lock(&sweet_ufs_lock);
+	if (!fx_persist_probed && !su.poisoned) {
+		uint8_t saved = su.lun;
+		uint64_t lo = 0, cnt = 0;
+		if (!fuxi_ufs_check_idle()) {
+			su.lun = 0;
+			if (!fx_gpt_lookup("persist", &lo, &cnt) &&
+			    cnt > 0 && lo <= UINT32_MAX &&
+			    cnt - 1 <= UINT32_MAX - lo) {
+				bool overlaps_userdata = fx_part_blocks != 0 &&
+				    lo < fx_part_first + fx_part_blocks &&
+				    fx_part_first < lo + cnt;
+				if (!overlaps_userdata) {
+					fx_persist_first = lo;
+					fx_persist_blocks = cnt;
+					fx_persist_ok = true;
+				}
+			}
+			su.lun = saved;
+			fx_persist_probed = true;
+		}
+		su.lun = saved;
+	}
+	bool found = fx_persist_ok;
+	if (found) {
+		*first = fx_persist_first;
+		*blocks = fx_persist_blocks;
+	}
+	lck_mtx_unlock(&sweet_ufs_lock);
+	return found ? 1 : 0;
+}
+
+int fuxi_ufs_persist_read(uint64_t rel_lba, uint32_t blocks, void *dst);
+int
+fuxi_ufs_persist_read(uint64_t rel_lba, uint32_t blocks, void *dst)
+{
+	int error;
+	if (!dst || !blocks || blocks > BOUNCE_SIZE / UFS_BLOCK ||
+	    !su.ready || su.poisoned || su.unixnu) {
+		return 0;
+	}
+	lck_mtx_lock(&sweet_ufs_lock);
+	if (!fx_persist_ok || rel_lba >= fx_persist_blocks ||
+	    blocks > fx_persist_blocks - rel_lba) {
+		lck_mtx_unlock(&sweet_ufs_lock);
+		return 0;
+	}
+	uint8_t saved = su.lun;
+	error = fuxi_ufs_check_idle();
+	if (!error) {
+		su.lun = 0;
+		error = ufs_read_blocks(fx_persist_first + rel_lba, blocks);
+		su.lun = saved;
+		if (!error) {
+			memcpy(dst, (const void *)(su.dma + DMA_BOUNCE),
+			    (size_t)blocks * UFS_BLOCK);
+		}
+	}
+	su.lun = saved;
+	lck_mtx_unlock(&sweet_ufs_lock);
+	return !error;
 }
 #endif
 

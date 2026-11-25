@@ -1,0 +1,75 @@
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -124,6 +124,58 @@
+ #include <security/mac_framework.h>
+ #endif
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <kern/backtrace.h>
++#include <mach/vm_param.h>
++
++/* 0044（kern_exit.c）：/chosen fuxi,media-exit-trace 或 fuximediaexit 開關，以及 media／WebKit 目標分類 */
++unsigned fuxi_media_exit_enabled(void);
++unsigned fuxi_media_exit_kind(const char *name);
++/* 0043（exception.c）：印出目前執行緒（這裡是送出者）的 user 暫存器與 frame-pointer 呼叫鏈 */
++void sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode);
++
++/*
++ * SIGKILL／SIGTERM 送往 media／WebKit 目標（kind 1）時，記下送出者名稱與 pid、訊號原因、
++ * 去 slide 的核心呼叫鏈；送出者是別的 user 行程時再印它的 user 呼叫鏈（以 "sig-sender:" 開頭，
++ * 不是送出者閃退）。最多 32 筆，開關預設關。
++ */
++static void
++fuxi_media_signal_trace(proc_t target, int flavor, int signum, os_reason_t reason)
++{
++	static unsigned traced;
++	const char *name = proc_best_name(target);
++	proc_t cur = current_proc();
++	uintptr_t bt[12];
++	unsigned int frames, i;
++	char line[320];
++	int n;
++
++	if (fuxi_media_exit_kind(name) != 1 ||
++	    __atomic_fetch_add(&traced, 1u, __ATOMIC_RELAXED) >= 32u) {
++		return;
++	}
++	printf("FUXI SIG: %s[%d] sig=%d by=%s[%d] flavor=0x%x ns=%u code=0x%llx\n",
++	    name, proc_getpid(target), signum,
++	    cur != PROC_NULL ? proc_best_name(cur) : "(null)",
++	    cur != PROC_NULL ? proc_getpid(cur) : -1, flavor,
++	    reason != OS_REASON_NULL ? reason->osr_namespace : 0u,
++	    reason != OS_REASON_NULL ? (unsigned long long)reason->osr_code : 0ull);
++	frames = backtrace(bt, (unsigned int)(sizeof(bt) / sizeof(bt[0])), NULL, NULL);
++	n = snprintf(line, sizeof(line), "FUXI SIG: kbt");
++	for (i = 0; i < frames && n > 0 && n < (int)sizeof(line) - 24; i++) {
++		n += snprintf(line + n, sizeof(line) - (size_t)n, " 0x%lx",
++		    (unsigned long)VM_KERNEL_UNSLIDE(bt[i]));
++	}
++	printf("%s\n", line);
++	if (cur != PROC_NULL && cur != kernproc && cur != target) {
++		char tag[48];
++
++		snprintf(tag, sizeof(tag), "sig-sender:%s", proc_best_name(cur));
++		sweet_crash_log(tag, proc_getpid(cur), signum, 0, 0);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ /*
+  * Missing prototypes that Mach should export
+  *
+@@ -2098,6 +2150,13 @@
+ 		sig_proc = p;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if ((signum == SIGKILL || signum == SIGTERM) && sig_proc != PROC_NULL &&
++	    fuxi_media_exit_enabled()) {
++		fuxi_media_signal_trace(sig_proc, flavor, signum, signal_reason);
++	}
++#endif
++
+ 	if ((sig_task == TASK_NULL) || is_kerneltask(sig_task)) {
+ 		os_reason_free(signal_reason);
+ 		return;

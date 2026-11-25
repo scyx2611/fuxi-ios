@@ -166,6 +166,9 @@ typedef struct {void (*fn)(void *,void *);} thread_call_data_t;
 static uint64_t ticks;
 static uint64_t counter(const char *name) {return strcmp(name,"cntfrq_el0")?ticks:1000000;}
 static uint64_t mach_absolute_time(void) {return ticks;}
+static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *ns) {*ns=t*1000ULL;}
+static int proc_selfpid(void) {return 0;}
+static void proc_selfname(char *b,int n) {if(b && n>0) b[0]=0;}
 #define rsr(r) counter(r)
 static unsigned fg_abi_present_wait;
 #define G4_FB_PA 0xb8000000ULL
@@ -179,6 +182,7 @@ static unsigned fg_abi_inline,fg_inl_ready,fg_root_client,fg_inl_busy,fg_inl_fbm
 static uint64_t presentL2[512];
 static volatile uint64_t *fg_l2(void) {return presentL2;}
 static unsigned fg_access_failed,fg_busy,fg_client_busy,g3_wptr,g3_bank=2,g3_asid=3;
+#define FG_IRQ_BITS 1u
 enum { FG_PK_COPY, FG_PK_IDLE, FG_PK_CAP, FG_PK_SUBMIT, FG_PK_NOTDUE, FG_PK_OTHER, FG_PK_REASONS }; /* as fuxi_adreno.c */
 static unsigned fg_pk_n;
 static int fg_pk_flush(unsigned why);
@@ -260,6 +264,7 @@ static void thread_call_setup_with_options(thread_call_data_t *c,void (*fn)(void
 static int thread_call_enter_delayed(thread_call_data_t *c,uint64_t d) {(void)c;(void)d;enqueued++;return 0;}
 '''
 BACKEND_TEST = r'''
+static uint64_t fg_leaf_val(uint64_t x) { volatile uint64_t *p=fg_abi_leaf(x); return p ? *p : 0; }
 static void seed(void) {
  memset(scratch,0x5a,sizeof(scratch)); memset(regs,0,sizeof(regs));memset(sregs,0,sizeof(sregs));
  regs[0xe07]=regs[0xe09]=0xfffff000;regs[0xe08]=regs[0xe0a]=0x1ffff;regs[0x534]=1;regs[0xe0b]=0x1000000;regs[0xe0d]=0x12ff000;regs[0xe01]=3u<<21;
@@ -269,13 +274,13 @@ static void seed(void) {
  fg_abi_live=fg_abi_seq=fg_abi_completed=fg_abi_poisoned=fg_abi_timed_out=0;fg_abi_hang_dumped=0;
  fg_faults=fg_suspends=highReads=rollover=0;
  ticks=tlbs=failTlb=doorbells=enqueued=drains=fault=cacheClean=cacheInvalidate=0;tlbiWrites=failTlbi=cohMode=delays=0;
- memset(fg_abi_imports,0,sizeof(fg_abi_imports));fg_abi_host_handoff=fg_abi_ncimport=ncimportArg=0;fg_abi_coh=fg_abi_coh_tries=0;memset(fg_abi_coh_page,0,sizeof(fg_abi_coh_page));
+ memset(fg_abi_dummy_imports,0,sizeof(fg_abi_dummy_imports));fg_abi_host_handoff=fg_abi_ncimport=ncimportArg=0;fg_abi_coh=fg_abi_coh_tries=0;memset(fg_abi_coh_page,0,sizeof(fg_abi_coh_page));
  fg_abi_cleaned=fg_abi_skipped=fg_abi_invalidated=0;
  readFault=sreadFault=writeFail=writeCount=logLines=hangLines=0;
  memset(gmuRegs,0,sizeof(gmuRegs));fenceDrops=fenceStuck=gmuReads=gmuWrites=stallLines=0;
  fg_wptr_fence=fg_abi_unstick=fg_abi_stage=fg_abi_stall_lines=0;memset(fg_wptr_stats,0,sizeof(fg_wptr_stats));
  memset(fg_abi_ibs,0,sizeof(fg_abi_ibs));memset(fg_abi_stall_stats,0,sizeof(fg_abi_stall_stats));
- memset(fg_abi_maps,0,sizeof(fg_abi_maps));fg_abi_map_seq=fg_abi_submit_map_seq=0;
+ memset(fg_abi_dummy_maps,0,sizeof(fg_abi_dummy_maps));fg_abi_map_seq=fg_abi_submit_map_seq=0;
 }
 static unsigned wait_us(void){unsigned k;return fuxi_gpu_abi_submit_wait_us(&k);}
 static unsigned wakes;static void count_wake(void) {wakes++;}
@@ -284,7 +289,8 @@ static void reset(void) {
  assert(fg_abi_init()); assert(fuxi_gpu_abi_available());
 }
 static void complete(void) {
- g_wr(G3_FENCE_PA,FG_ABI_FENCE_OFF+4,fg_abi_seq);
+ struct fuxi_gpu_vm *v=fg_active_vm ? fg_active_vm : fg_default_vm;
+ if(v) g_wr(G3_FENCE_PA,v->fence_off+4,v->seq); else g_wr(G3_FENCE_PA,FG_ABI_FENCE_OFF+4,fg_abi_seq);
  regs[0x806]=regs[0x807]=g3_wptr;regs[0x210]=0;
 }
 /* Models the CP executing the self-test IB. cohMode 1: coherent (GPU sees the CPU's cached values and the CPU sees GPU writes);
@@ -293,7 +299,9 @@ static void gpu_model(void) {
  if(cohMode==3) {ticks+=60000;return;}
  if(cohMode==4) {fault=1;regs[0x928]=1;return;}
  const uint64_t base=FG_ABI_VA_START+FG_ABI_VA_SIZE-0x10000;
- unsigned coh=cohMode==1 || (cohMode==6 && (*fg_abi_leaf(base+0x4000)&(1u<<2)) && ((*fg_abi_leaf(base+0x4000)>>8)&3)==3);
+ struct fuxi_gpu_vm *v=fg_active_vm ? fg_active_vm : fg_default_vm;
+ volatile uint64_t *lf=fg_abi_leaf_vm(v,base+0x4000);
+ unsigned coh=cohMode==1 || (cohMode==6 && lf && (*lf&(1u<<2)) && ((*lf>>8)&3)==3);
  uint32_t *ib=(uint32_t *)(scratch+(FG_ABI_COH_IB-G_MEM));
  uint32_t *res=(uint32_t *)(scratch+(FG_ABI_COH_RES-G_MEM));
  uint32_t *page=(uint32_t *)fg_abi_coh_page;
@@ -385,7 +393,8 @@ int main(void) {
  assert(*(uint64_t *)G_PTR(G3_PT)==0x5a5a5a5a5a5a5a5aULL);
  for(uint64_t pa=G5_META_PA;pa<FG_FW_BASE+3*FG_FW_SLOT;pa+=8)
   assert(*(uint64_t *)G_PTR(pa)==0x5a5a5a5a5a5a5a5aULL);
- volatile uint64_t *root=(volatile uint64_t *)G_PTR(FG_ABI_PT);
+ assert(fg_ensure_default_vm());
+ volatile uint64_t *root=fg_default_vm->root_va;
  assert((root[0]&3)==3 && (root[1]&3)==3 && !root[2]);
  volatile uint64_t *runtime=(volatile uint64_t *)G_PTR(FG_ABI_PT+12288);
  assert((runtime[0]&~4095ULL)==G3_SQE_PA && (runtime[0]&0xc0)==0xc0);
@@ -408,7 +417,7 @@ int main(void) {
  assert(!fuxi_gpu_abi_map(0x201ff000-0x1000,source,0x4000,3,0,2));
  for(unsigned off=0;off<0x4000;off+=4096) assert(*fg_abi_leaf(0x201ff000-0x1000+off));
  assert(*fg_abi_leaf(0x20200000)!=*fg_abi_leaf(0x201ff000) && !fuxi_gpu_abi_unmap(0x201ff000-0x1000,0x4000));
- assert(!*fg_abi_leaf(0x20200000) && !*fg_abi_leaf(0x201fe000));
+ assert(!fg_leaf_val(0x20200000) && !fg_leaf_val(0x201fe000));
  assert(fuxi_gpu_abi_map(va,source,bytes,3,0,2)==-1); /* no replacement */
  assert(!fuxi_gpu_abi_map(0x7ffff000,source,4096,1,1,3));
  assert((*fg_abi_leaf(0x7ffff000)&0xfff)==(3|3u<<6|1u<<2|3u<<8|1u<<10));
@@ -421,7 +430,7 @@ int main(void) {
  assert(fuxi_gpu_abi_submit(addresses,sizes,1,&fence)==1 && !doorbells);
  fg_scanout_reserved=0;
  assert(!fuxi_gpu_abi_submit(addresses,sizes,1,&fence) && fence==1 && fg_client_busy && enqueued==1);
- assert(sregs[(g_cb(g3_bank)+0x20)/4]==(uint32_t)FG_ABI_PT);
+ assert(sregs[(g_cb(g3_bank)+0x20)/4]==(uint32_t)fg_default_vm->root_pa);
  assert(fuxi_gpu_abi_submit(addresses,sizes,1,&fence)==1 && doorbells==1);
  assert(fuxi_gpu_abi_unmap(va,bytes)==1);
  /* A map of free VA does not wait for the running job: leaf and used bit published, no TLBI, doorbell or retirement. */
@@ -436,7 +445,7 @@ int main(void) {
  assert(!fg_client_busy && !fuxi_gpu_abi_poll(fence) && !drains);
  assert(sregs[(g_cb(g3_bank)+0x20)/4]==(uint32_t)G3_PT);
  assert(!fuxi_gpu_abi_unmap(va,bytes));
- for(unsigned off=0;off<bytes;off+=4096) assert(!*fg_abi_leaf(va+off));
+ for(unsigned off=0;off<bytes;off+=4096) assert(!fg_leaf_val(va+off));
  assert(!fuxi_gpu_abi_map(va,source,bytes,3,0,2)); /* reuse after TLBI */
  /* Client never calls WaitFence: delayed callback must still stop DMA. */
  for(unsigned good=0;good<2;good++) {
@@ -465,7 +474,7 @@ int main(void) {
  for(unsigned i=0;i<FG_ABI_MAX_IMPORTS;i++)
   assert(!fuxi_gpu_abi_map_import(0x20000000+i*16384,source+i*16384,16384,3));
  assert(FG_ABI_MAX_IMPORTS>=512);
- assert(fuxi_gpu_abi_map_import(0x30000000,source,16384,3)==-1 && !*fg_abi_leaf(0x30000000));
+ assert(fuxi_gpu_abi_map_import(0x30000000,source,16384,3)==-1 && !fg_leaf_val(0x30000000));
  assert(!fuxi_gpu_abi_unmap(0x20000000+300*16384,16384));
  assert(!fuxi_gpu_abi_map_import(0x20000000+300*16384,source,16384,3));
  assert(!fuxi_gpu_abi_submit(addresses,sizes,1,&fence));
@@ -565,7 +574,7 @@ int main(void) {
  assert(fuxi_gpu_abi_submit(addresses,sizes,1,&fence)==1 && fuxi_gpu_abi_unmap(va,bytes)==1 && !fuxi_gpu_abi_map(0x30010000,source,4096,3,0,2));
  complete();tlbs=0;
  assert(!fuxi_gpu_abi_unmap(va,bytes) && !fg_client_busy && tlbs==2 && !drains); /* restore-switch + the unmap's own TLBI */
- assert(sregs[(g_cb(g3_bank)+0x20)/4]==(uint32_t)G3_PT && !*fg_abi_leaf(va));
+ assert(sregs[(g_cb(g3_bank)+0x20)/4]==(uint32_t)G3_PT && !fg_leaf_val(va));
  assert(!fuxi_gpu_abi_map(va,source,bytes,3,0,2) && !fuxi_gpu_abi_submit(addresses,sizes,1,&fence));
  complete();uint64_t second=0;
  assert(!fuxi_gpu_abi_submit(addresses,sizes,1,&second) && second==fence+1 && doorbells==3 && fg_client_busy);
@@ -623,12 +632,12 @@ int main(void) {
  /* Cached overlap mirror replaces the NC leaf read: exact 4K overlap refusal, nothing published on refusal, unmap/init clear. */
  reset();assert(!fuxi_gpu_abi_map(va,source,32768,3,0,2));
  assert(fuxi_gpu_abi_map(va+0x7000,source,8192,3,0,2)==-1 && fuxi_gpu_abi_map(va-4096,source,8192,3,0,2)==-1);
- assert(!*fg_abi_leaf(va-4096) && !*fg_abi_leaf(va+0x8000));
+ assert(!fg_leaf_val(va-4096) && !fg_leaf_val(va+0x8000));
  assert(!fuxi_gpu_abi_map(va+0x8000,source,4096,3,0,2) && !fuxi_gpu_abi_map(va-4096,source,4096,3,0,2));
  assert(!fuxi_gpu_abi_unmap(va,32768) && !fg_abi_used_get(fg_abi_pg(va)) && fg_abi_used_get(fg_abi_pg(va+0x8000)));
  assert(!fuxi_gpu_abi_map(va,source,32768,3,0,2) && fuxi_gpu_abi_map(va,source,4096,3,0,2)==-1);
  assert(!fuxi_gpu_abi_unmap(va,32768) && !fuxi_gpu_abi_unmap(va+0x8000,4096) && !fuxi_gpu_abi_unmap(va-4096,4096));
- for(unsigned i=0;i<sizeof(fg_abi_used)/sizeof(fg_abi_used[0]);i++) assert(!fg_abi_used[i]);
+ for(unsigned i=0;i<sizeof(fg_abi_dummy_used)/sizeof(fg_abi_dummy_used[0]);i++) assert(!fg_abi_used[i]);
  /* Word-wise bitmap: ranges that start/end mid-word, span several words, and fill an exact word. */
  { static const struct { uint64_t pg, n; } r[]={{0,64},{3,61},{60,10},{64,128},{100,300},{63,1},{1,200},{511,513}};
    for(unsigned i=0;i<sizeof(r)/sizeof(r[0]);i++) {
@@ -637,13 +646,14 @@ int main(void) {
     for(uint64_t k=r[i].pg>1?r[i].pg-2:0;k<r[i].pg+r[i].n+2;k++) assert(fg_abi_used_get(fg_abi_pg(0x40000000+k*4096))==(k>=r[i].pg && k<r[i].pg+r[i].n));
     assert(fuxi_gpu_abi_map(v+(r[i].n-1)*4096,source,4096,3,0,2)==-1 && fuxi_gpu_abi_map(v-(r[i].pg?4096:0),source,r[i].pg?8192:4096,3,0,2)==-1);
     assert(!fuxi_gpu_abi_unmap(v,nb));
-    for(unsigned w=0;w<sizeof(fg_abi_used)/sizeof(fg_abi_used[0]);w++) assert(!fg_abi_used[w]);
+    for(unsigned w=0;w<sizeof(fg_abi_dummy_used)/sizeof(fg_abi_dummy_used[0]);w++) assert(!fg_abi_used[w]);
    }
  }
  /* Queue mode (fuxigpuncimport 512): a submit behind a running client job appends to the in-order ring. */
  {
   uint64_t sz[1]={4096},ad[1]={va},f1=0,f2=0,f3=0,f4=0,v2=0x30100000;uint32_t q[6];
-  uint32_t ttbrG=(uint32_t)G3_PT,ttbrC=(uint32_t)FG_ABI_PT;
+  uint32_t ttbrG=(uint32_t)G3_PT;
+  #define ttbrC ((uint32_t)fg_default_vm->root_pa)
   #define QSTART() do { seed();ncimportArg=512;assert(fg_abi_init() && fg_abi_queue && fuxi_gpu_abi_queue_enabled());assert(!fuxi_gpu_abi_map(va,source,bytes,3,0,2)); } while(0)
   #define DONE_UP_TO(n) g_wr(G3_FENCE_PA,FG_ABI_FENCE_OFF+4,(n))
   /* Default (no bit) is unchanged: a second submit while busy is refused. */
@@ -662,7 +672,7 @@ int main(void) {
   assert(fuxi_gpu_abi_submit(ad,sz,1,&f3)==0 && f3==3); /* and the chain keeps accepting */
   complete(); /* fence 3, ring idle */
   assert(!fuxi_gpu_abi_poll(2) && !fuxi_gpu_abi_poll(3) && !fg_client_busy && fg_abi_completed==3 && sregs[(g_cb(g3_bank)+0x20)/4]==ttbrG);
-  assert(!fuxi_gpu_abi_unmap(va,bytes) && !*fg_abi_leaf(va));
+  assert(!fuxi_gpu_abi_unmap(va,bytes) && !fg_leaf_val(va));
   /* Depth and ring room: at most FG_ABI_QUEUE_MAX jobs in flight, and never past the free space. */
   QSTART();
   for(unsigned i=0;i<FG_ABI_QUEUE_MAX;i++) assert(!fuxi_gpu_abi_submit(ad,sz,1,&f1));
@@ -718,18 +728,19 @@ int main(void) {
   complete();assert(!fuxi_gpu_abi_poll(2) && cacheInvalidate==512 && !fg_abi_host_handoff);
   #undef QSTART
   #undef DONE_UP_TO
+  #undef ttbrC
   puts("PASS: queue mode (bit 512): queued submits keep the client root, in-order retirement with per-job deadline, depth/ring limits, TLBI only after a map, present stops queueing, fault in job 2 keeps job 1, unmap/import handoff per job");
  }
  /* Inline root (bit 21, needs 512): the client root keeps its window and stays installed; a copy in flight never refuses or delays a client job. */
  {
   uint64_t sz[1]={4096},ad[1]={va},f1=0,f2=0,f3=0;
-  uint32_t ttbrC=(uint32_t)FG_ABI_PT;
+  #define ttbrC ((uint32_t)fg_default_vm->root_pa)
   #define DONE_UP_TO(n) g_wr(G3_FENCE_PA,FG_ABI_FENCE_OFF+4,(n))
   seed();ncimportArg=2097152;assert(fg_abi_init() && !fg_abi_inline); /* 512 is required */
   seed();ncimportArg=512|2097152;fg_scanout_double_requested=1;fg_scanout_triple_requested=0;memset(presentL2,0,sizeof presentL2);presentL2[128+3]=0x41000|3;
   assert(fg_abi_init() && fg_abi_inline && !fg_inl_ready && !fg_inl_usable());assert(!fuxi_gpu_abi_map(va,source,bytes,3,0,2));
   assert(!fuxi_gpu_abi_submit(ad,sz,1,&f1) && f1==1 && fg_root_client && fg_inl_ready==1 && fg_inl_usable() && sregs[(g_cb(g3_bank)+0x20)/4]==ttbrC && fg_inl_fbmask==3);
-  { volatile uint64_t *root=(volatile uint64_t *)G_PTR(FG_ABI_PT),*l2=(volatile uint64_t *)G_PTR(FG_INL_L2);
+  { volatile uint64_t *root=fg_default_vm->root_va,*l2=(volatile uint64_t *)G_PTR(FG_INL_L2);
     assert(root[2]==(FG_INL_L2|3) && !root[3] && l2[256]==(FG_INL_L3|3) && l2[256+9]==((FG_INL_L3+9u*4096)|3) && !l2[256+10]);
     volatile uint64_t *t0l3=(volatile uint64_t *)G_PTR(FG_INL_L3),*t5=(volatile uint64_t *)G_PTR(FG_INL_L3+5u*4096);
     assert(t0l3[0]==(G4_FB_PA|3|(3u<<8)|(1u<<10)|(1u<<6)) && t0l3[511]==((G4_FB_PA+511u*4096)|3|(3u<<8)|(1u<<10)|(1u<<6)));
@@ -751,10 +762,11 @@ int main(void) {
   /* The next client submit installs its root again (idle GPU) and keeps it. */
   assert(!fuxi_gpu_abi_submit(ad,sz,1,&f3) && f3==4 && fg_root_client && sregs[(g_cb(g3_bank)+0x20)/4]==ttbrC);
   /* Window setup refused when the root slot is taken: old path for the whole run. */
-  seed();ncimportArg=512|2097152;assert(fg_abi_init());*(volatile uint64_t *)((uintptr_t)G_PTR(FG_ABI_PT)+16)=1;
+  seed();ncimportArg=512|2097152;assert(fg_abi_init());assert(fg_ensure_default_vm());fg_default_vm->root_va[2]=1;
   assert(!fuxi_gpu_abi_map(va,source,bytes,3,0,2) && !fuxi_gpu_abi_submit(ad,sz,1,&f1) && fg_inl_ready==2 && !fg_root_client && !fg_inl_usable());
   complete();assert(!fuxi_gpu_abi_poll(1) && !fg_client_busy && sregs[(g_cb(g3_bank)+0x20)/4]==(uint32_t)G3_PT);
   #undef DONE_UP_TO
+  #undef ttbrC
   fg_abi_inline=0;fg_scanout_double_requested=0;
   puts("PASS: inline root (bit 21): client-root window (carveout A/B + mirrored sources), root kept after retirement, copy in flight never refuses or delays a client job, fence-only retire, return to the present root, setup failure keeps the old path");
  }
@@ -849,21 +861,21 @@ int main(void) {
  seed();ncimportArg=256;assert(fg_abi_init() && fg_abi_mapwait);
  { uint64_t sz[1]={4096},ad[1]={va},fn=0;
    assert(!fuxi_gpu_abi_map(va,source,bytes,3,0,2) && !fuxi_gpu_abi_submit(ad,sz,1,&fn) && fg_client_busy);
-   assert(fuxi_gpu_abi_map(0x30000000,source,4096,3,0,2)==1 && !*fg_abi_leaf(0x30000000) && !fg_abi_used_get(fg_abi_pg(0x30000000)));
+   assert(fuxi_gpu_abi_map(0x30000000,source,4096,3,0,2)==1 && !fg_leaf_val(0x30000000) && !fg_abi_used_get(fg_abi_pg(0x30000000)));
    complete();assert(!fuxi_gpu_abi_map(0x30000000,source,4096,3,0,2) && !fg_client_busy); }
  /* Default: a faulted job seen by the map's own observation is still isolated, and the map then refuses. */
  reset();
  { uint64_t sz[1]={4096},ad[1]={va},fn=0;
    assert(!fuxi_gpu_abi_map(va,source,bytes,3,0,2) && !fuxi_gpu_abi_submit(ad,sz,1,&fn));
-   fault=1;regs[0x928]=1;assert(fuxi_gpu_abi_map(0x30000000,source,4096,3,0,2)==-1 && state==2 && !fg_client_busy && !*fg_abi_leaf(0x30000000)); }
+   fault=1;regs[0x928]=1;assert(fuxi_gpu_abi_map(0x30000000,source,4096,3,0,2)==-1 && state==2 && !fg_client_busy && !fg_leaf_val(0x30000000)); }
  puts("PASS: map while a job runs (default) vs idle wait (256), word-wise overlap bitmap, cached overlap mirror (exact 4K overlap refusal, no partial publish, unmap clears, init clears)");
  /* Ranged invalidate: default keeps the whole-ASID TLBI; value 128 does one TLBIVAL per 4K page plus sync, up to 512 pages. */
  reset();assert(!fuxi_gpu_abi_map(va,source,32768,3,0,2));tlbs=0;
  assert(!fuxi_gpu_abi_unmap(va,32768) && tlbs==1 && !tlbiWrites);
  seed();ncimportArg=128;assert(fg_abi_init());assert(!fuxi_gpu_abi_map(va,source,32768,3,0,2));tlbs=0;
  assert(!fuxi_gpu_abi_unmap(va,32768) && !tlbs && tlbiWrites==8);
- for(unsigned i=0;i<8;i++) assert(tlbiVals[i]==(((va>>12)+i)|((uint64_t)g3_asid<<48)));
- assert(sregs[(g_cb(g3_bank)+0x7f0)/4]==0 && !*fg_abi_leaf(va));
+ for(unsigned i=0;i<8;i++) assert(fg_default_vm->asid!=g3_asid && tlbiVals[i]==(((va>>12)+i)|((uint64_t)fg_default_vm->asid<<48)));
+ assert(sregs[(g_cb(g3_bank)+0x7f0)/4]==0 && !fg_leaf_val(va));
  assert(!fuxi_gpu_abi_map(va,source,512*4096,3,0,2));tlbiWrites=0;
  assert(!fuxi_gpu_abi_unmap(va,512*4096) && !tlbs && tlbiWrites==512);
  assert(!fuxi_gpu_abi_map(va,source,513*4096,3,0,2));tlbiWrites=0;
@@ -891,8 +903,8 @@ int main(void) {
   if(mode==5) assert(strstr(lastLog,"stale cpu_to_gpu 7/8 gpu_to_cpu 8/8") && strstr(lastLog,"(wb-ish)"));
   if(mode==6) assert(strstr(lastLog,"coherent-import(wb-ish) pass cpu_to_gpu 8/8 gpu_to_cpu 8/8") && strstr(lastLog,"write-back inner-shareable"));
   if(mode==3||mode==4) {assert(state==2 && fg_abi_poisoned && strstr(lastLog,"self-test fault"));continue;}
-  for(unsigned i=0;i<4;i++) assert(!*fg_abi_leaf(FG_ABI_COH_IOVA+4096*i) && !fg_abi_used_get(fg_abi_pg(FG_ABI_COH_IOVA+4096*i)));
-  assert(!*fg_abi_leaf(FG_ABI_COH_IOVA+0x4000) && fg_abi_imports[0].iova==va && fg_abi_imports[0].source==source);
+  for(unsigned i=0;i<4;i++) assert(!fg_leaf_val(FG_ABI_COH_IOVA+4096*i) && !fg_abi_used_get(fg_abi_pg(FG_ABI_COH_IOVA+4096*i)));
+  assert(!fg_leaf_val(FG_ABI_COH_IOVA+0x4000) && fg_abi_imports[0].iova==va && fg_abi_imports[0].source==source);
   cacheClean=0;cohMode=0;
   assert(!fuxi_gpu_abi_submit(addresses,sizes,1,&fence));
   complete();assert(!fuxi_gpu_abi_poll(fence));
@@ -1085,6 +1097,7 @@ int main(void) {
  assert(!fuxi_gpu_abi_unmap(0x20000000,4096) && !fg_abi_map_at(0x20000000) && fg_abi_map_at(0x20002000));
  puts("PASS: stall recovery off/on (30 ms snapshot/TLB/kick, 60 ms drain, completion accounting), hang snapshot, IB word reads bounded by mapped ranges");
 
+ for (unsigned i=0;i<FG_ABI_MAX_VMS;i++) if (fg_vm_pool[i].pt_slab_count) fg_vm_free_all_pt(&fg_vm_pool[i]);
  puts("PASS: actual backend root isolation, 16K/4K scattered leaves, VA reuse/TLBI, present exclusion, late retirement, independent watchdog/fault/drain/quarantine");
 }
 '''
@@ -1142,8 +1155,13 @@ def main():
         print('PASS: clean 0098 + 0100 ABI/helper patch application and canonical source bytes')
         subprocess.run(['patch','-s','-p1','--fuzz=0','-i', str(ROOT/'xnu/patches/0102-fuxi-gpu-backboardd-open.patch')],cwd=tree,check=True)
         admitted=(tree/'iokit/Kernel/arm/FuxiAdrenoUserClient.cpp').read_text()
-        assert '!backboardClient(task)' in admitted and '!connected && fuxi_gpu_abi_available()' in admitted
-        print('PASS: unchanged 0102 admission patch applies after K1; single-connection guard retained')
+        assert 'fuxiGpuForbiddenProcess' in admitted and 'foregroundAllowedClient' in admitted and 'setClientClass' in admitted
+        print('PASS: M9 0102 multi-client admission patch applies cleanly; U-026 blacklist & two-class admission present')
+        # Also verify 0096 -> 0098 -> 0100 -> 0102 -> 0108 scanout apply check on minimal tree
+        (tree/'iokit/Kernel/arm/SweetSurface.cpp').parent.mkdir(parents=True,exist_ok=True)
+        scanout=(ROOT/'xnu/patches/0108-fuxi-gpu-scanout.patch').read_text()
+        assert 'SweetSurface.cpp' in scanout and 'FuxiAdrenoUserClient.cpp' not in scanout
+        print('PASS: 0108 scanout patch disjoint from 0098/0100/0102')
 
 
 if __name__ == '__main__':

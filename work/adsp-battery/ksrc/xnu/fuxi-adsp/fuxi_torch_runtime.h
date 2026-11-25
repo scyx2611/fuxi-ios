@@ -9,16 +9,20 @@ typedef struct {
     uint64_t deadline;
 } FuxiTorchRuntime;
 
-static inline int fuxi_torch_caller_allowed(unsigned root, unsigned platform, const char *name)
+static inline int fuxi_torch_name_eq(const char *name, const char *expected)
 {
-    if (root) return 1;
-    if (!platform || !name) return 0;
-    const char expected[] = "SpringBoard";
     unsigned index = 0;
     for (; expected[index]; index++) {
         if (name[index] != expected[index]) return 0;
     }
     return name[index] == 0;
+}
+
+static inline int fuxi_torch_caller_allowed(unsigned root, unsigned platform, const char *name)
+{
+    if (root) return 1;
+    if (!platform || !name) return 0;
+    return fuxi_torch_name_eq(name, "SpringBoard") || fuxi_torch_name_eq(name, "mediaserverd");
 }
 
 static inline int fuxi_torch_request(FuxiTorchRuntime *state, unsigned level, uint64_t now)

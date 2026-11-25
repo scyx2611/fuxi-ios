@@ -1,0 +1,699 @@
+diff --git a/tools/test-fuxi-wifi-ios.py b/tools/test-fuxi-wifi-ios.py
+index 46c1609..f2c1e81 100644
+--- a/tools/test-fuxi-wifi-ios.py
++++ b/tools/test-fuxi-wifi-ios.py
+@@ -385,6 +385,9 @@ int main(int argc,char **argv) {
+  set_ux(0xffffffffu,4); assert(fuxi_wifi_ux()==FUXI_WIFI_UX_ALL);
+  set_ux(1,8); assert(!fuxi_wifi_ux());
+  set_ux(6,4); assert(fuxi_wifi_ux()==(FUXI_WIFI_UX_PICK_RATE|FUXI_WIFI_UX_KEEP_LINK));
++ set_ux(FUXI_WIFI_UX_SCAN_REUSE|FUXI_WIFI_UX_SCAN_DWELL_110,4);
++ assert(fuxi_wifi_ux()==(FUXI_WIFI_UX_SCAN_REUSE|FUXI_WIFI_UX_SCAN_DWELL_110));
++ assert(FUXI_WIFI_UX_ALL==8191u);
+  /* 預設（bit 0 關）：關閉還在排隊時，GET POWER 照舊回報「開」，也照收掃描（舊行為：開關會彈回約兩秒） */
+  set_ux(0,4); hold_station();
+  power.state[0]=0; assert(!request(true,19,&power,sizeof(power),NULL));
+diff --git a/tools/test-fuxi-wlan-ios.py b/tools/test-fuxi-wlan-ios.py
+index 6f7acdf..06817d3 100644
+--- a/tools/test-fuxi-wlan-ios.py
++++ b/tools/test-fuxi-wlan-ios.py
+@@ -1078,6 +1078,233 @@ static void softap_recovery_tests(void) {
+     test_ap_enabled=false;
+     puts("PASS SoftAP recovery: ap_start waits for leave, fast toggle untouched, post-AP recycle on scan/join, 0x107 telemetry & repeated Reason 15 recovery");
+ }
++
++static void set_channels_40(unsigned count) {
++    assert(count <= WLI_CHANNEL_MAX);
++    wli_channel_count = 0;
++    for (unsigned i = 0; i < count; i++) {
++        uint16_t freq = i < 13 ? (uint16_t)(2412 + i * 5) : (uint16_t)(5180 + (i - 13) * 20);
++        uint16_t flags = i < 11 ? 0 : FUXI_WIFI_STA_CHANNEL_PASSIVE;
++        wli_channels[wli_channel_count++] = (struct fuxi_wifi_sta_channel){ .frequency = freq, .flags = flags };
++    }
++}
++
++static void join_speed_tests(void) {
++    struct fuxi_wifi_ap_config cfg = {0};
++    memcpy(cfg.ssid, "Hotspot", 7); cfg.ssid_len = 7; cfg.wpa2 = 1;
++    uint32_t freq = 0;
++    size_t size = 0;
++
++    /* T1: Short-window active reuse (type=1), channel subset check, SSID/passive exclusion, timeout */
++    test_ux = FUXI_WIFI_UX_SCAN_REUSE | FUXI_WIFI_UX_SCAN_CHANNELS;
++    test_cache = 0;
++    bootstrap();
++    set_channels_40(40);
++    /* Scan A: 13ch 2.4G active */
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    caller_scan.frequency_count = 13;
++    for (unsigned i = 0; i < 13; i++) caller_scan.frequencies[i] = wli_channels[i].frequency;
++    pthread_t thread = begin(2, false); step(); expect_request(2);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid);
++    unsigned seq = wli.sequence;
++    /* Scan B: 0ch expanded to 40ch -> not covered by 13ch, must perform real scan */
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    thread = begin(2, false); step(); expect_request(2);
++    assert(wli.sequence == seq + 1);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid && wli.scan.frequency_count == 40);
++    seq = wli.sequence;
++    unsigned hits = wli.cache_hits;
++    /* Scan C: 27ch 5G type=1 within 100 ms -> hits 1A short-window reuse without WLI_SCAN */
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    caller_scan.frequency_count = 27;
++    for (unsigned i = 0; i < 27; i++) caller_scan.frequencies[i] = wli_channels[13 + i].frequency;
++    fake_now += 100;
++    assert(!wli_scan(&caller_scan) && wli.sequence == seq && wli.cache_hits == hits + 1 && !wli.busy);
++    /* Exactly at WLI_ACTIVE_REUSE_MS boundary still hits */
++    fake_now = wli.scanned_at + WLI_ACTIVE_REUSE_MS;
++    assert(!wli_scan(&caller_scan) && wli.sequence == seq && wli.cache_hits == hits + 2);
++    /* Past WLI_ACTIVE_REUSE_MS -> must re-scan */
++    fake_now = wli.scanned_at + WLI_ACTIVE_REUSE_MS + 1;
++    thread = begin(2, false); step(); expect_request(2);
++    assert(wli.sequence == seq + 1);
++    scan_accept(true); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    /* Re-establish 40ch active scan, then test passive and SSID exclusions */
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    thread = begin(2, false); step(); scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    seq = wli.sequence;
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    caller_scan.frequency_count = 27;
++    for (unsigned i = 0; i < 27; i++) caller_scan.frequencies[i] = wli_channels[13 + i].frequency;
++    caller_scan.passive = true;
++    fake_now += 50;
++    thread = begin(2, false); step(); expect_request(2);
++    assert(wli.sequence == seq + 1);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    /* Active Scan C must NOT reuse previous passive scan */
++    caller_scan.passive = false;
++    fake_now += 50;
++    thread = begin(2, false); step(); expect_request(2);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    /* Directed SSID scan must NOT reuse and must NOT be reused by non-SSID scan */
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    thread = begin(2, false); step(); scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    caller_scan.frequency_count = 1; caller_scan.frequencies[0] = 5180;
++    caller_scan.ssid_length = 4; memcpy(caller_scan.ssid, "IEEE", 4);
++    fake_now += 50;
++    thread = begin(2, false); step(); expect_request(2);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    caller_scan.ssid_length = 0;
++    fake_now += 50;
++    thread = begin(2, false); step(); expect_request(2);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++
++    /* T2: Zero-Reason-15 guard (ap_active / sta_reset_needed blocks both type=1 and type=3 even if cache_valid==1) */
++    test_cache = 1; test_ap_enabled = true;
++    bootstrap();
++    set_channels_40(40);
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    thread = begin(2, false); step(); scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid);
++    fake_now += 50;
++    /* A. ap_active == 1 with cache_valid == 1 still forces real scan (blocks 1A and type=3) */
++    lck_mtx_lock(&wli_lock); wli.ap_active = 1; lck_mtx_unlock(&wli_lock);
++    caller_scan.cache_allowed = false;
++    thread = begin(2, false); step(); expect_request(2);
++    lck_mtx_lock(&wli_lock); wli.ap_active = 0; lck_mtx_unlock(&wli_lock);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid);
++    fake_now += 50;
++    lck_mtx_lock(&wli_lock); wli.ap_active = 1; lck_mtx_unlock(&wli_lock);
++    caller_scan.cache_allowed = true;
++    thread = begin(2, false); step(); expect_request(2);
++    lck_mtx_lock(&wli_lock); wli.ap_active = 0; lck_mtx_unlock(&wli_lock);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result && wli.cache_valid);
++    /* B. sta_reset_needed == 1 with cache_valid == 1 blocks type=1 and type=3 and triggers power recycle */
++    for (int mode = 0; mode < 2; mode++) {
++        fake_now += 50;
++        lck_mtx_lock(&wli_lock); wli.sta_reset_needed = 1; assert(wli.cache_valid); lck_mtx_unlock(&wli_lock);
++        unsigned pcalls = power_calls;
++        caller_scan.cache_allowed = (mode == 1);
++        thread = begin(2, false);
++        step(); assert(power_calls == pcalls + 1 && requested_power == 0 && wli.reset_stage == WLI_RESET_OFF_WAIT);
++        event_power(false, wli.generation + 1);
++        step(); assert(power_calls == pcalls + 2 && requested_power == 1 && wli.reset_stage == WLI_RESET_ON_WAIT);
++        event_power(true, wli.generation + 1);
++        step(); expect_request(2);
++        scan_accept(false); serve_bss(6, 0);
++        assert(!pthread_join(thread, NULL) && !caller_result && !wli.sta_reset_needed && wli.cache_valid);
++    }
++    /* C. Two consecutive Reason 15 timeouts clear cache_valid and set sta_reset_needed */
++    for (int r = 0; r < 2; r++) {
++        ask_join("IEEE", "password", FUXI_WIFI_STA_WPA2_PSK);
++        thread = begin(3, false);
++        through_association(); message_two(true);
++        event_lost(ap, 15, 0); step(); step();
++        assert(failed_join(thread) == EAUTH);
++    }
++    assert(wli.sta_reset_needed && !wli.cache_valid);
++    unsigned pcalls = power_calls;
++    caller_scan.cache_allowed = false;
++    thread = begin(2, false);
++    step(); assert(power_calls == pcalls + 1 && requested_power == 0);
++    event_power(false, wli.generation + 1);
++    step(); assert(power_calls == pcalls + 2 && requested_power == 1);
++    event_power(true, wli.generation + 1);
++    step(); expect_request(2);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result && !wli.sta_reset_needed);
++
++    /* T3: 1C boot-time ap_stop does not spuriously set sta_reset_needed; real ap_start -> ap_stop does */
++    test_cache = 0; test_ux = 0; test_ap_enabled = true;
++    bootstrap();
++    pcalls = power_calls;
++    assert(!wli_ap_stop_op() && !wli.ap_active && !wli.ap_started && !wli.sta_reset_needed);
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    thread = begin(2, false); step(); expect_request(2);
++    assert(power_calls == pcalls);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    assert(!wli_ap_start_op(&cfg, &freq) && wli.ap_active && wli.ap_started && wli.sta_reset_needed);
++    assert(!wli_ap_stop_op() && !wli.ap_active && !wli.ap_started && wli.sta_reset_needed);
++    /* Complete recycle via scan, then a redundant ap_stop must not set sta_reset_needed again */
++    thread = begin(2, false);
++    step(); assert(power_calls == pcalls + 1 && requested_power == 0);
++    event_power(false, wli.generation + 1);
++    step(); assert(power_calls == pcalls + 2 && requested_power == 1);
++    event_power(true, wli.generation + 1);
++    step(); expect_request(2); scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result && !wli.sta_reset_needed);
++    assert(!wli_ap_stop_op() && !wli.sta_reset_needed);
++    test_ap_enabled = false;
++
++    /* T4: 1B bounded default dwell_ms=110 with 19000 ms batching (31+9), 13ch no regression, 41ch/batch=0 fallback */
++    test_ux = FUXI_WIFI_UX_SCAN_DWELL_110 | FUXI_WIFI_UX_SCAN_CHANNELS;
++    test_dwell = 1; test_batch = 1; offered_features = FWC_FEATURE_SCAN_DWELL_MS;
++    bootstrap();
++    set_channels_40(40);
++    /* 40ch (11 active + 29 passive), dwell_ms=0 -> defaults to 110 ms and batches 31 + 9 */
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    thread = begin(2, false); step(); expect_request(2);
++    assert(wli.scan_count == 40 && wli.scan_limit == 31 && request_u32(FWC_ATTR_SCAN_DWELL_MS) == 110);
++    const uint8_t *freqs = request_attribute(20, &size);
++    assert(freqs && size == 31 * 4);
++    scan_accept(false); step(); expect_request(2);
++    assert(wli.scan_offset == 31 && request_u32(FWC_ATTR_SCAN_DWELL_MS) == 110);
++    freqs = request_attribute(20, &size);
++    assert(freqs && size == 9 * 4);
++    scan_accept(true); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    /* 13ch 2.4G (11 active + 2 passive): passive*44=88 <= active*56=616 -> keeps dwell_ms=0 (no regression) */
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    caller_scan.frequency_count = 13;
++    for (unsigned i = 0; i < 13; i++) caller_scan.frequencies[i] = wli_channels[i].frequency;
++    thread = begin(2, false); step(); expect_request(2);
++    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS, &size));
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    /* 27ch 5G (all passive): applies 110 ms in 1 batch */
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    caller_scan.frequency_count = 27;
++    for (unsigned i = 0; i < 27; i++) caller_scan.frequencies[i] = wli_channels[13 + i].frequency;
++    thread = begin(2, false); step(); expect_request(2);
++    assert(wli.scan_count == 27 && wli.scan_limit == 27 && request_u32(FWC_ATTR_SCAN_DWELL_MS) == 110);
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    /* 41ch (>25000 ms budget) safely falls back to dwell_ms=0 without EINVAL */
++    set_channels_40(41);
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    thread = begin(2, false); step(); expect_request(2);
++    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS, &size));
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    /* batch=0 with 40ch (>19000 ms single-batch budget) safely falls back to dwell_ms=0 */
++    test_batch = 0; bootstrap(); set_channels_40(40);
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    thread = begin(2, false); step(); expect_request(2);
++    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS, &size));
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++    /* No module feature or test_dwell=0 -> dwell_ms=0 still succeeds without FWC_ATTR_SCAN_DWELL_MS */
++    test_batch = 1; offered_features = 0; bootstrap(); set_channels_40(40);
++    thread = begin(2, false); step(); expect_request(2);
++    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS, &size));
++    scan_accept(false); serve_bss(6, 0);
++    assert(!pthread_join(thread, NULL) && !caller_result);
++
++    test_ux = test_dwell = test_cache = test_batch = offered_features = 0;
++    memset(&caller_scan, 0, sizeof(caller_scan));
++    puts("PASS join speed: short-window reuse, Reason-15/SoftAP guards, boot ap_stop no-op, bounded 110ms dwell & batching");
++}
+ int main(void) {
+     unsigned config_offset;
+     assert(!fwa_config_offset(0,4,0,&config_offset));
+@@ -1104,6 +1331,7 @@ int main(void) {
+     pick_tests();
+     keep_tests();
+     softap_recovery_tests();
++    join_speed_tests();
+     bootstrap();
+     uint8_t bytes[MESSAGE]; size_t length=header(bytes,3,0x102,2);
+     assert(deliver(bytes,length)==2 && wli.fatal==EPROTO);
+diff --git a/xnu/fuxi-wifi-ios/fuxi_wifi_apple80211.c b/xnu/fuxi-wifi-ios/fuxi_wifi_apple80211.c
+index 54613a1..d2c85e6 100644
+--- a/xnu/fuxi-wifi-ios/fuxi_wifi_apple80211.c
++++ b/xnu/fuxi-wifi-ios/fuxi_wifi_apple80211.c
+@@ -253,6 +253,8 @@ fuxi_wifi_ux(void)
+ 		printf("FUXI WIFI IOS: ux options 0x%x (power-asked %u, pick-rate %u, keep-link %u, country %u, power-same %u)\n",
+ 		    value & FUXI_WIFI_UX_ALL, !!(value & FUXI_WIFI_UX_POWER_ASKED), !!(value & FUXI_WIFI_UX_PICK_RATE),
+ 		    !!(value & FUXI_WIFI_UX_KEEP_LINK), !!(value & FUXI_WIFI_UX_COUNTRY), !!(value & FUXI_WIFI_UX_POWER_SAME));
++		printf("FUXI WIFI IOS: ux scan options (reuse %u, dwell110 %u)\n",
++		    !!(value & FUXI_WIFI_UX_SCAN_REUSE), !!(value & FUXI_WIFI_UX_SCAN_DWELL_110));
+ 	}
+ 	return value & FUXI_WIFI_UX_ALL;
+ }
+diff --git a/xnu/fuxi-wifi-ios/fuxi_wifi_sta.h b/xnu/fuxi-wifi-ios/fuxi_wifi_sta.h
+index 4e09736..c19a629 100644
+--- a/xnu/fuxi-wifi-ios/fuxi_wifi_sta.h
++++ b/xnu/fuxi-wifi-ios/fuxi_wifi_sta.h
+@@ -126,7 +126,9 @@ enum fuxi_wifi_sta_event {
+ #define FUXI_WIFI_UX_RX_BATCH    256u      /* receive borrowed ath12k fragments directly into batched mbufs */
+ #define FUXI_WIFI_UX_LINK_STATS  512u      /* print cached PHY rate and interface byte counts */
+ #define FUXI_WIFI_UX_SCAN_TRACE 1024u      /* log the first ath12k scan events */
+-#define FUXI_WIFI_UX_ALL        2047u
++#define FUXI_WIFI_UX_SCAN_REUSE 2048u      /* reuse recent active non-SSID scan results when channels are covered */
++#define FUXI_WIFI_UX_SCAN_DWELL_110 4096u  /* default dwell_ms=0 to bounded 110 ms when budget and passive savings hold */
++#define FUXI_WIFI_UX_ALL        8191u
+ 
+ #ifdef KERNEL
+ /* 讀一次 ADT 之後記住（ADT 開機後不變）；沒有這個屬性或長度不對都當 0 */
+diff --git a/xnu/fuxi-wlan/fuxi_wlan_ios.inc b/xnu/fuxi-wlan/fuxi_wlan_ios.inc
+index 8ffdbd3..e530097 100644
+--- a/xnu/fuxi-wlan/fuxi_wlan_ios.inc
++++ b/xnu/fuxi-wlan/fuxi_wlan_ios.inc
+@@ -26,6 +26,8 @@
+ #define WLI_JOIN_MS 20000
+ #define WLI_FRESH_MS 20000
+ #define WLI_CACHE_MS 5000
++#define WLI_ACTIVE_REUSE_MS 3000u
++#define WLI_DEFAULT_DWELL_MS 110u
+ #define WLI_SCAN_PART_MS 19000
+ #define WLI_SCAN_BUDGET_MS 25000
+ #define WLI_DIAG_SCANS 2
+@@ -73,6 +75,7 @@ static struct {
+ 	unsigned batch_enabled, scan_count, scan_limit, scan_offset;
+ 	unsigned ux;                            /* fuxi,wifi-ux（FUXI_WIFI_UX_*），發布時讀一次 */
+ 	unsigned ap_active;                     /* under wli_lock: SoftAP interface currently active */
++	unsigned ap_started;                    /* under wli_lock: SoftAP was actually started since boot/last stop */
+ 	unsigned sta_reset_needed;              /* under wli_lock: recycle primary netdev before next STA scan/join */
+ 	unsigned reset_stage;                   /* under wli_lock: internal WLI_RESET_* state while busy */
+ 	unsigned handshake_timeouts;            /* worker only: consecutive Reason 15 4-way handshake timeouts */
+@@ -244,6 +247,61 @@ wli_scan_covers(const struct fuxi_wifi_sta_scan *previous, const struct fuxi_wif
+ 	return 1;
+ }
+ 
++static int
++wli_scan_covers_channels(const struct fuxi_wifi_sta_scan *previous, const struct fuxi_wifi_sta_scan *asked)
++{
++	if (previous->passive || asked->passive || previous->ssid_length || asked->ssid_length) {
++		return 0;
++	}
++	if (previous->dwell_ms && previous->dwell_ms < 40) { return 0; }
++	if (!previous->frequency_count) { return 1; }
++	if (!asked->frequency_count) { return 0; }
++	for (unsigned index = 0; index < asked->frequency_count; index++) {
++		bool present = false;
++		for (unsigned prior = 0; prior < previous->frequency_count; prior++) {
++			present |= previous->frequencies[prior] == asked->frequencies[index];
++		}
++		if (!present) { return 0; }
++	}
++	return 1;
++}
++
++/* Under wli_lock: bound default dwell_ms=0 -> 110 ms only when budget and passive savings hold. */
++static bool
++wli_should_default_dwell(const struct fuxi_wifi_sta_scan *scan)
++{
++	if (scan->dwell_ms || !(wli.ux & FUXI_WIFI_UX_SCAN_DWELL_110) || !wli.dwell_enabled ||
++	    !(wli.features & FWC_FEATURE_SCAN_DWELL_MS) || !wli.published || !wli_channel_count) {
++		return false;
++	}
++	unsigned count = scan->frequency_count ? scan->frequency_count : wli_channel_count;
++	if (!count || count > WLI_CHANNEL_MAX) { return false; }
++	unsigned duration_tu = (WLI_DEFAULT_DWELL_MS * 1000u + 1023u) / 1024u;
++	unsigned per_channel_ms = (duration_tu * 1024u + 999u) / 1000u + 500u;
++	unsigned budget = wli.batch_enabled ? WLI_SCAN_BUDGET_MS : WLI_SCAN_PART_MS;
++	if (per_channel_ms * count > budget) { return false; }
++	unsigned passive_ch = 0, active_ch = 0;
++	if (!scan->frequency_count) {
++		for (unsigned index = 0; index < wli_channel_count; index++) {
++			if (wli_channels[index].flags & FUXI_WIFI_STA_CHANNEL_PASSIVE) { passive_ch++; }
++			else { active_ch++; }
++		}
++	} else {
++		for (unsigned index = 0; index < scan->frequency_count; index++) {
++			bool passive = false;
++			for (unsigned prior = 0; prior < wli_channel_count; prior++) {
++				if (wli_channels[prior].frequency == scan->frequencies[index]) {
++					passive = (wli_channels[prior].flags & FUXI_WIFI_STA_CHANNEL_PASSIVE) != 0;
++					break;
++				}
++			}
++			if (passive) { passive_ch++; }
++			else { active_ch++; }
++		}
++	}
++	return passive_ch * 44u > active_ch * 56u;
++}
++
+ static int
+ wli_scan(const struct fuxi_wifi_sta_scan *scan)
+ {
+@@ -253,7 +311,9 @@ wli_scan(const struct fuxi_wifi_sta_scan *scan)
+ 	if (scan->dwell_ms && (!wli.dwell_enabled || !(wli.features & FWC_FEATURE_SCAN_DWELL_MS))) {
+ 		return EOPNOTSUPP;
+ 	}
++	if (fuxi_wifi_sta_power_off_pending()) { return ECANCELED; }
+ 	struct fuxi_wifi_sta_scan scoped;
++	bool expanded_channels = false, defaulted_dwell = false;
+ 	lck_mtx_lock(&wli_lock);
+ 	/* Ath12kWifi's nw_sta.c scans the bands that the OS can use. Keep the
+ 	 * effective channel list in the request for cache coverage checks. */
+@@ -265,22 +325,47 @@ wli_scan(const struct fuxi_wifi_sta_scan *scan)
+ 			scoped.frequencies[index] = wli_channels[index].frequency;
+ 		}
+ 		scan = &scoped;
+-	}
+-	bool cached = scan->cache_allowed && wli.cache_enabled && wli.cache_valid && wli_bss_count &&
+-	    !wli.fatal && wli.published && !wli.busy && wli_state.phase != FUXI_WIFI_STA_OFF &&
+-	    wla_now_ms() >= wli.scanned_at && wla_now_ms() - wli.scanned_at <= WLI_CACHE_MS &&
+-	    wli_scan_covers(&wli.scan, scan);
++		expanded_channels = true;
++	}
++	uint64_t now = wla_now_ms();
++	bool can_cache = wli.cache_valid && wli_bss_count && !wli.fatal && wli.published &&
++	    !wli.busy && !wli.scan_draining && !wli.ap_active && !wli.sta_reset_needed &&
++	    wli_state.phase != FUXI_WIFI_STA_OFF && now >= wli.scanned_at;
++	bool type3_hit = can_cache && scan->cache_allowed && wli.cache_enabled &&
++	    now - wli.scanned_at <= WLI_CACHE_MS && wli_scan_covers(&wli.scan, scan);
++	bool reuse_hit = can_cache && (wli.ux & FUXI_WIFI_UX_SCAN_REUSE) &&
++	    !scan->cache_allowed && !scan->passive && !scan->ssid_length &&
++	    now - wli.scanned_at <= WLI_ACTIVE_REUSE_MS &&
++	    wli_scan_covers_channels(&wli.scan, scan);
++	bool cached = type3_hit || reuse_hit;
+ 	unsigned hits = cached ? ++wli.cache_hits : 0;
++	uint64_t cache_age = cached ? now - wli.scanned_at : 0;
++	if (!cached && wli_should_default_dwell(scan)) {
++		if (scan != &scoped) {
++			scoped = *scan;
++			scan = &scoped;
++		}
++		scoped.dwell_ms = WLI_DEFAULT_DWELL_MS;
++		defaulted_dwell = true;
++	}
+ 	lck_mtx_unlock(&wli_lock);
+ 	if (cached) {
+ 		if (hits <= 8 || !(hits % 64)) {
+-			printf("FUXI WIFI IOS: FAST scan uses fresh completed cache %u\n", hits);
++			if (reuse_hit && !type3_hit) {
++				printf("FUXI WIFI IOS: FAST scan uses fresh completed cache %u (active reuse, %u ch, age %llu ms)\n",
++				    hits, scan->frequency_count, (unsigned long long)cache_age);
++			} else {
++				printf("FUXI WIFI IOS: FAST scan uses fresh completed cache %u\n", hits);
++			}
+ 		}
+ 		return 0;
+ 	}
+-	if (scan == &scoped) {
++	if (expanded_channels) {
+ 		printf("FUXI WIFI IOS: native scan uses %u advertised channels\n", scan->frequency_count);
+ 	}
++	if (defaulted_dwell) {
++		printf("FUXI WIFI IOS: native scan applies bounded default dwell %u ms\n", scan->dwell_ms);
++	}
+ 	return wli_submit(WLI_SCAN, false, scan, NULL);
+ }
+ 
+@@ -860,6 +945,7 @@ wli_ap_start_op(const struct fuxi_wifi_ap_config *cfg, uint32_t *actual_freq_mhz
+ 		}
+ 	}
+ 	wli.ap_active = 1;
++	wli.ap_started = 1;
+ 	wli.sta_reset_needed = 1;
+ 	wli.cache_valid = 0;
+ 	lck_mtx_unlock(&wli_lock);
+@@ -877,9 +963,13 @@ wli_ap_stop_op(void)
+ {
+ 	int error = wli_ap_errno(nw_wifi_ap_stop());
+ 	lck_mtx_lock(&wli_lock);
++	bool need_reset = wli.ap_started || wli.ap_active;
+ 	wli.ap_active = 0;
+-	wli.sta_reset_needed = 1;
+-	wli.cache_valid = 0;
++	wli.ap_started = 0;
++	if (need_reset) {
++		wli.sta_reset_needed = 1;
++		wli.cache_valid = 0;
++	}
+ 	lck_mtx_unlock(&wli_lock);
+ 	return error;
+ }
+@@ -1419,6 +1509,7 @@ wli_join_stop(int error, const char *why)
+ 			wli.handshake_timeouts = 0;
+ 			lck_mtx_lock(&wli_lock);
+ 			wli.sta_reset_needed = 1;
++			wli.cache_valid = 0;
+ 			lck_mtx_unlock(&wli_lock);
+ 			printf("FUXI WIFI IOS: repeated 4-way handshake timeout; scheduling primary interface recycle\n");
+ 		}
+diff --git a/xnu/patches/0099-fuxi-wlan.patch b/xnu/patches/0099-fuxi-wlan.patch
+index beda35a..6667796 100644
+--- a/xnu/patches/0099-fuxi-wlan.patch
++++ b/xnu/patches/0099-fuxi-wlan.patch
+@@ -7006,7 +7006,7 @@
+ +#endif
+ --- /dev/null
+ +++ b/bsd/dev/fuxi_wlan_ios.inc
+-@@ -0,0 +1,2018 @@
++@@ -0,0 +1,2109 @@
+ +#include <sys/fuxi_wifi_ios.h>
+ +#include <sys/fuxi_wifi_wpa.h>
+ +#include <sys/errno.h>
+@@ -7035,6 +7035,8 @@
+ +#define WLI_JOIN_MS 20000
+ +#define WLI_FRESH_MS 20000
+ +#define WLI_CACHE_MS 5000
+++#define WLI_ACTIVE_REUSE_MS 3000u
+++#define WLI_DEFAULT_DWELL_MS 110u
+ +#define WLI_SCAN_PART_MS 19000
+ +#define WLI_SCAN_BUDGET_MS 25000
+ +#define WLI_DIAG_SCANS 2
+@@ -7082,6 +7084,7 @@
+ +	unsigned batch_enabled, scan_count, scan_limit, scan_offset;
+ +	unsigned ux;                            /* fuxi,wifi-ux（FUXI_WIFI_UX_*），發布時讀一次 */
+ +	unsigned ap_active;                     /* under wli_lock: SoftAP interface currently active */
+++	unsigned ap_started;                    /* under wli_lock: SoftAP was actually started since boot/last stop */
+ +	unsigned sta_reset_needed;              /* under wli_lock: recycle primary netdev before next STA scan/join */
+ +	unsigned reset_stage;                   /* under wli_lock: internal WLI_RESET_* state while busy */
+ +	unsigned handshake_timeouts;            /* worker only: consecutive Reason 15 4-way handshake timeouts */
+@@ -7254,6 +7257,61 @@
+ +}
+ +
+ +static int
+++wli_scan_covers_channels(const struct fuxi_wifi_sta_scan *previous, const struct fuxi_wifi_sta_scan *asked)
+++{
+++	if (previous->passive || asked->passive || previous->ssid_length || asked->ssid_length) {
+++		return 0;
+++	}
+++	if (previous->dwell_ms && previous->dwell_ms < 40) { return 0; }
+++	if (!previous->frequency_count) { return 1; }
+++	if (!asked->frequency_count) { return 0; }
+++	for (unsigned index = 0; index < asked->frequency_count; index++) {
+++		bool present = false;
+++		for (unsigned prior = 0; prior < previous->frequency_count; prior++) {
+++			present |= previous->frequencies[prior] == asked->frequencies[index];
+++		}
+++		if (!present) { return 0; }
+++	}
+++	return 1;
+++}
+++
+++/* Under wli_lock: bound default dwell_ms=0 -> 110 ms only when budget and passive savings hold. */
+++static bool
+++wli_should_default_dwell(const struct fuxi_wifi_sta_scan *scan)
+++{
+++	if (scan->dwell_ms || !(wli.ux & FUXI_WIFI_UX_SCAN_DWELL_110) || !wli.dwell_enabled ||
+++	    !(wli.features & FWC_FEATURE_SCAN_DWELL_MS) || !wli.published || !wli_channel_count) {
+++		return false;
+++	}
+++	unsigned count = scan->frequency_count ? scan->frequency_count : wli_channel_count;
+++	if (!count || count > WLI_CHANNEL_MAX) { return false; }
+++	unsigned duration_tu = (WLI_DEFAULT_DWELL_MS * 1000u + 1023u) / 1024u;
+++	unsigned per_channel_ms = (duration_tu * 1024u + 999u) / 1000u + 500u;
+++	unsigned budget = wli.batch_enabled ? WLI_SCAN_BUDGET_MS : WLI_SCAN_PART_MS;
+++	if (per_channel_ms * count > budget) { return false; }
+++	unsigned passive_ch = 0, active_ch = 0;
+++	if (!scan->frequency_count) {
+++		for (unsigned index = 0; index < wli_channel_count; index++) {
+++			if (wli_channels[index].flags & FUXI_WIFI_STA_CHANNEL_PASSIVE) { passive_ch++; }
+++			else { active_ch++; }
+++		}
+++	} else {
+++		for (unsigned index = 0; index < scan->frequency_count; index++) {
+++			bool passive = false;
+++			for (unsigned prior = 0; prior < wli_channel_count; prior++) {
+++				if (wli_channels[prior].frequency == scan->frequencies[index]) {
+++					passive = (wli_channels[prior].flags & FUXI_WIFI_STA_CHANNEL_PASSIVE) != 0;
+++					break;
+++				}
+++			}
+++			if (passive) { passive_ch++; }
+++			else { active_ch++; }
+++		}
+++	}
+++	return passive_ch * 44u > active_ch * 56u;
+++}
+++
+++static int
+ +wli_scan(const struct fuxi_wifi_sta_scan *scan)
+ +{
+ +	if (!scan || scan->ssid_length > 32 || scan->frequency_count > 64 ||
+@@ -7262,7 +7320,9 @@
+ +	if (scan->dwell_ms && (!wli.dwell_enabled || !(wli.features & FWC_FEATURE_SCAN_DWELL_MS))) {
+ +		return EOPNOTSUPP;
+ +	}
+++	if (fuxi_wifi_sta_power_off_pending()) { return ECANCELED; }
+ +	struct fuxi_wifi_sta_scan scoped;
+++	bool expanded_channels = false, defaulted_dwell = false;
+ +	lck_mtx_lock(&wli_lock);
+ +	/* Ath12kWifi's nw_sta.c scans the bands that the OS can use. Keep the
+ +	 * effective channel list in the request for cache coverage checks. */
+@@ -7274,22 +7334,47 @@
+ +			scoped.frequencies[index] = wli_channels[index].frequency;
+ +		}
+ +		scan = &scoped;
+-+	}
+-+	bool cached = scan->cache_allowed && wli.cache_enabled && wli.cache_valid && wli_bss_count &&
+-+	    !wli.fatal && wli.published && !wli.busy && wli_state.phase != FUXI_WIFI_STA_OFF &&
+-+	    wla_now_ms() >= wli.scanned_at && wla_now_ms() - wli.scanned_at <= WLI_CACHE_MS &&
+-+	    wli_scan_covers(&wli.scan, scan);
+++		expanded_channels = true;
+++	}
+++	uint64_t now = wla_now_ms();
+++	bool can_cache = wli.cache_valid && wli_bss_count && !wli.fatal && wli.published &&
+++	    !wli.busy && !wli.scan_draining && !wli.ap_active && !wli.sta_reset_needed &&
+++	    wli_state.phase != FUXI_WIFI_STA_OFF && now >= wli.scanned_at;
+++	bool type3_hit = can_cache && scan->cache_allowed && wli.cache_enabled &&
+++	    now - wli.scanned_at <= WLI_CACHE_MS && wli_scan_covers(&wli.scan, scan);
+++	bool reuse_hit = can_cache && (wli.ux & FUXI_WIFI_UX_SCAN_REUSE) &&
+++	    !scan->cache_allowed && !scan->passive && !scan->ssid_length &&
+++	    now - wli.scanned_at <= WLI_ACTIVE_REUSE_MS &&
+++	    wli_scan_covers_channels(&wli.scan, scan);
+++	bool cached = type3_hit || reuse_hit;
+ +	unsigned hits = cached ? ++wli.cache_hits : 0;
+++	uint64_t cache_age = cached ? now - wli.scanned_at : 0;
+++	if (!cached && wli_should_default_dwell(scan)) {
+++		if (scan != &scoped) {
+++			scoped = *scan;
+++			scan = &scoped;
+++		}
+++		scoped.dwell_ms = WLI_DEFAULT_DWELL_MS;
+++		defaulted_dwell = true;
+++	}
+ +	lck_mtx_unlock(&wli_lock);
+ +	if (cached) {
+ +		if (hits <= 8 || !(hits % 64)) {
+-+			printf("FUXI WIFI IOS: FAST scan uses fresh completed cache %u\n", hits);
+++			if (reuse_hit && !type3_hit) {
+++				printf("FUXI WIFI IOS: FAST scan uses fresh completed cache %u (active reuse, %u ch, age %llu ms)\n",
+++				    hits, scan->frequency_count, (unsigned long long)cache_age);
+++			} else {
+++				printf("FUXI WIFI IOS: FAST scan uses fresh completed cache %u\n", hits);
+++			}
+ +		}
+ +		return 0;
+ +	}
+-+	if (scan == &scoped) {
+++	if (expanded_channels) {
+ +		printf("FUXI WIFI IOS: native scan uses %u advertised channels\n", scan->frequency_count);
+ +	}
+++	if (defaulted_dwell) {
+++		printf("FUXI WIFI IOS: native scan applies bounded default dwell %u ms\n", scan->dwell_ms);
+++	}
+ +	return wli_submit(WLI_SCAN, false, scan, NULL);
+ +}
+ +
+@@ -7869,6 +7954,7 @@
+ +		}
+ +	}
+ +	wli.ap_active = 1;
+++	wli.ap_started = 1;
+ +	wli.sta_reset_needed = 1;
+ +	wli.cache_valid = 0;
+ +	lck_mtx_unlock(&wli_lock);
+@@ -7886,9 +7972,13 @@
+ +{
+ +	int error = wli_ap_errno(nw_wifi_ap_stop());
+ +	lck_mtx_lock(&wli_lock);
+++	bool need_reset = wli.ap_started || wli.ap_active;
+ +	wli.ap_active = 0;
+-+	wli.sta_reset_needed = 1;
+-+	wli.cache_valid = 0;
+++	wli.ap_started = 0;
+++	if (need_reset) {
+++		wli.sta_reset_needed = 1;
+++		wli.cache_valid = 0;
+++	}
+ +	lck_mtx_unlock(&wli_lock);
+ +	return error;
+ +}
+@@ -8428,6 +8518,7 @@
+ +			wli.handshake_timeouts = 0;
+ +			lck_mtx_lock(&wli_lock);
+ +			wli.sta_reset_needed = 1;
+++			wli.cache_valid = 0;
+ +			lck_mtx_unlock(&wli_lock);
+ +			printf("FUXI WIFI IOS: repeated 4-way handshake timeout; scheduling primary interface recycle\n");
+ +		}
+diff --git a/xnu/patches/0104-fuxi-wifi-ios.patch b/xnu/patches/0104-fuxi-wifi-ios.patch
+index 89f3c95..645d4f1 100644
+--- a/xnu/patches/0104-fuxi-wifi-ios.patch
++++ b/xnu/patches/0104-fuxi-wifi-ios.patch
+@@ -723,7 +723,7 @@
+ +limitations under the License."
+ --- /dev/null
+ +++ b/bsd/dev/fuxi_wifi_apple80211.c
+-@@ -0,0 +1,1834 @@
++@@ -0,0 +1,1836 @@
+ +/*
+ + * Ported from HackiOS xnu/files/bsd/dev/redwood_apple80211.c (APSL-2.0)
+ + * Fuxi adaptations, 2026-10-23: opt-in iOS shim; see docs-lanes/wifi-ios.md.
+@@ -979,6 +979,8 @@
+ +		printf("FUXI WIFI IOS: ux options 0x%x (power-asked %u, pick-rate %u, keep-link %u, country %u, power-same %u)\n",
+ +		    value & FUXI_WIFI_UX_ALL, !!(value & FUXI_WIFI_UX_POWER_ASKED), !!(value & FUXI_WIFI_UX_PICK_RATE),
+ +		    !!(value & FUXI_WIFI_UX_KEEP_LINK), !!(value & FUXI_WIFI_UX_COUNTRY), !!(value & FUXI_WIFI_UX_POWER_SAME));
+++		printf("FUXI WIFI IOS: ux scan options (reuse %u, dwell110 %u)\n",
+++		    !!(value & FUXI_WIFI_UX_SCAN_REUSE), !!(value & FUXI_WIFI_UX_SCAN_DWELL_110));
+ +	}
+ +	return value & FUXI_WIFI_UX_ALL;
+ +}
+@@ -4255,7 +4257,7 @@
+ +#endif /* FUXI */
+ --- /dev/null
+ +++ b/bsd/sys/fuxi_wifi_sta.h
+-@@ -0,0 +1,159 @@
++@@ -0,0 +1,161 @@
+ +/*
+ + * Ported from HackiOS xnu/files/bsd/sys/redwood_sta.h (APSL-2.0)
+ + * Fuxi adaptations, 2026-10-23: opt-in iOS shim; see docs-lanes/wifi-ios.md.
+@@ -4384,7 +4386,9 @@
+ +#define FUXI_WIFI_UX_RX_BATCH    256u      /* receive borrowed ath12k fragments directly into batched mbufs */
+ +#define FUXI_WIFI_UX_LINK_STATS  512u      /* print cached PHY rate and interface byte counts */
+ +#define FUXI_WIFI_UX_SCAN_TRACE 1024u      /* log the first ath12k scan events */
+-+#define FUXI_WIFI_UX_ALL        2047u
+++#define FUXI_WIFI_UX_SCAN_REUSE 2048u      /* reuse recent active non-SSID scan results when channels are covered */
+++#define FUXI_WIFI_UX_SCAN_DWELL_110 4096u  /* default dwell_ms=0 to bounded 110 ms when budget and passive savings hold */
+++#define FUXI_WIFI_UX_ALL        8191u
+ +
+ +#ifdef KERNEL
+ +/* 讀一次 ADT 之後記住（ADT 開機後不變）；沒有這個屬性或長度不對都當 0 */

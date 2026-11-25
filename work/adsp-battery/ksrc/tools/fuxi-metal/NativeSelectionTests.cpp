@@ -21,6 +21,10 @@ int main(){
  }
  char noBoot[]="backboardd\n";
  assert(fuxi::parseClients(noBoot,sizeof(noBoot)-1,"backboardd","fuximetal=native")==fuxi::ClientMode::deny);
+ // U-026 + M9: ADT allowlist permits foreground apps like Maps, while PosterBoard/CollectionsPoster stay denied.
+ assert(fuxi::parseClients(noBoot,sizeof(noBoot)-1,"Maps","fuximetal=native","Maps,Weather,PosterBoard,CollectionsPoster")==fuxi::ClientMode::allow);
+ assert(fuxi::parseClients(noBoot,sizeof(noBoot)-1,"PosterBoard","fuximetal=native","Maps,Weather,PosterBoard,CollectionsPoster")==fuxi::ClientMode::deny);
+ assert(fuxi::parseClients(noBoot,sizeof(noBoot)-1,"CollectionsPoster","fuximetal=native","Maps,Weather,PosterBoard,CollectionsPoster")==fuxi::ClientMode::deny);
  for(unsigned failure=0;failure<7;++failure){
   unsigned opens=0,queries=0,closes=0;
   bool ok=fuxi::nativeImportPreflight(

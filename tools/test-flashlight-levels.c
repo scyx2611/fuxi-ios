@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 #include "FuxiTorchLevels.h"
+#include "../userland/fuxi-shape/FuxiFlashlightLogic.h"
 
 int main(void)
 {
@@ -45,6 +46,24 @@ int main(void)
     }
     assert(!fuxi_torch_ui_decode(0.5f, 0));
     assert(fuxi_torch_ui_encode(5) == 0.0f);
-    puts("PASS flashlight canonical levels, both directions, float boundaries, 10001 monotonic samples and invalid requests");
+
+    /* Coalescing burst stress: 56 rapid updates coalesce to latest without dropping 0 */
+    struct fuxi_torch_coalesce_state cs;
+    unsigned out_level = 99u;
+    fuxi_torch_coalesce_init(&cs);
+    assert(fuxi_torch_coalesce_submit(&cs, 1u, false) == true);
+    for (unsigned step = 0u; step < 55u; step++) {
+        assert(fuxi_torch_coalesce_submit(&cs, (step % 4u) + 1u, false) == false);
+    }
+    assert(fuxi_torch_coalesce_submit(&cs, 3u, false) == false);
+    assert(fuxi_torch_coalesce_take(&cs, &out_level) == true && out_level == 3u);
+    assert(fuxi_torch_coalesce_take(&cs, &out_level) == false && cs.in_flight == false);
+
+    assert(fuxi_torch_coalesce_submit(&cs, 4u, false) == true);
+    assert(fuxi_torch_coalesce_submit(&cs, 2u, true) == false); /* explicit off wins over non-zero level */
+    assert(fuxi_torch_coalesce_take(&cs, &out_level) == true && out_level == 0u);
+    assert(fuxi_torch_coalesce_take(&cs, &out_level) == false);
+
+    puts("PASS flashlight canonical levels, coalescing burst (56->latest & off=0), and invalid requests");
     return 0;
 }

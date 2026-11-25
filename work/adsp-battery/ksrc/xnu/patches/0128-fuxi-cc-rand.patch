@@ -1,0 +1,40 @@
+--- a/libkern/crypto/corecrypto_rand.c
++++ b/libkern/crypto/corecrypto_rand.c
+@@ -30,6 +30,15 @@
+ #include <corecrypto/ccrng.h>
+ #include <libkern/crypto/rand.h>
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * SWEET has no corecrypto kext (g_crypto_funcs stays NULL). Fall back to the
++ * kernel HMAC-SHA256 PRNG (read_random) so netkey/IPsec SPI allocation
++ * (key_randomfill -> cc_rand_generate) and NECP keys receive real randomness.
++ */
++extern void read_random(void *buffer, unsigned int numBytes);
++#endif
++
+ int
+ cc_rand_generate(void *out, size_t outlen)
+ {
+@@ -42,6 +51,21 @@
+ 			error = ccrng_generate(rng_state, outlen, out);
+ 		}
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	else if (outlen == 0) {
++		error = 0;
++	} else if (out != NULL) {
++		unsigned char *p = (unsigned char *)out;
++		size_t rem = outlen;
++		while (rem > 0) {
++			unsigned int chunk = rem > 65536u ? 65536u : (unsigned int)rem;
++			read_random(p, chunk);
++			p += chunk;
++			rem -= chunk;
++		}
++		error = 0;
++	}
++#endif
+ 
+ 	return error;
+ }

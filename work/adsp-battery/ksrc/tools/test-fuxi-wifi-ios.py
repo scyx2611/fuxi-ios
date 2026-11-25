@@ -35,6 +35,10 @@ MODEL = r'''
 #define Z_ZERO 2
 #define KERN_SUCCESS 0
 #define THREAD_UNINT 0
+#define THREAD_ABORTSAFE 2
+#define THREAD_AWAKENED 0
+#define THREAD_TIMED_OUT 1
+#define THREAD_INTERRUPTED 2
 #define LCK_SLEEP_DEFAULT 0
 #define USER_ADDR_NULL 0
 #define KEV_VENDOR_APPLE 1
@@ -68,6 +72,15 @@ static void lck_mtx_sleep(pthread_mutex_t *m, int flags, event_t e, int t) {
  do pthread_cond_wait(&wake_cond,m); while (hold_wakeups);
  sleeping--;
 }
+static wait_result_t lck_mtx_sleep_deadline(pthread_mutex_t *m, int flags, event_t e, int t, uint64_t deadline) {
+ (void)flags; (void)e; (void)t;
+ struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+ uint64_t ns = (uint64_t)ts.tv_nsec + deadline;
+ ts.tv_sec += (time_t)(ns / 1000000000ull);
+ ts.tv_nsec = (long)(ns % 1000000000ull);
+ int rc = pthread_cond_timedwait(&wake_cond, m, &ts);
+ return rc == ETIMEDOUT ? THREAD_TIMED_OUT : THREAD_AWAKENED;
+}
 static void thread_wakeup(event_t e) { (void)e; pthread_cond_broadcast(&wake_cond); }
 static void thread_set_thread_name(thread_t t, const char *n) { (void)t; (void)n; }
 static void thread_deallocate(thread_t t) { pthread_detach(t); }
@@ -88,10 +101,26 @@ static void *current_proc(void) { return NULL; }
 static int proc_suser(void *p) { (void)p; return !superuser; }
 struct kev_msg { unsigned vendor_code,kev_class,kev_subclass,event_code;
  struct { unsigned data_length; void *data_ptr; } dv[2]; };
+static atomic_uint ap_events[64];
+static uint8_t en0_last_sta_num;
 static int kev_post_msg(struct kev_msg *m) {
  assert(m->kev_class==6 && m->kev_subclass==1 && m->dv[0].data_length==16);
- assert(!strcmp(m->dv[0].data_ptr,"en0"));
+ bool is_ap = !strcmp(m->dv[0].data_ptr,"ap1");
+ assert(is_ap || !strcmp(m->dv[0].data_ptr,"en0"));
  if (m->event_code==4) assert(m->dv[1].data_length==32);
+ if (is_ap) {
+  if (m->event_code==12) assert(m->dv[1].data_length==32);
+  if (m->event_code==13) assert(m->dv[1].data_length==16);
+  assert(m->event_code<64); atomic_fetch_add(&ap_events[m->event_code],1); return 0;
+ }
+ if (m->event_code==12) {
+  const uint8_t *d=m->dv[1].data_ptr;
+  assert(m->dv[1].data_length==32); en0_last_sta_num=d[8];
+ }
+ if (m->event_code==13) {
+  const uint8_t *d=m->dv[1].data_ptr;
+  assert(m->dv[1].data_length==16); en0_last_sta_num=d[8];
+ }
  if (m->event_code==39) {
   const uint8_t *d=m->dv[1].data_ptr; int32_t rssi; int16_t snr,noise;
   assert(m->dv[1].data_length==180 && d[0]==1 && d[0xb]==1 && d[0xe]==1 && !d[0x12]);
@@ -104,8 +133,12 @@ typedef void *thread_call_param_t;
 typedef void (*thread_call_func_t)(thread_call_param_t,thread_call_param_t);
 typedef thread_call_func_t *thread_call_t;
 #define NSEC_PER_SEC 1000000000u
-static thread_call_func_t timer_fn; static unsigned timer_armed;
-static thread_call_t thread_call_allocate(thread_call_func_t f,thread_call_param_t p) { (void)p; timer_fn=f; return &timer_fn; }
+static thread_call_func_t timer_fn, timer_slots[4]; static unsigned timer_armed, timer_slot_count, ap_replay_armed;
+static thread_call_t thread_call_allocate(thread_call_func_t f,thread_call_param_t p) {
+ (void)p;
+ if (!timer_fn) { timer_fn=f; return &timer_fn; }
+ assert(timer_slot_count < 4); timer_slots[timer_slot_count]=f; return &timer_slots[timer_slot_count++];
+}
 static void clock_interval_to_deadline(uint32_t i,uint32_t s,uint64_t *d) { *d=(uint64_t)i*s; }
 /* 開關耗時診斷用的時鐘（替身：單調時鐘的奈秒值） */
 static uint64_t mach_absolute_time(void) {
@@ -113,8 +146,11 @@ static uint64_t mach_absolute_time(void) {
 }
 static void absolutetime_to_nanoseconds(uint64_t a,uint64_t *n) { *n=a; }
 static int thread_call_enter_delayed(thread_call_t c,uint64_t d) {
- assert(c==&timer_fn && d==5ull*NSEC_PER_SEC); timer_armed++; return 0;
+ if (c==&timer_fn) { assert(d==5ull*NSEC_PER_SEC); timer_armed++; return 0; }
+ assert(c >= &timer_slots[0] && c < &timer_slots[timer_slot_count] && d==350000000ull);
+ ap_replay_armed++; return 0;
 }
+static int thread_call_cancel(thread_call_t c) { (void)c; return 0; }
 static int PE_parse_boot_argn(const char *key,void *p,int n) {
  if (!strcmp(key,"fuxiwifitrace")) { assert(n==4); memcpy(p,&trace_opt,4); return trace_opt!=0; }
  assert(!strcmp(key,"fuxiwifiios") && n==4); memcpy(p,&opt,4); return opt!=0;
@@ -123,12 +159,16 @@ static int PE_parse_boot_argn(const char *key,void *p,int n) {
 typedef const void *DTEntry;
 #define kSuccess 0
 #define kError (-1)
-static uint32_t adt_rssi, adt_ux; static unsigned adt_rssi_bytes=4, adt_ux_bytes=4, adt_lookups;
+static uint32_t adt_rssi, adt_ux, adt_ap; static unsigned adt_rssi_bytes=4, adt_ux_bytes=4, adt_lookups;
 static int SecureDTLookupEntry(const void *root,const char *path,DTEntry *entry) {
  assert(!root && !strcmp(path,"/chosen")); adt_lookups++; *entry=&adt_rssi; return kSuccess;
 }
 static int SecureDTGetProperty(DTEntry entry,const char *name,void const **prop,unsigned int *bytes) {
  assert(entry==&adt_rssi);
+ if (!strcmp(name,"fuxi,wifi-ap")) {
+  if (!adt_ap) return kError;
+  *prop=&adt_ap; *bytes=4; return kSuccess;
+ }
  if (!strcmp(name,"fuxi,wifi-ux")) {
   if (!adt_ux) return kError;
   *prop=&adt_ux; *bytes=adt_ux_bytes; return kSuccess;
@@ -139,6 +179,9 @@ static int SecureDTGetProperty(DTEntry entry,const char *name,void const **prop,
 }
 static int mbuf_copydata(mbuf_t p,size_t off,size_t n,void *out) { memcpy(out,(const char *)p+off,n);return 0; }
 static void FuxiNetworkStackStart(void) { registry++; }
+static bool ap_attached, ap_link_state;
+static void fuxi_wifi_ap_net_input(const uint8_t *p,size_t n) { (void)p;(void)n; }
+static void fuxi_wifi_ap_net_link_state(bool up) { ap_link_state=up; }
 static void fuxi_wifi_net_input(const uint8_t *p,size_t n) { assert(p[12]==0x88 && n>=14); received++; }
 static void fuxi_wifi_net_input_packet(void *source,size_t length,int (*read)(void *,size_t,void *,size_t)) {
  (void)source;(void)length;(void)read;assert(!"synthetic backend must not use the native packet reader");
@@ -168,6 +211,23 @@ void sweet_prof_user_bt(const char *tag) {
 bool fuxi_wifi_net_attach(const struct fuxi_wifi_net_link *p) {
  assert(p->wireless && !p->up && p->address[0]==2); attached++; return true;
 }
+bool fuxi_wifi_ap_net_attach(const struct fuxi_wifi_net_link *p) { (void)p; ap_attached=true; return true; }
+static uint32_t ap_mock_cipher; static unsigned ap_mock_starts, ap_mock_stops, ap_mock_keys, ap_mock_auths, ap_mock_deauths;
+static uint8_t ap_mock_flags; static char ap_mock_cc[2];
+static int ap_m_start(const struct fuxi_wifi_ap_config *c, uint32_t *f) { assert(c->ssid_len==7 && c->wpa2); ap_mock_flags=c->flags; ap_mock_cc[0]=c->country[0]; ap_mock_cc[1]=c->country[1]; ap_mock_starts++; *f=(c->flags & FUXI_WIFI_AP_CFG_PREFER_5GHZ)?5745:2437; return 0; }
+static int ap_m_stop(void) { ap_mock_stops++; return 0; }
+static int ap_m_set_key(const uint8_t *mac,uint8_t idx,uint32_t cipher,const uint8_t *k,size_t kl,const uint8_t *s,size_t sl,int del) {
+ (void)mac;(void)idx;(void)k;(void)kl;(void)s;(void)sl;(void)del; ap_mock_cipher=cipher; ap_mock_keys++; return 0;
+}
+static int ap_m_get_seq(const uint8_t *mac,uint8_t idx,uint8_t out[8]) { (void)mac;(void)idx; out[0]=0x11; out[1]=0x22; return 0; }
+static int ap_m_auth(const uint8_t *mac,int a) { (void)mac; assert(a==1); ap_mock_auths++; return 0; }
+static int ap_m_deauth(const uint8_t *mac,uint16_t r,int d) { (void)mac;(void)r;(void)d; ap_mock_deauths++; return 0; }
+static bool ap_m_tx(const uint8_t *f,size_t n) { (void)f;(void)n; return true; }
+static void ap_m_scb(const struct fuxi_wifi_ap_input *in) { (void)in; }
+static const struct fuxi_wifi_ap_ops ap_mock_ops = {
+ .address={0x02,0x46,0x55,0x58,0x49,0x00}, .start_cb=ap_m_scb, .ap_start=ap_m_start, .ap_stop=ap_m_stop,
+ .set_key=ap_m_set_key, .get_key_seq=ap_m_get_seq, .sta_authorize=ap_m_auth, .sta_deauth=ap_m_deauth, .tx_frame=ap_m_tx
+};
 static void settle(void) {
  struct timespec pause = { .tv_nsec=1000000 };
  for (unsigned i=0;i<5000;i++) {
@@ -209,6 +269,18 @@ static uint32_t said_power(void) {
  struct { uint32_t version,radios,state[4]; } answer={0};
  assert(!request(false,19,&answer,sizeof(answer),NULL) && answer.version==1 && answer.radios==1);
  return answer.state[0];
+}
+static atomic_uint hostapd_exit_deauth_sent;
+static void *delayed_hostapd_exit_thread(void *arg) {
+ (void)arg;
+ struct timespec pause = { .tv_nsec = 30000000 }; /* 30 ms slow hostapd teardown */
+ nanosleep(&pause, NULL);
+ struct apple80211_sta_deauth sd = { .version = 1, .reason = 2 };
+ memset(sd.mac, 0xff, 6);
+ struct apple80211req req = { .req_if_name = "ap1", .req_type = 76, .req_len = sizeof(sd), .req_data = (uintptr_t)&sd };
+ assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211, &req) == 0);
+ atomic_store(&hostapd_exit_deauth_sent, 1);
+ return NULL;
 }
 int main(int argc,char **argv) {
  (void)argv;
@@ -313,6 +385,9 @@ int main(int argc,char **argv) {
  set_ux(0xffffffffu,4); assert(fuxi_wifi_ux()==FUXI_WIFI_UX_ALL);
  set_ux(1,8); assert(!fuxi_wifi_ux());
  set_ux(6,4); assert(fuxi_wifi_ux()==(FUXI_WIFI_UX_PICK_RATE|FUXI_WIFI_UX_KEEP_LINK));
+ set_ux(FUXI_WIFI_UX_SCAN_REUSE|FUXI_WIFI_UX_SCAN_DWELL_110,4);
+ assert(fuxi_wifi_ux()==(FUXI_WIFI_UX_SCAN_REUSE|FUXI_WIFI_UX_SCAN_DWELL_110));
+ assert(FUXI_WIFI_UX_ALL==8191u);
  /* 預設（bit 0 關）：關閉還在排隊時，GET POWER 照舊回報「開」，也照收掃描（舊行為：開關會彈回約兩秒） */
  set_ux(0,4); hold_station();
  power.state[0]=0; assert(!request(true,19,&power,sizeof(power),NULL));
@@ -402,6 +477,118 @@ int main(int argc,char **argv) {
  puts("PASS: production station, ioctl layouts/events, fake frame callbacks and gates");
  puts("PASS: fuxi,wifi-ux bit 0 power report follows the queued and running request");
  puts("PASS: fuxi,wifi-ux bit 3 country code kept, bit 4 same power keeps the link");
+ /* SoftAP (ap1) opt-in lifecycle, layouts, hostapd key/STA/IE contract and isolation */
+ {
+  uint8_t caps[13]={0};
+  assert(!request(false,12,caps,sizeof(caps),NULL) && !(caps[0]&0x80)); /* disabled by default */
+  struct apple80211req apreq = { .req_if_name="ap1", .req_type=96 };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCGA80211,&apreq)==ENXIO);
+  adt_ap=FUXI_WIFI_AP_ALL; wifi_ap_cached=0;
+  fuxi_wifi_apple80211_ap_attach(&ap_mock_ops);
+  assert(!request(false,12,caps,sizeof(caps),NULL) && (caps[0]&0x80)); /* HOSTAP bit 7 advertised */
+  assert(fuxi_wifi_apple80211_ioctl(SIOCGA80211,&apreq)==0 && apreq.req_val==7);
+  char parent[16]={0};
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=97, .req_len=16, .req_data=(uintptr_t)parent };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCGA80211,&apreq)==0 && !strcmp(parent,"en0"));
+  unsigned en0_mode_ev = atomic_load(&events[8]);
+  unsigned en0_apstart_ev = atomic_load(&events[30]);
+  unsigned en0_arrive_ev = atomic_load(&events[12]);
+  unsigned en0_leave_ev = atomic_load(&events[13]);
+  int en0_opmode = 0;
+  assert(!request(false,15,NULL,0,&en0_opmode) && en0_opmode==1);
+  struct apple80211_station_list sl; memset(&sl,0,sizeof(sl));
+  assert(request(false,42,&sl,sizeof(sl),NULL)==EOPNOTSUPP); /* en0 STATION_LIST refused when AP inactive */
+  struct apple80211_apmode_data apd; memset(&apd,0,sizeof(apd));
+  apd.version=1; apd.mode=2; apd.auth_lower=1; apd.auth_upper=8; apd.ssid_len=7; memcpy(apd.ssid,"FuxiAP1",7);
+  apreq = (struct apple80211req){ .req_if_name="en0", .req_type=25, .req_val=1, .req_len=sizeof(apd), .req_data=(uintptr_t)&apd };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_starts==1 && ap_link_state);
+  assert(ap_mock_flags==(FUXI_WIFI_AP_CFG_HE|FUXI_WIFI_AP_CFG_PREFER_5GHZ) && ap_mock_cc[0]=='U' && ap_mock_cc[1]=='S');
+  /* Start posts EVENT_HOST_AP_MODE_START (30) on en0 for wifid -> misd, and MODE_CHANGED (8) on ap1 for hostapd. */
+  assert(atomic_load(&events[30])==en0_apstart_ev+1 && atomic_load(&events[8])==en0_mode_ev && atomic_load(&ap_events[8])==1);
+  assert(!request(false,15,NULL,0,&en0_opmode) && en0_opmode==(1|8));
+  struct { uint32_t v; struct apple80211_channel c; } apch = {0};
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=4, .req_len=sizeof(apch), .req_data=(uintptr_t)&apch };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCGA80211,&apreq)==0 && apch.c.channel==149 && (apch.c.flags & (CHANNEL_5GHZ|CHANNEL_80MHZ|CHANNEL_ACTIVE))==(CHANNEL_5GHZ|CHANNEL_80MHZ|CHANNEL_ACTIVE));
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=15 };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCGA80211,&apreq)==0 && apreq.req_val==8);
+  const uint8_t sta_mac[6]={0xaa,0xbb,0xcc,0xdd,0xee,0x01};
+  const uint8_t rsn_ie[22]={0x30,20,1,0,0,0x0f,0xac,4,1,0,0,0x0f,0xac,4,1,0,0,0x0f,0xac,2,0,0};
+  fuxi_wifi_apple80211_ap_sta_arrive(sta_mac,rsn_ie,sizeof(rsn_ie));
+  assert(atomic_load(&ap_events[12])==1 && atomic_load(&events[12])==en0_arrive_ev); /* WPA2: en0 arrive waits for STA_AUTHORIZE */
+  struct apple80211_sta_ie_list iel; memset(&iel,0,sizeof(iel));
+  iel.version=1; memcpy(iel.mac,sta_mac,6); iel.ie_len=1024;
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=73, .req_len=sizeof(iel), .req_data=(uintptr_t)&iel };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCGA80211,&apreq)==0 && iel.ie_len==22 && iel.ie[0]==0x30 && iel.ie[1]==20);
+  struct apple80211_key k; memset(&k,0,sizeof(k));
+  k.version=1; k.key_len=16; k.key_cipher_type=5; k.key_index=1; memset(k.key_ea,0xff,6);
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=3, .req_len=sizeof(k), .req_data=(uintptr_t)&k };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_keys==1 && ap_mock_cipher==0x000fac04u);
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=78, .req_len=sizeof(k), .req_data=(uintptr_t)&k };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCGA80211,&apreq)==0 && k.key_rsc[0]==0x11 && k.key_rsc[1]==0x22);
+  struct apple80211_sta_authorize sa = { .version=1, .authorize=1 }; memcpy(sa.mac,sta_mac,6);
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=74, .req_len=sizeof(sa), .req_data=(uintptr_t)&sa };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_auths==1);
+  assert(atomic_load(&events[12])==en0_arrive_ev+1 && en0_last_sta_num==1); /* en0 STA_ARRIVE with staNum=1 */
+  /* Early STA before bridge ready: bridge_ready(true) arms 350ms tick -> disassoc early STA to trigger fresh DHCP/bootpd */
+  unsigned prev_rep = ap_replay_armed, prev_deauth = ap_mock_deauths;
+  unsigned prev_ap_leave = atomic_load(&ap_events[13]), prev_en0_leave = atomic_load(&events[13]);
+  fuxi_wifi_apple80211_ap_bridge_ready(true);
+  assert(ap_replay_armed == prev_rep + 1 && timer_slot_count >= 1);
+  timer_slots[0](NULL, NULL);
+  assert(ap_mock_deauths == prev_deauth + 1);
+  assert(atomic_load(&ap_events[13]) == prev_ap_leave + 1);
+  assert(atomic_load(&events[13]) == prev_en0_leave + 1 && en0_last_sta_num == 0);
+  /* Client reconnects AFTER bridge is ready -> joined_before_bridge==false, must NOT be disassoc'd again */
+  fuxi_wifi_apple80211_ap_sta_arrive(sta_mac,rsn_ie,sizeof(rsn_ie));
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=74, .req_len=sizeof(sa), .req_data=(uintptr_t)&sa };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_auths==2);
+  assert(atomic_load(&events[12])==en0_arrive_ev+2 && en0_last_sta_num==1);
+  fuxi_wifi_apple80211_ap_bridge_ready(true);
+  timer_slots[0](NULL, NULL);
+  assert(ap_mock_deauths == prev_deauth + 1); /* unchanged: post-bridge STA not kicked */
+  memset(&sl,0,sizeof(sl));
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=42, .req_len=sizeof(sl), .req_data=(uintptr_t)&sl };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCGA80211,&apreq)==0 && sl.count==1 && !memcmp(sl.stations[0].mac,sta_mac,6) && sl.stations[0].flags==1);
+  memset(&sl,0,sizeof(sl));
+  assert(request(false,42,&sl,sizeof(sl),NULL)==0 && sl.count==1 && !memcmp(sl.stations[0].mac,sta_mac,6) && sl.stations[0].flags==1); /* en0 STATION_LIST */
+  struct apple80211_sta_deauth sd = { .version=1, .reason=3 }; memcpy(sd.mac,sta_mac,6);
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=76, .req_len=sizeof(sd), .req_data=(uintptr_t)&sd };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_deauths==prev_deauth+2);
+  assert(atomic_load(&events[13])==en0_leave_ev+2 && en0_last_sta_num==0); /* en0 STA_LEAVE with staNum=0 */
+  /* Also verify SoftAP stop posts en0 STA_LEAVE if an authorized STA is still present */
+  fuxi_wifi_apple80211_ap_sta_arrive(sta_mac,rsn_ie,sizeof(rsn_ie));
+  sa.authorize=1;
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=74, .req_len=sizeof(sa), .req_data=(uintptr_t)&sa };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0);
+  unsigned leave_before_stop = atomic_load(&events[13]);
+  apreq = (struct apple80211req){ .req_if_name="en0", .req_type=25, .req_val=2, .req_len=0 };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_stops==1 && !ap_link_state);
+  assert(atomic_load(&events[13])==leave_before_stop+1 && en0_last_sta_num==0);
+  assert(atomic_load(&events[8])==en0_mode_ev+1); /* Stop posts EVENT_MODE_CHANGED (8) on en0 */
+  assert(!request(false,15,NULL,0,&en0_opmode) && en0_opmode==1);
+  assert(request(false,42,&sl,sizeof(sl),NULL)==EOPNOTSUPP);
+  /* Verify SoftAP restart waits for slow previous hostapd teardown (RSN_CONF -> stop -> delayed broadcast STA_DEAUTH) */
+  apreq = (struct apple80211req){ .req_if_name="en0", .req_type=25, .req_val=1, .req_len=sizeof(apd), .req_data=(uintptr_t)&apd };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_starts==2);
+  uint8_t rsn_conf[164] = {0};
+  apreq = (struct apple80211req){ .req_if_name="ap1", .req_type=77, .req_len=sizeof(rsn_conf), .req_data=(uintptr_t)rsn_conf };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0);
+  apreq = (struct apple80211req){ .req_if_name="en0", .req_type=25, .req_val=2, .req_len=0 };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_stops==2);
+  atomic_store(&hostapd_exit_deauth_sent, 0);
+  pthread_t htid;
+  assert(pthread_create(&htid, NULL, delayed_hostapd_exit_thread, NULL) == 0);
+  uint64_t t_before = mach_absolute_time();
+  apreq = (struct apple80211req){ .req_if_name="en0", .req_type=25, .req_val=1, .req_len=sizeof(apd), .req_data=(uintptr_t)&apd };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_starts==3);
+  uint64_t t_after = mach_absolute_time();
+  assert(pthread_join(htid, NULL) == 0);
+  assert(atomic_load(&hostapd_exit_deauth_sent) == 1);
+  assert((t_after - t_before) >= 120000000ull);
+  apreq = (struct apple80211req){ .req_if_name="en0", .req_type=25, .req_val=2, .req_len=0 };
+  assert(fuxi_wifi_apple80211_ioctl(SIOCSA80211,&apreq)==0 && ap_mock_stops==3);
+  puts("PASS: SoftAP ap1 opt-in gate, Wi-Fi 6/5G/CC flags, HOST_AP_MODE, wifid en0 events (30/8/12/13), hostapd exit sync & STATION_LIST");
+ }
  return 0;
 }
 '''
@@ -661,6 +848,7 @@ def main():
         source = MODEL + stripped('fuxi_wifi_sta.h') + stripped('fuxi_wifi_net.h')
         source += stripped('fuxi_wifi_ios.h') + stripped('fuxi_wifi_apple80211.h')
         source += 'bool fuxi_wifi_net_attach(const struct fuxi_wifi_net_link *);\n'
+        source += 'bool fuxi_wifi_ap_net_attach(const struct fuxi_wifi_net_link *);\n'
         source += stripped('fuxi_wifi_sta.c') + stripped('fuxi_wifi_apple80211.c')
         source += stripped('fuxi_wifi_ios.c') + TEST
         compile_run(source, directory, 'ios')

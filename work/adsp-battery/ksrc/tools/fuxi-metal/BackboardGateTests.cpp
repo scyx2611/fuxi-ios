@@ -60,6 +60,19 @@ int main(){
   assert(!unlinkat(dir,"gate.tmp",AT_REMOVEDIR));
  }
  {auto gate=std::make_unique<fuxi::BackboardGate>();auto &g=*gate;assert(!g.admit(bootB,storage(path)));}
+ // M9 ForegroundClientGate decoupling: fault latches only process-local atomic state and never touches backboardd's gate.state.
+ {
+  auto bg=std::make_unique<fuxi::BackboardGate>();
+  assert(bg->admit(bootA,storage(path)));
+  fuxi::foregroundClientGate.resetForTest();
+  assert(!fuxi::foregroundClientGate.isActive() && !fuxi::foregroundClientGate.blocked());
+  fuxi::foregroundClientGate.admit();
+  assert(fuxi::foregroundClientGate.isActive() && !fuxi::foregroundClientGate.blocked());
+  fuxi::foregroundClientGate.fault();
+  assert(fuxi::foregroundClientGate.blocked() && fuxi::foregroundClientGate.failureCount()==1);
+  assert(!bg->blocked() && record(path).find("0 armed")!=std::string::npos);
+  fuxi::foregroundClientGate.resetForTest();
+ }
  clear(path);close(dir);assert(!rmdir(path));
- puts("PASS: backboardd boot reset, crash strike/deny, good/rearm, runtime fault, exclusive lease, private record integrity and write failure");
+ puts("PASS: backboardd boot reset, crash strike/deny, good/rearm, runtime fault, exclusive lease, private record integrity, write failure and ForegroundClientGate decoupling");
 }

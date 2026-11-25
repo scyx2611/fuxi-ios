@@ -249,7 +249,7 @@ CPU_SUBTYPE_ARM64E = 2
 
 
 def build(kernel_path, adt_path, cmdline, ramdisk_path=None, allow_unsigned_auth=False, boot_line_length=BOOT_LINE_LENGTH,
-          prelinked_path=None, allow_incomplete=False, trustcache_path=None):
+          prelinked_path=None, allow_incomplete=False, trustcache_path=None, extended_v1_adt=False):
     version = next((v for v, n in BOOT_LINES.items() if n == boot_line_length), None)
     if version is None:
         raise SystemExit(f'boot line length must be one of {sorted(BOOT_LINES.values())}')
@@ -314,8 +314,13 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None, allow_unsigned_auth
         out += data
         out += b'\0' * (-len(out) & 0xf)
         seg_table.append((vmaddr, vmsize, off, len(data)))
-    if len(adt_blob) > ADT_MAX[version]:
-        raise SystemExit(f'ADT is {len(adt_blob)} bytes; a version {version} payload carries at most {ADT_MAX[version]}')
+    if extended_v1_adt and version != 1:
+        raise SystemExit('Extended v1 ADT requires the 608-byte boot_args layout')
+    adt_limit = ADT_MAX[2] if extended_v1_adt else ADT_MAX[version]
+    if len(adt_blob) > adt_limit:
+        raise SystemExit(f'ADT is {len(adt_blob)} bytes; this version {version} loader carries at most {adt_limit}')
+    if kernel_end - virt_base + ((len(adt_blob) + PAGE - 1) & ~(PAGE - 1)) + PAGE > MEM_SIZE:
+        raise SystemExit('Kernel, device tree and boot_args exceed managed RAM')
     adt_off = len(out)
     out += adt_blob
     out += b'\0' * (-len(out) & 0xf)
@@ -345,6 +350,8 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--extended-v1-adt', action='store_true',
+                    help='64 KiB ADT for a v1 loader explicitly built with the four-page ADT limit')
     ap.add_argument('--trustcache', metavar='BUNDLE',
                     help='trust-cache bundle for /chosen/memory-map TrustCache (xnu-12377 load_static_trust_cache)')
     ap.add_argument('--allow-unsigned-auth', action='store_true',
@@ -359,7 +366,7 @@ if __name__ == '__main__':
     if a.allow_incomplete and not a.prelinked:
         ap.error('--allow-incomplete needs --prelinked')
     blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, a.allow_unsigned_auth, a.boot_line_length,
-                       a.prelinked, a.allow_incomplete, a.trustcache)
+                       a.prelinked, a.allow_incomplete, a.trustcache, a.extended_v1_adt)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':

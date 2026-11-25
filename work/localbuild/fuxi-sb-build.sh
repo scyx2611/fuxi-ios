@@ -53,10 +53,25 @@ ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-oslog-format" > "$OUT/logs/oslog-format
 clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
     "$HARNESS/tools/test-bluetooth-patch.c" -o "$BUILD/test-bluetooth-patch"
 ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-bluetooth-patch" > "$OUT/logs/bluetooth-patch.txt" 2>&1
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
+    "$HARNESS/tools/test-volhud-layout.c" -lm -o "$BUILD/test-volhud-layout"
+ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-volhud-layout" > "$OUT/logs/volhud-layout.txt" 2>&1
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
+    "$HARNESS/tools/test-capsrc-stub.c" -o "$BUILD/test-capsrc-stub"
+ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-capsrc-stub" > "$OUT/logs/capsrc-stub.txt" 2>&1
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
+    "$HARNESS/tools/test-rtc-persist.c" -o "$BUILD/test-rtc-persist"
+ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-rtc-persist" > "$OUT/logs/rtc-persist.txt" 2>&1
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
+    "$HARNESS/tools/test-atx-fix.c" -o "$BUILD/test-atx-fix"
+ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-atx-fix" > "$OUT/logs/atx-fix.txt" 2>&1
+clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I"$SOURCE" \
+    "$HARNESS/tools/test-audio-mic-dsp.c" -o "$BUILD/test-audio-mic-dsp"
+ASAN_OPTIONS=detect_leaks=1 "$BUILD/test-audio-mic-dsp" > "$OUT/logs/audio-mic-dsp.txt" 2>&1
 (
     OBJECTS=()
-    for unit in FuxiShape FuxiFlashlight FuxiBatteryAudit FuxiVibrate FuxiWifiAudit FuxiBluetoothProbe FuxiBlueTool \
-        FuxiBluetoothLog; do
+    for unit in FuxiShape FuxiFlashlight FuxiVolHud FuxiBatteryAudit FuxiVibrate FuxiWifiAudit FuxiBluetoothProbe FuxiBlueTool \
+        FuxiBluetoothLog FuxiCaptureStub FuxiRtcPersist FuxiAtxFix FuxiAudioMicDsp; do
         "$CLANG" -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wall -Wextra -Werror \
             -fstack-protector-strong -c "$SOURCE/$unit.c" -o "$BUILD/$unit.o"
         OBJECTS+=("$BUILD/$unit.o")

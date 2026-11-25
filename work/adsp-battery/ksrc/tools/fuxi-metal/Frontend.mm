@@ -136,6 +136,8 @@ static void checkClient() {
     if(timer){dispatch_source_set_timer(timer,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),5*NSEC_PER_SEC,NSEC_PER_SEC/10);
      dispatch_source_set_event_handler(timer,^{fuxi::backboardGate.report();finishSurvey();});dispatch_resume(timer);}
    }
+  } else if(clientMode==fuxi::ClientMode::allow) {
+   fuxi::foregroundClientGate.admit();
   }
   // Constructor-time admission precedes CA framebuffer selection and discovery.
   // Census/denied clients must not change the process's rendering preferences.
@@ -211,7 +213,9 @@ struct DescriptorContext {
 };
 static qos_class_t compositorQoS(){return strcmp(clientProcess,"backboardd")?QOS_CLASS_DEFAULT:QOS_CLASS_USER_INTERACTIVE;}
 static void failureLog(const char *format,...) {
- fuxi::backboardGate.fault();uint64_t n=failureCount.fetch_add(1);
+ const bool backboard=!strcmp(clientProcess,"backboardd");
+ if(backboard)fuxi::backboardGate.fault(); else fuxi::foregroundClientGate.fault();
+ uint64_t n=failureCount.fetch_add(1);
  char message[fuxi::Survey::messageBytes];va_list args;va_start(args,format);vsnprintf(message,sizeof(message),format,args);va_end(args);
  // Context is captured in the refusal itself, before the normal immediate exit.
  if(descriptorContext.text || descriptorContext.lazy){size_t len=strlen(message);if(len && message[len-1]=='\n')message[--len]=0;
@@ -1346,7 +1350,7 @@ static NSString *renderPassText(MTLRenderPassDescriptor *d){
  if(backboardSurvey.active() && fuxi::backboardGate.blocked()){
   for(const auto &point:_events)if(point.signal)[point.event setSignaledValue:point.value];
   _scheduled=YES;_status=MTLCommandBufferStatusCompleted;[_error release];_error=nil;finishSurvey();
- }else try {if(fuxi::backboardGate.blocked())throw std::runtime_error("backboardd failure latched: CPU on next respawn");if(!strcmp(clientProcess,"fuxi-ca-smoke") && failureCount.load())throw std::runtime_error("CA diagnostic failure latched: GPU submission refused");if(_rejected)throw std::runtime_error("unsupported command: GPU submission refused");if(clientMode==fuxi::ClientMode::census)throw std::runtime_error("census: no GPU submission");auto *backend=owner(_queue->_device)->backend;size_t begin=0;
+ }else try {if(fuxi::backboardGate.blocked() || fuxi::foregroundClientGate.blocked())throw std::runtime_error("client failure latched: CPU fallback");if(!strcmp(clientProcess,"fuxi-ca-smoke") && failureCount.load())throw std::runtime_error("CA diagnostic failure latched: GPU submission refused");if(_rejected)throw std::runtime_error("unsupported command: GPU submission refused");if(clientMode==fuxi::ClientMode::census)throw std::runtime_error("census: no GPU submission");auto *backend=owner(_queue->_device)->backend;size_t begin=0;
  if(gpuScanout)backend->requireLive();
  auto leaseStart=_frameTrace?fuxi::FrameClock::now():fuxi::FrameClock::time_point{};
  fuxi::SurfaceLease lease(gpuScanout,lockScanoutSurface,unlockScanoutSurface,&backend->poisoned);
@@ -1444,7 +1448,7 @@ static NSString *renderPassText(MTLRenderPassDescriptor *d){
   if(_status==MTLCommandBufferStatusError)throw std::runtime_error("command snapshot failed");
   if(backboardSurvey.active() && fuxi::backboardGate.blocked()){_scheduled=YES;}
   else {
-  if(fuxi::backboardGate.blocked())throw std::runtime_error("backboardd failure latched: CPU on next respawn");
+  if(fuxi::backboardGate.blocked() || fuxi::foregroundClientGate.blocked())throw std::runtime_error("client failure latched: CPU fallback");
   if(!strcmp(clientProcess,"fuxi-ca-smoke") && failureCount.load())throw std::runtime_error("CA diagnostic failure latched: GPU submission refused");
   if(_rejected)throw std::runtime_error("unsupported command: GPU submission refused");
   if(clientMode==fuxi::ClientMode::census)throw std::runtime_error("census: no GPU submission");
@@ -1675,8 +1679,7 @@ static NSString *surfaceDescriptorText(IOSurfaceRef surface,NSUInteger plane){
  checkClient();
  if(clientMode==fuxi::ClientMode::deny) {[self release];return nil;}
  CENSUS();
- if((clientMode!=fuxi::ClientMode::census && geteuid()!=0 && strcmp(clientProcess,"backboardd")) ||
-    fuxi::backboardGate.blocked() || !port || owner(self)) {[self release];return nil;}
+ if(fuxi::backboardGate.blocked() || fuxi::foregroundClientGate.blocked() || !port || owner(self)) {[self release];return nil;}
  if(clientMode==fuxi::ClientMode::census) {
   FuxiOwner *state=[FuxiOwner new];
   objc_setAssociatedObject(self,&ownerKey,state,OBJC_ASSOCIATION_RETAIN_NONATOMIC);[state release];return self;
@@ -1696,12 +1699,13 @@ static NSString *surfaceDescriptorText(IOSurfaceRef surface,NSUInteger plane){
   }
   static const FuxiNativeHooks hooks={FUXI_NATIVE_ABI,sizeof(FuxiNativeHooks),
    [](const char *why){failureLog("FUXI MTL: native refusal %s\n",why?why:"unknown");},
-   [](){return fuxi::backboardGate.blocked();},
+   [](){return !strcmp(clientProcess,"backboardd") ? fuxi::backboardGate.blocked() : fuxi::foregroundClientGate.blocked();},
    [](uint64_t gpu,double wall,uint64_t draws,bool storedSurface){
-    if(fuxi::backboardGate.blocked())return;
+    const bool bb=!strcmp(clientProcess,"backboardd");
+    if(bb ? fuxi::backboardGate.blocked() : fuxi::foregroundClientGate.blocked())return;
     completedDraws.fetch_add(draws);if(gpu){fuxi::Backend::gpuNanos.fetch_add(gpu);++fuxi::Backend::gpuSamples;}
-    if(storedSurface)fuxi::backboardGate.completed(gpu,wall);
-    if(fuxi::backboardGate.blocked())failureLog("FUXI MTL: native completion latch\n");}};
+    if(bb && storedSurface)fuxi::backboardGate.completed(gpu,wall);
+    if(bb && fuxi::backboardGate.blocked())failureLog("FUXI MTL: native completion latch\n");}};
   id device=nil;
   try { @try {device=FUXI_MTL_NATIVE_OPEN(clientProcess,registry,&hooks);}
   @catch(NSException *e){failureLog("FUXI MTL: native open exception %s\n",e.reason.UTF8String);} }

@@ -126,7 +126,9 @@ enum fuxi_wifi_sta_event {
 #define FUXI_WIFI_UX_RX_BATCH    256u      /* receive borrowed ath12k fragments directly into batched mbufs */
 #define FUXI_WIFI_UX_LINK_STATS  512u      /* print cached PHY rate and interface byte counts */
 #define FUXI_WIFI_UX_SCAN_TRACE 1024u      /* log the first ath12k scan events */
-#define FUXI_WIFI_UX_ALL        2047u
+#define FUXI_WIFI_UX_SCAN_REUSE 2048u      /* reuse recent active non-SSID scan results when channels are covered */
+#define FUXI_WIFI_UX_SCAN_DWELL_110 4096u  /* default dwell_ms=0 to bounded 110 ms when budget and passive savings hold */
+#define FUXI_WIFI_UX_ALL        8191u
 
 #ifdef KERNEL
 /* 讀一次 ADT 之後記住（ADT 開機後不變）；沒有這個屬性或長度不對都當 0 */

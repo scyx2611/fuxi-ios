@@ -26,8 +26,9 @@ if (-not $ok) { throw 'no fastboot device' }
 "boot_time=$(Get-Date -Format 'HH:mm:ss')"
 fastboot -s $s boot $img; "fastboot_exit=$LASTEXITCODE"
 $log = "$Out-monitor.log"
-$cl = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$e\run-monitor.ps1`" -Loader $Loader -Out $Out -Log $log -Seconds $Seconds -Reset $Reset -Kernel $Kernel -FramebufferHeight $FramebufferHeight$(if ($TourShots) { ' -TourShots' })$(if ($Framebuffer) { ' -Framebuffer' })$(if ($MonitorIdle -ge 0) { " -MonitorIdle $MonitorIdle" })"
-$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cl; CurrentDirectory = 'D:\xiaomi13\fuxi_ios' }
+$cl = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$e\run-monitor.ps1`" -Loader $Loader -Out $Out -Log $log -Seconds $Seconds -Reset $Reset -Kernel $Kernel -FramebufferHeight $FramebufferHeight$(if ($TourShots) { ' -TourShots' })$(if ($Framebuffer) { ' -Framebuffer' })$(if ($MonitorIdle -ge 0) { " -MonitorIdle $MonitorIdle" })"
+$si = New-CimInstance -ClassName Win32_ProcessStartup -Property @{ ShowWindow = [uint16]0 } -ClientOnly
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cl; CurrentDirectory = 'D:\xiaomi13\fuxi_ios'; ProcessStartupInformation = $si }
 "wmi_return=$($r.ReturnValue) pid=$($r.ProcessId)"
 Start-Sleep -Seconds 20
 foreach ($i in 1..([int](($Seconds + 90) / 5))) { Start-Sleep -Seconds 5; if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'fuxi-xnu-monitor' })) { break } }

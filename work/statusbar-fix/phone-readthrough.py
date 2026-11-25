@@ -246,6 +246,38 @@ def audio_hal_plan(action, bundle, checksum):
     return editor, json.dumps(plan, indent=2) + '\n'
 
 
+def nativemetal_plan(artifact_dir):
+    sums_path = artifact_dir / 'SHA256SUMS'
+    if not sums_path.is_file():
+        raise ValueError('Missing SHA256SUMS in NativeMetal artifact directory')
+    sums = {}
+    for line in sums_path.read_text(encoding='ascii').splitlines():
+        if line.strip():
+            digest, name = line.split('  ', 1)
+            sums[name] = digest
+    mapping = [
+        ('FuxiNativeMetal', artifact_dir / 'FuxiNativeMetal.bundle/FuxiNativeMetal',
+         sums['FuxiNativeMetal.bundle/FuxiNativeMetal']),
+        ('CodeResources', artifact_dir / 'FuxiNativeMetal.bundle/_CodeSignature/CodeResources',
+         sums['FuxiNativeMetal.bundle/_CodeSignature/CodeResources']),
+        ('FuxiMetal', artifact_dir / 'FuxiMetal.bundle/FuxiMetal',
+         sums['FuxiMetal.bundle/FuxiMetal']),
+        ('FuxiMetal_CodeResources', artifact_dir / 'FuxiMetal.bundle/_CodeSignature/CodeResources',
+         sums['FuxiMetal.bundle/_CodeSignature/CodeResources']),
+        ('libnative_metal_bridge.dylib', artifact_dir / 'libnative_metal_bridge.dylib',
+         sums['libnative_metal_bridge.dylib']),
+    ]
+    lines = []
+    for share_name, src, expected in mapping:
+        if not src.is_file() or src.is_symlink():
+            raise ValueError(f'Missing regular NativeMetal file: {src}')
+        got = hashlib.sha256(src.read_bytes()).hexdigest()
+        if got != expected:
+            raise ValueError(f'Hash mismatch for {src}: got {got}, expected {expected}')
+        lines.append(f'{expected}  {share_name}\n')
+    return mapping, ''.join(lines)
+
+
 def stage(arguments):
     output = Path(arguments.output).resolve()
     if output.parent != Path(__file__).resolve().parent:
@@ -254,29 +286,36 @@ def stage(arguments):
         raise ValueError('Use a new directory, or --write-staged for a completed guest run')
     zone = arguments.timezone
     job = arguments.disable_job
+    enable_job = arguments.enable_job
     turnip = arguments.turnip_hybrid
     wifi_logging = arguments.wifi_logging
     apps = arguments.install_staged_apps
     app_dir = Path(arguments.install_app).resolve() if arguments.install_app else None
     audio_hal = arguments.audio_hal
+    nm_dir = Path(arguments.nativemetal_dir).resolve() if arguments.nativemetal_dir else None
     # 32 個 App 目錄改名＋placeholder 停放會改到分散的 catalog 節點，上限放寬到 256 區塊（1 GiB）；
-    # 第三方 App 約 140 MiB 資料＋catalog／extents／bitmap，同樣用 256。
-    limit = 256 if apps or app_dir else 64
-    if apps and (zone is not None or job is not None or turnip or wifi_logging is not None or
+    # 第三方 App 約 140 MiB 資料＋catalog／extents／bitmap，同樣用 256。NativeMetal bridge ~21 MiB 用 96。
+    limit = 256 if apps or app_dir else (96 if nm_dir else 64)
+    if apps and (zone is not None or job is not None or enable_job is not None or turnip or wifi_logging is not None or
                  arguments.dylib or arguments.sha256):
         raise ValueError('--install-staged-apps is a separate staging run')
-    if app_dir and (apps or zone is not None or job is not None or turnip or wifi_logging is not None or
+    if app_dir and (apps or zone is not None or job is not None or enable_job is not None or turnip or wifi_logging is not None or
                     arguments.dylib or arguments.sha256):
         raise ValueError('--install-app is a separate staging run')
-    if wifi_logging is not None and (zone is not None or job is not None or turnip or
+    if wifi_logging is not None and (zone is not None or job is not None or enable_job is not None or turnip or
                                      arguments.dylib or arguments.sha256):
         raise ValueError('--wifi-logging is a separate configuration staging run')
-    if turnip and (zone is not None or job is not None or arguments.dylib):
+    if turnip and (zone is not None or job is not None or enable_job is not None or arguments.dylib):
         raise ValueError('--turnip-hybrid is a separate library staging run')
-    if zone is not None and job is not None:
-        raise ValueError('--timezone and --disable-job are separate runs')
-    if audio_hal:
-        if any((zone, job, turnip, wifi_logging, apps, app_dir, arguments.dylib)):
+    if sum(x is not None for x in (zone, job, enable_job)) > 1:
+        raise ValueError('--timezone, --disable-job, and --enable-job are separate runs')
+    if nm_dir:
+        if any((zone, job, enable_job, turnip, wifi_logging, apps, app_dir, audio_hal, arguments.dylib, arguments.sha256)):
+            raise ValueError('--nativemetal-dir is a separate staging run')
+        nm_items, nm_sums = nativemetal_plan(nm_dir)
+        script, token = 'stage-nativemetal.sh', 'NATIVEMETAL_STAGE_SUCCESS'
+    elif audio_hal:
+        if any((zone, job, enable_job, turnip, wifi_logging, apps, app_dir, arguments.dylib)):
             raise ValueError('--audio-hal is a separate staging run')
         bundle = Path(arguments.audio_bundle).resolve(strict=True)
         editor, audio_plan = audio_hal_plan(audio_hal, bundle, arguments.sha256)
@@ -301,6 +340,11 @@ def stage(arguments):
         if not re.fullmatch(r'com\.apple\.[A-Za-z0-9.]+', job) or arguments.dylib or arguments.sha256:
             raise ValueError('--disable-job takes one com.apple label and no dylib')
         script, token = 'stage-launchd-disable.sh', 'LAUNCHD_STAGE_SUCCESS'
+    elif enable_job is not None:
+        # launchd 暫時啟用模式：移除 launchd.plist 中該 job 的 Disabled=True，不帶 dylib。
+        if not re.fullmatch(r'com\.apple\.[A-Za-z0-9.]+', enable_job) or arguments.dylib or arguments.sha256:
+            raise ValueError('--enable-job takes one com.apple label and no dylib')
+        script, token = 'stage-launchd-enable.sh', 'LAUNCHD_ENABLE_STAGE_SUCCESS'
     else:
         dylib = Path(turnip or arguments.dylib).resolve()
         if hashlib.sha256(dylib.read_bytes()).hexdigest() != arguments.sha256:
@@ -336,7 +380,12 @@ def stage(arguments):
                 guest_log = (output / 'guest.log').read_text(encoding='utf-8')
                 if token not in guest_log or 'FAST_STAGE_SUCCESS' not in guest_log or 'GUEST_OK' not in guest_log:
                     raise RuntimeError('The staged guest did not finish')
-                if audio_hal:
+                if nm_dir:
+                    if ((share / 'nativemetal-sha256.txt').read_text(encoding='ascii') != nm_sums or
+                            any((share / share_name).read_bytes() != src.read_bytes()
+                                for share_name, src, _ in nm_items)):
+                        raise ValueError('The staged NativeMetal files differ')
+                elif audio_hal:
                     if ((share / 'audio-hal.json').read_text(encoding='ascii') != audio_plan or
                             (share / 'stage-audio-hal-guest.py').read_bytes() != guest.read_bytes() or
                             (share / 'fuxi-sys-root.py').read_bytes() != editor.read_bytes() or
@@ -359,9 +408,12 @@ def stage(arguments):
                 elif job is not None:
                     if (share / 'job.txt').read_text(encoding='ascii').strip() != job:
                         raise ValueError('The staged launchd job differs')
+                elif enable_job is not None:
+                    if (share / 'job.txt').read_text(encoding='ascii').strip() != enable_job:
+                        raise ValueError('The staged launchd enable job differs')
                 elif hashlib.sha256((share / 'libfuxi-sb.dylib').read_bytes()).hexdigest() != arguments.sha256:
                     raise ValueError('The staged dylib differs')
-                if zone is None and job is None and wifi_logging is None and not apps and not app_dir and not audio_hal:
+                if zone is None and job is None and enable_job is None and wifi_logging is None and not apps and not app_dir and not audio_hal and not nm_dir:
                     kind_path = share / 'library-kind.txt'
                     staged_kind = kind_path.read_text(encoding='ascii').strip() if kind_path.exists() else 'shape'
                     if staged_kind != ('turnip-hybrid' if turnip else 'shape'):
@@ -372,7 +424,11 @@ def stage(arguments):
                 share.mkdir()
                 for name in (script, 'stage-share/hfs-journal-block-probe.py'):
                     shutil.copy2(Path(__file__).resolve().parent / name, share)
-                if audio_hal:
+                if nm_dir:
+                    for share_name, src, _ in nm_items:
+                        shutil.copy2(src, share / share_name)
+                    (share / 'nativemetal-sha256.txt').write_text(nm_sums, encoding='ascii', newline='\n')
+                elif audio_hal:
                     shutil.copytree(bundle, share / 'FuxiAudio.driver')
                     shutil.copy2(editor, share)
                     shutil.copy2(guest, share)
@@ -392,6 +448,8 @@ def stage(arguments):
                     (share / 'zone.txt').write_text(zone + '\n', encoding='ascii', newline='\n')
                 elif job is not None:
                     (share / 'job.txt').write_text(job + '\n', encoding='ascii', newline='\n')
+                elif enable_job is not None:
+                    (share / 'job.txt').write_text(enable_job + '\n', encoding='ascii', newline='\n')
                 else:
                     shutil.copy2(dylib, share / 'libfuxi-sb.dylib')
                     (share / 'library-kind.txt').write_text(
@@ -472,6 +530,8 @@ if __name__ == '__main__':
                         help='Point the iOS localtime symlink at this zone instead of staging a dylib')
     parser.add_argument('--disable-job', metavar='LABEL',
                         help='Mark this launchd job Disabled in /System/Library/xpc/launchd.plist instead of staging a dylib')
+    parser.add_argument('--enable-job', metavar='LABEL',
+                        help='Temporarily clear Disabled=True for this launchd job in /System/Library/xpc/launchd.plist')
     parser.add_argument('--wifi-logging', choices=('enable', 'disable'),
                         help='Toggle only the existing boolean LoggingFileEnabled in the Wi-Fi configuration')
     parser.add_argument('--install-staged-apps', action='store_true',
@@ -481,6 +541,8 @@ if __name__ == '__main__':
     parser.add_argument('--audio-hal', choices=('enable', 'disable'),
                         help='Install or back out the FuxiAudio HAL trial and VirtualAudio move')
     parser.add_argument('--audio-bundle', metavar='DIR')
+    parser.add_argument('--nativemetal-dir', metavar='DIR',
+                        help='Stage verified FuxiNativeMetal.bundle + libnative_metal_bridge.dylib from CI artifact')
     parser.add_argument('--serial', default=os.environ.get('FUXI_ANDROID_SERIAL', ''))
     arguments = parser.parse_args()
     if arguments.self_test:
@@ -488,8 +550,10 @@ if __name__ == '__main__':
     else:
         if bool(arguments.audio_hal) != bool(arguments.audio_bundle) or (arguments.audio_hal and not arguments.sha256):
             parser.error('--audio-hal needs --audio-bundle and the verified binary --sha256')
-        if not arguments.output or not (arguments.timezone or arguments.disable_job or arguments.wifi_logging or
+        if not arguments.output or not (arguments.timezone or arguments.disable_job or arguments.enable_job or
+                                        arguments.wifi_logging or
                                         arguments.install_staged_apps or arguments.install_app or arguments.audio_hal or
+                                        arguments.nativemetal_dir or
                                         ((arguments.dylib or arguments.turnip_hybrid) and arguments.sha256)):
             parser.error('--output plus a configuration action or a library and --sha256 are required')
         stage(arguments)

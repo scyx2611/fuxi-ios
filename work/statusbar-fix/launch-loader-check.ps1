@@ -25,9 +25,14 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectHaptic')][switch]$InspectHaptic,
     [Parameter(ParameterSetName = 'InspectHaptic')][switch]$TraceEffects,
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectCrash')][switch]$InspectCrash,
+    [Parameter(Mandatory = $true, ParameterSetName = 'InspectAppStoreBaseline')][switch]$InspectAppStoreBaseline,
+    [Parameter(Mandatory = $true, ParameterSetName = 'LaunchdJobEnable')][ValidatePattern('^com\.apple\.[A-Za-z0-9.]+$')][string]$LaunchdJobEnable,
+    [Parameter(Mandatory = $true, ParameterSetName = 'LaunchdJobDisable')][ValidatePattern('^com\.apple\.[A-Za-z0-9.]+$')][string]$LaunchdJobDisable,
+    [Parameter(Mandatory = $true, ParameterSetName = 'InspectAudio')][switch]$InspectAudio,
     [Parameter(Mandatory = $true, ParameterSetName = 'AudioHal')][ValidateSet('enable', 'disable')][string]$AudioHal,
     [Parameter(Mandatory = $true, ParameterSetName = 'AudioHal')][string]$AudioBundle,
     [Parameter(Mandatory = $true, ParameterSetName = 'AudioHal')][ValidatePattern('^[a-f0-9]{64}$')][string]$AudioSha,
+    [Parameter(Mandatory = $true, ParameterSetName = 'NativeMetal')][string]$NativeMetalDir,
     [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][ValidateSet('backup', 'rootbackup', 'prepare', 'survey', 'android', 'recovery', 'ios', 'inspectreturn', 'timing', 'stocktiming', 'removeksu')][string]$DualBootCheck,
     [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][string]$RestorePoint,
     [Parameter(ParameterSetName = 'DualBoot')][string]$Candidate,
@@ -202,11 +207,42 @@ if ($InspectCrash) {
     if ($LASTEXITCODE -ne 0) { throw 'Read-only crash report inspection failed' }
     return
 }
+if ($InspectAppStoreBaseline) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\inspect-powerlog-state.py') `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") --appstore-baseline }
+    if ($LASTEXITCODE -ne 0) { throw 'Read-only AppStore baseline inspection failed' }
+    return
+}
+if ($LaunchdJobEnable) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --enable-job $LaunchdJobEnable --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'Launchd job enable staging failed' }
+    return
+}
+if ($LaunchdJobDisable) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --disable-job $LaunchdJobDisable --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'Launchd job disable staging failed' }
+    return
+}
+if ($InspectAudio) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\inspect-audio-dictation.py') `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'Read-only audio and dictation inspection failed' }
+    return
+}
 if ($AudioHal) {
     Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
         --audio-hal $AudioHal --audio-bundle $AudioBundle --sha256 $AudioSha `
         --output (Join-Path $workspace "work\statusbar-fix\$Out") }
     if ($LASTEXITCODE -ne 0) { throw 'Audio HAL staging failed' }
+    return
+}
+if ($NativeMetalDir) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --nativemetal-dir $NativeMetalDir `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'NativeMetal staging failed' }
     return
 }
 if ($Dylib) {

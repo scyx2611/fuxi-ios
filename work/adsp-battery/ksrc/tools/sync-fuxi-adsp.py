@@ -21,7 +21,7 @@ PATCH = ROOT / 'xnu/patches/0117-fuxi-adsp.patch'
 SOURCES = ('fuxi_adsp.c', 'fuxi_adsp_fw.c', 'fuxi_adsp_battery.c', 'fuxi_amp.c', 'fuxi_pmic.c', 'fuxi_ramtest.c', 'fuxi_rpmh_shared.c', 'QcomSmem.c', 'QcomSmp2p.c', 'QcomGlink.c',
            'QcomMdt.c', 'QcomQmp.c', 'QcomRpmh.c', 'QcomQrtr.c', 'FatVolume.c', 'ShengBattmgr.c', 'ShengQrtr.c', 'GeniI2c.c')
 HEADERS = ('fuxi_torch_audit.h', 'fuxi_haptic_pulse.h', 'QcomSmem.h', 'QcomSmp2p.h', 'QcomGlink.h', 'QcomMdt.h', 'QcomQmp.h', 'QcomRpmh.h', 'QcomScm.h', 'QcomQrtr.h',
-           'FatVolume.h', 'ShengBattmgr.h', 'ShengAdsp.h', 'fuxi_adsp_battery.h', 'fuxi_rpmh_shared.h', 'fuxi_torch_pulse.h', 'fuxi_torch_runtime.h', 'fuxi_ramtest_pattern.h', 'GeniI2c.h')
+           'FatVolume.h', 'ShengBattmgr.h', 'ShengAdsp.h', 'ShengQrtr.h', 'fuxi_adsp_battery.h', 'fuxi_rpmh_shared.h', 'fuxi_torch_pulse.h', 'fuxi_torch_runtime.h', 'fuxi_ramtest_pattern.h', 'GeniI2c.h')
 MODIFIED = {'iokit/Kernel/arm/SweetBattery.cpp': ('0062-sweet-touch-power-battery.patch', 'SweetBattery.cpp')}
 # bsd/dev/LICENSE.UniXNU-sheng already comes with 0098 (the GPU fence interrupt is adapted from sheng too); --check
 # verifies that the local copy is the same text.
@@ -162,7 +162,9 @@ def main():
             continue
         text = prior.read_text(errors='surrogateescape')
         for name in FILES:
-            assert not re.search(r'^\+\+\+ b/bsd/dev/' + re.escape(name) + '$', text, re.M), prior.name + ' already creates ' + name
+            # 後續補丁可以修改 0117 建立的檔案；再次從 /dev/null 建立才是重複。
+            header = r'^\+\+\+ b/bsd/dev/' if prior.name < PATCH.name else r'^--- /dev/null\n\+\+\+ b/bsd/dev/'
+            assert not re.search(header + re.escape(name) + '$', text, re.M), prior.name + ' already creates ' + name
     audio_patch = (PATCH.parent / '0113-fuxi-audio.patch').read_text(errors='surrogateescape')
     assert all(f'+++ b/bsd/dev/{name}\n' in audio_patch for name in AUDIO_LINK_SOURCES), '0113 audio source missing'
     shipped = re.search(r'^\+\+\+ b/bsd/dev/' + re.escape(LICENSE) + r'\n@@[^\n]*\n((?:\+[^\n]*\n)+)',

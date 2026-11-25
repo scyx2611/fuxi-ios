@@ -7,7 +7,7 @@ static void put16(uint8_t *p, uint32_t v) {p[0] = (uint8_t)v; p[1] = (uint8_t)(v
 static void put32(uint8_t *p, uint32_t v) {put16(p, v); put16(p + 2, v >> 16);}
 
 #define CTRL_BYTES 20u  /* command and four words */
-#define MAX_PACKET 512u
+#define MAX_PACKET 560u
 
 void qcom_qrtr_init(QcomQrtr *q, uint32_t local_node, QcomQrtrSend send, void *send_context)
 {
@@ -54,11 +54,30 @@ static void announce(QcomQrtr *q, unsigned i)
 int qcom_qrtr_add_service(QcomQrtr *q, uint32_t service, uint32_t instance, uint32_t port, QcomQrtrReceive receive, void *context)
 {
     if (q->local_count == QCOM_QRTR_MAX_LOCAL || port == QCOM_QRTR_PORT_CTRL) return -1;
+    for (uint32_t k = 0; k < q->local_count; ++k) if (q->local[k].port == port) return -1;
     const unsigned i = q->local_count++;
     q->local[i].service = service; q->local[i].instance = instance; q->local[i].port = port;
+    q->local[i].announced = 1;
     q->local[i].receive = receive; q->local[i].context = context;
     if (q->hello_received) announce(q, i);
     return 0;
+}
+
+int qcom_qrtr_add_client(QcomQrtr *q, uint32_t port, QcomQrtrReceive receive, void *context)
+{
+    if (q->local_count == QCOM_QRTR_MAX_LOCAL || !port || port == QCOM_QRTR_PORT_CTRL || !receive) return -1;
+    for (uint32_t k = 0; k < q->local_count; ++k) if (q->local[k].port == port) return -1;
+    const unsigned i = q->local_count++;
+    q->local[i].service = 0; q->local[i].instance = 0; q->local[i].port = port;
+    q->local[i].announced = 0;
+    q->local[i].receive = receive; q->local[i].context = context;
+    return 0;
+}
+
+void qcom_qrtr_set_server_notify(QcomQrtr *q, QcomQrtrNotify notify, void *context)
+{
+    q->on_server = notify;
+    q->on_server_context = context;
 }
 
 void qcom_qrtr_start(QcomQrtr *q)
@@ -72,20 +91,39 @@ int qcom_qrtr_find_remote(const QcomQrtr *q, uint32_t service)
     return -1;
 }
 
+int qcom_qrtr_find_remote_any(const QcomQrtr *q, uint32_t service, uint32_t *node, uint32_t *port, uint32_t *instance)
+{
+    const int index = qcom_qrtr_find_remote(q, service);
+    if (index < 0) return -1;
+    if (node) *node = q->remote[index].node;
+    if (port) *port = q->remote[index].port;
+    if (instance) *instance = q->remote[index].instance;
+    return 0;
+}
+
 static void remote_server(QcomQrtr *q, const uint8_t *w, int add)
 {
     const uint32_t service = le32(w), instance = le32(w + 4), node = le32(w + 8), port = le32(w + 12);
     if (!service && !instance && !node && !port) return;  /* the end of a listing */
     for (uint32_t i = 0; i < q->remote_count; ++i) {
         if (q->remote[i].node != node || q->remote[i].port != port) continue;
-        if (add) {q->remote[i].service = service; q->remote[i].instance = instance; return;}
+        if (add) {
+            q->remote[i].service = service; q->remote[i].instance = instance;
+            q->remote_generation++;
+            if (q->on_server) q->on_server(q->on_server_context);
+            return;
+        }
         q->remote[i] = q->remote[--q->remote_count];
+        q->remote_generation++;
+        if (q->on_server) q->on_server(q->on_server_context);
         return;
     }
     if (!add || q->remote_count == QCOM_QRTR_MAX_REMOTE) return;
     q->remote[q->remote_count].service = service; q->remote[q->remote_count].instance = instance;
     q->remote[q->remote_count].node = node; q->remote[q->remote_count].port = port;
     q->remote_count++;
+    q->remote_generation++;
+    if (q->on_server) q->on_server(q->on_server_context);
 }
 
 int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length)
@@ -103,8 +141,12 @@ int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length)
         if (i < q->local_count) q->local[i].receive(q->local[i].context, q, dst_port, src_node, src_port, data, size);
         else q->rx_unrouted++;
         if (confirm) {  /* the sender waits for this before it sends more to the port */
-            const uint32_t words[4] = {src_node, src_port, 0, 0};
-            if (!control(q, QCOM_QRTR_RESUME_TX, words)) q->resumes_sent++;
+            uint8_t pkt[CTRL_BYTES] = {0};
+            put32(pkt, QCOM_QRTR_RESUME_TX);
+            put32(pkt + 4, q->local_node);
+            put32(pkt + 8, dst_port);
+            if (!emit(q, QCOM_QRTR_RESUME_TX, QCOM_QRTR_PORT_CTRL, src_node, QCOM_QRTR_PORT_CTRL, pkt, sizeof pkt))
+                q->resumes_sent++;
         }
         return 0;
     }
@@ -115,7 +157,7 @@ int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length)
         q->remote_node = src_node;
         if (!q->hello_sent) qcom_qrtr_start(q);
         q->hello_received = 1;
-        for (unsigned i = 0; i < q->local_count; ++i) announce(q, i);
+        for (unsigned i = 0; i < q->local_count; ++i) if (q->local[i].announced) announce(q, i);
         break;
     case QCOM_QRTR_NEW_SERVER:
     case QCOM_QRTR_DEL_SERVER:
@@ -124,6 +166,8 @@ int qcom_qrtr_receive(QcomQrtr *q, const uint8_t *packet, uint32_t length)
     case QCOM_QRTR_BYE:
         q->remote_count = 0;
         q->hello_received = 0;
+        q->remote_generation++;
+        if (q->on_server) q->on_server(q->on_server_context);
         break;
     default:  /* DEL_CLIENT, RESUME_TX (we never ask), PING, lookups (the remote keeps its own name service) */
         break;

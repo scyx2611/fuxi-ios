@@ -61,8 +61,10 @@ class AppleARMBacklight : public IOService {
 	bool fFadeAdded, fRequestAdded, fFirst;
 	volatile uint64_t fPending;   /* fdbl_request(), taken by the work loop */
 	uint32_t fLevel, fFrom, fTo;  /* work loop only */
+	uint32_t fPublished;          /* protected by fLock */
 	uint64_t fStart, fPeriod;     /* absolute time */
 	bool publishBrightness(uint32_t value);
+	bool publishCalibration(void);
 	void setLevel(uint32_t level);
 	void fadeStep(void);
 	static void requestFired(OSObject *owner, IOTimerEventSource *sender);
@@ -90,6 +92,43 @@ bool AppleARMBacklight::publishBrightness(uint32_t value)
 	OSSafeReleaseNULL(minimum);
 	OSSafeReleaseNULL(brightness);
 	OSSafeReleaseNULL(params);
+	return ok;
+}
+
+bool AppleARMBacklight::publishCalibration(void)
+{
+	static const struct {
+		const char *key;
+		uint32_t value;
+	} kCalParams[9] = {
+		{"current-for-max-backlight",  FDBL_CURR_MAX_FIXED},
+		{"current-for-mid-backlight",  FDBL_CURR_MID_FIXED},
+		{"hardware-max-current-limit", FDBL_CURR_MAX_FIXED},
+		{"lMaxProduct",                FDBL_MAX_NITS_FIXED},
+		{"lMidProduct",                FDBL_MID_NITS_FIXED},
+		{"lMinProduct",                FDBL_MIN_NITS_FIXED},
+		{"lMaxPanel",                  FDBL_MAX_NITS_FIXED},
+		{"lMidPanel",                  FDBL_MID_NITS_FIXED},
+		{"lMinPanel",                  FDBL_MIN_NITS_FIXED},
+	};
+	static const uint32_t kMarketingTable[11] = {
+		2u << 16,   4u << 16,   10u << 16,  24u << 16,  52u << 16,
+		100u << 16, 160u << 16, 230u << 16, 310u << 16, 400u << 16,
+		500u << 16,
+	};
+	OSDictionary *cal = OSDictionary::withCapacity(9);
+	OSData *table = OSData::withBytes(kMarketingTable, sizeof(kMarketingTable));
+	bool ok = cal && table;
+	for (unsigned idx = 0; ok && idx < 9u; ++idx) {
+		OSNumber *num = OSNumber::withNumber((uint64_t)kCalParams[idx].value, 32);
+		ok = num && cal->setObject(kCalParams[idx].key, num);
+		OSSafeReleaseNULL(num);
+	}
+	if (ok) ok = setProperty("new-backlight-architecture", kOSBooleanTrue) &&
+	    setProperty("backlight-calibration-parameters", cal) &&
+	    setProperty("backlight-marketing-table", table);
+	OSSafeReleaseNULL(table);
+	OSSafeReleaseNULL(cal);
 	return ok;
 }
 
@@ -148,11 +187,13 @@ bool AppleARMBacklight::start(IOService *provider)
 	fRequestAdded = fLoop->addEventSource(fRequest) == kIOReturnSuccess;
 	if (!fFadeAdded || !fRequestAdded) return false;
 	fLevel = fFrom = fTo = FDBL_INITIAL;
+	fPublished = FDBL_INITIAL;
 	fFirst = true;
-	if (!setProperty("backlight-control", kOSBooleanTrue) || !publishBrightness(FDBL_INITIAL)) return false;
+	if (!setProperty("backlight-control", kOSBooleanTrue) ||
+	    !publishCalibration() || !publishBrightness(FDBL_INITIAL)) return false;
 	registerService();
-	IOLog("FUXI BACKLIGHT DSI: published AppleARMBacklight min=0 max=%u value=%u; levels go to the display owner (DCS 0x51)\n",
-	    FDBL_MAX, FDBL_INITIAL);
+	IOLog("FUXI BACKLIGHT DSI: published AppleARMBacklight min=0 max=%u value=%u nits=%u..%u new-arch=1; levels go to the display owner (DCS 0x51)\n",
+	    FDBL_MAX, FDBL_INITIAL, FDBL_MIN_NITS_FIXED >> 16, FDBL_MAX_NITS_FIXED >> 16);
 	return true;
 }
 
@@ -188,20 +229,35 @@ IOReturn AppleARMBacklight::setProperties(OSObject *properties)
 	OSDictionary *range = OSDynamicCast(OSDictionary, value);
 	if (range) value = range->getObject("value");
 	OSNumber *brightness = OSDynamicCast(OSNumber, value);
+	OSObject *nitsValue = source->getObject("brightness-nits");
+	if (!nitsValue && params) nitsValue = dict->getObject("brightness-nits");
+	OSDictionary *nitsRange = OSDynamicCast(OSDictionary, nitsValue);
+	if (nitsRange) nitsValue = nitsRange->getObject("value");
+	OSNumber *nits = OSDynamicCast(OSNumber, nitsValue);
 	OSNumber *fade = OSDynamicCast(OSNumber, source->getObject("FadePeriod"));
 	if (!fade && params) fade = OSDynamicCast(OSNumber, dict->getObject("FadePeriod"));
 	/* Other keys are accepted (and logged above): a refusal could stop CoreBrightness's whole update. */
-	if (!brightness) return kIOReturnSuccess;
-	uint32_t goal = fdbl_goal(brightness->unsigned64BitValue(), brightness->numberOfBits());
+	if (!brightness && !nits) return kIOReturnSuccess;
+	bool fromNits = (brightness == NULL);
+	uint64_t raw = fromNits ? nits->unsigned64BitValue() : brightness->unsigned64BitValue();
+	unsigned bits = fromNits ? nits->numberOfBits() : brightness->numberOfBits();
+	uint32_t goal = fromNits ? fdbl_nits_goal(raw, bits) : fdbl_goal(raw, bits);
 	uint32_t ms = fdbl_fade_ms(fade ? fade->unsigned64BitValue() : 0);
 	__atomic_store_n(&fPending, fdbl_request(goal, ms), __ATOMIC_RELEASE);
 	fRequest->setTimeoutUS(1);
 	IOLockLock(fLock);
 	/* Replace the immutable registry dictionary; never mutate a reader's snapshot. */
-	bool ok = publishBrightness(goal);
+	bool ok = (goal == fPublished) ? true : publishBrightness(goal);
+	if (ok) fPublished = goal;
 	IOLockUnlock(fLock);
-	if (log)
-		IOLog("FUXI BACKLIGHT DSI: brightness #%u goal=%u sent=%u fade_ms=%u published=%u\n", event, goal, fdbl_level(goal), ms, ok);
+	if (log) {
+		if (fromNits)
+			IOLog("FUXI BACKLIGHT DSI: nits #%u raw=%llu goal=%u sent=%u fade_ms=%u published=%u\n",
+			    event, (unsigned long long)raw, goal, fdbl_level(goal), ms, ok);
+		else
+			IOLog("FUXI BACKLIGHT DSI: brightness #%u goal=%u sent=%u fade_ms=%u published=%u\n",
+			    event, goal, fdbl_level(goal), ms, ok);
+	}
 	return kIOReturnSuccess;
 }
 

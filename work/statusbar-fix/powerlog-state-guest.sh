@@ -24,7 +24,23 @@ MAX_JSON = 65536
 MAX_ENTRIES = 128
 MAX_SCAN = 4096
 MAX_PLIST = 1024 * 1024
+MAX_LARGE_PLIST = 16 * 1024 * 1024
 PLIST_KEYS = ('Label', 'Program', 'ProgramArguments', 'Disabled', 'RunAtLoad', 'KeepAlive')
+APPSTORE_BASELINE_JOBS = (
+    'com.apple.fairplayd.H2',
+    'com.apple.fairplaydeviceidentityd',
+    'com.apple.absd',
+    'com.apple.adid',
+    'com.apple.itunesstored',
+    'com.apple.appstored',
+    'com.apple.amsaccountsd',
+    'com.apple.akd',
+    'com.apple.accountsd',
+)
+APPSTORE_CRASH_HINT = re.compile(
+    r'(AppStore|appstored|itunesstored|fairplay|adid|absd|amsaccountsd|akd|accountsd)',
+    re.IGNORECASE,
+)
 
 
 def target(value):
@@ -87,20 +103,24 @@ def timezone_link(path):
     return record
 
 
-def read_plist(path):
+def read_plist_bounded(path, max_bytes=MAX_PLIST):
     physical, information = checked(path)
     if information is None:
         return None
-    if not stat.S_ISREG(information.st_mode) or not 0 < information.st_size <= MAX_PLIST:
+    if not stat.S_ISREG(information.st_mode) or not 0 < information.st_size <= max_bytes:
         raise ValueError('plist_size_or_type')
     with physical.open('rb') as stream:
-        contents = stream.read(MAX_PLIST + 1)
+        contents = stream.read(max_bytes + 1)
     if len(contents) != information.st_size:
         raise ValueError('plist_read_size')
     value = plistlib.loads(contents)
     if not isinstance(value, dict):
         raise ValueError('plist_not_dictionary')
     return value
+
+
+def read_plist(path):
+    return read_plist_bounded(path, MAX_PLIST)
 
 
 def selected(value, depth=0):
@@ -308,6 +328,238 @@ def wifi_log_summary(details=False, focus=None):
     return result
 
 
+CRASH_DIRECTORY = '/private/var/mobile/Library/Logs/CrashReporter'
+# 只對這些名稱取內容摘要；其餘報告只列檔名、大小、時間
+CRASH_DETAIL = re.compile(r'com\.apple\.WebKit\.|MobileSafari|backboardd|SpringBoard|JetsamEvent|ExcResource'
+                          r'|^stacks|Preferences|wifid|mDNSResponder|Maps|MapKit')
+MAX_CRASH_BYTES = 4 * 1024 * 1024
+MAX_CRASH_DETAILS = 10
+MAX_CRASH_ENTRIES = 64
+MAX_CRASH_FRAMES = 12
+
+
+def short(value, limit=200):
+    if value is None or type(value) in (bool, int, float):
+        return value
+    return str(value)[:limit]
+
+
+def crash_frames(body):
+    images = body.get('usedImages') if isinstance(body.get('usedImages'), list) else []
+    threads = body.get('threads') if isinstance(body.get('threads'), list) else []
+    index = body.get('faultingThread')
+    if type(index) is int and 0 <= index < len(threads):
+        thread = threads[index]
+    else:
+        thread = next((item for item in threads if isinstance(item, dict) and item.get('triggered')), None)
+    if not isinstance(thread, dict) or not isinstance(thread.get('frames'), list):
+        return None
+    frames = []
+    for frame in thread['frames'][:MAX_CRASH_FRAMES]:
+        if not isinstance(frame, dict):
+            continue
+        image = frame.get('imageIndex')
+        name = (images[image].get('name') if type(image) is int and 0 <= image < len(images)
+                and isinstance(images[image], dict) else None)
+        offset = frame.get('symbolLocation') if type(frame.get('symbolLocation')) is int else (
+            frame.get('imageOffset') if type(frame.get('imageOffset')) is int else None)
+        frames.append({'image': short(name, 60), 'symbol': short(frame.get('symbol'), 120), 'offset': offset})
+    return {'queue': short(thread.get('queue'), 80), 'name': short(thread.get('name'), 80), 'frames': frames}
+
+
+def crash_detail(item):
+    detail = {'path': item['path'], 'mtime_ns': item['mtime_ns']}
+    try:
+        physical, information = checked(item['path'])
+        if information is None or not stat.S_ISREG(information.st_mode) or not 0 < information.st_size <= MAX_CRASH_BYTES:
+            raise ValueError('crash_size_or_type')
+        with physical.open('rb') as stream:
+            text = stream.read(MAX_CRASH_BYTES + 1).decode('utf-8', 'replace')
+        first, _, rest = text.partition('\n')
+        header = json.loads(first)
+        if not isinstance(header, dict):
+            raise ValueError('crash_header')
+        detail['header'] = {key: short(header[key], 80) for key in (
+            'app_name', 'name', 'bug_type', 'timestamp', 'os_version') if key in header}
+        try:
+            body = json.loads(rest)
+        except ValueError:
+            detail['body'] = 'not_json'
+            return detail
+        if not isinstance(body, dict):
+            detail['body'] = 'not_object'
+            return detail
+        if isinstance(body.get('exception'), dict):
+            detail['exception'] = {key: short(body['exception'][key]) for key in (
+                'type', 'signal', 'subtype', 'codes') if key in body['exception']}
+        if isinstance(body.get('termination'), dict):
+            detail['termination'] = {key: short(body['termination'][key], 300) for key in (
+                'namespace', 'code', 'indicator', 'byProc', 'reasons', 'details') if key in body['termination']}
+        if isinstance(body.get('asi'), dict):
+            detail['asi'] = {short(key, 60): short(value, 300) for key, value in list(body['asi'].items())[:6]}
+        if body.get('ktriageinfo'):
+            detail['ktriageinfo'] = short(body['ktriageinfo'], 300)
+        frames = crash_frames(body)
+        if frames:
+            detail['faulting_thread'] = frames
+        if isinstance(body.get('processes'), list):
+            detail['largest_process'] = short(body.get('largestProcess'), 80)
+            detail['processes'] = [{
+                'name': short(process.get('name'), 80), 'reason': short(process.get('reason'), 80),
+                'rpages': process.get('rpages') if type(process.get('rpages')) is int else None,
+                'lifetimeMax': process.get('lifetimeMax') if type(process.get('lifetimeMax')) is int else None,
+            } for process in body['processes'] if isinstance(process, dict) and (
+                process.get('reason') or 'WebKit' in str(process.get('name')) or 'Safari' in str(process.get('name')))][:24]
+    except Exception:
+        detail['error'] = 'crash_unreadable_or_over_limit'
+    return detail
+
+
+def crash_summary():
+    result = {'directory': metadata(CRASH_DIRECTORY), 'entries': [], 'listing_complete': False, 'details': []}
+    if result['directory'].get('kind') != 'directory':
+        return result
+    candidates = []
+    for directory in (CRASH_DIRECTORY, CRASH_DIRECTORY + '/Retired'):
+        if metadata(directory).get('kind') != 'directory':
+            continue
+        for name in names(directory):
+            item = metadata(directory + '/' + name)
+            if item.get('kind') == 'file':
+                candidates.append(item)
+    candidates.sort(key=lambda item: item.get('mtime_ns', 0), reverse=True)
+    result['listing_complete'] = len(candidates) <= MAX_CRASH_ENTRIES
+    result['entries'] = [{'path': item['path'], 'size': item['size'], 'mtime_ns': item['mtime_ns']}
+                         for item in candidates[:MAX_CRASH_ENTRIES]]
+    for item in candidates:
+        if len(result['details']) == MAX_CRASH_DETAILS:
+            break
+        name = item['path'].rsplit('/', 1)[1]
+        if name.endswith('.ips') and CRASH_DETAIL.search(name):
+            result['details'].append(crash_detail(item))
+    return result
+
+
+def appstore_baseline_summary():
+    result = {
+        'xpc_launchd': {},
+        'launchd_plists': [],
+        'disabled_plists': [],
+        'directories': [],
+        'crash_reporter': {},
+    }
+    xpc_path = '/System/Library/xpc/launchd.plist'
+    xpc_record = metadata(xpc_path)
+    xpc_record['jobs'] = {}
+    if xpc_record.get('exists'):
+        try:
+            xpc_plist = read_plist_bounded(xpc_path, MAX_LARGE_PLIST)
+            daemons = xpc_plist.get('LaunchDaemons') if isinstance(xpc_plist.get('LaunchDaemons'), dict) else xpc_plist
+            xpc_record['launch_daemons_count'] = len(daemons) if isinstance(daemons, dict) else None
+            if isinstance(daemons, dict):
+                for key, entry in daemons.items():
+                    if not isinstance(key, str) or not isinstance(entry, dict):
+                        continue
+                    label = entry.get('Label') if isinstance(entry.get('Label'), str) else None
+                    matched = [job for job in APPSTORE_BASELINE_JOBS if job == label or job in key]
+                    if matched:
+                        job_name = matched[0]
+                        xpc_record['jobs'][job_name] = {
+                            'key': key[:160],
+                            'configuration': {
+                                field: selected(entry[field]) if field in entry else {'unknown': 'missing'}
+                                for field in PLIST_KEYS
+                            },
+                        }
+        except Exception:
+            xpc_record['error'] = 'xpc_launchd_unreadable_or_over_limit'
+    result['xpc_launchd'] = xpc_record
+
+    for job in APPSTORE_BASELINE_JOBS:
+        plist_path = '/System/Library/LaunchDaemons/' + job + '.plist'
+        item = metadata(plist_path)
+        if item.get('exists'):
+            try:
+                value = read_plist(plist_path)
+                item['configuration'] = {
+                    field: selected(value[field]) if field in value else {'unknown': 'missing'}
+                    for field in PLIST_KEYS
+                }
+            except Exception:
+                item['error'] = 'plist_unreadable_or_over_limit'
+        result['launchd_plists'].append(item)
+
+    for path in (
+        '/private/var/db/com.apple.xpc.launchd/disabled.plist',
+        '/private/var/db/com.apple.xpc.launchd/disabled.501.plist',
+        '/private/var/db/launchd.db/com.apple.launchd/overrides.plist',
+        '/private/var/db/launchd.db/com.apple.launchd.peruser.501/overrides.plist',
+    ):
+        record = metadata(path)
+        if record.get('exists'):
+            try:
+                value = read_plist(path)
+                matched_jobs = {}
+                other_count = 0
+                for key, entry in value.items():
+                    if isinstance(key, str) and key in APPSTORE_BASELINE_JOBS:
+                        matched_jobs[key] = selected(entry)
+                    else:
+                        other_count += 1
+                record['jobs'] = matched_jobs
+                record['other_entries_count'] = other_count
+            except Exception:
+                record['error'] = 'plist_unreadable_or_over_limit'
+        result['disabled_plists'].append(record)
+
+    for directory in (
+        '/private/var/mobile/Library/FairPlay',
+        '/private/var/mobile/Library/Accounts',
+        '/private/var/db/timed',
+    ):
+        dir_record = metadata(directory)
+        if dir_record.get('kind') == 'directory':
+            try:
+                all_names = names(directory)
+                dir_record['total_entries'] = len(all_names)
+                dir_record['entries'] = [metadata(directory + '/' + name) for name in all_names[:64]]
+                dir_record['listing_truncated'] = len(all_names) > 64
+            except Exception:
+                dir_record['error'] = 'directory_unreadable_or_over_limit'
+        result['directories'].append(dir_record)
+
+    crash_summary_record = {
+        'directory': metadata(CRASH_DIRECTORY),
+        'entries': [],
+        'listing_complete': False,
+        'contents_read': False,
+    }
+    if crash_summary_record['directory'].get('kind') == 'directory':
+        candidates = []
+        for directory in (CRASH_DIRECTORY, CRASH_DIRECTORY + '/Retired'):
+            if metadata(directory).get('kind') != 'directory':
+                continue
+            for name in names(directory):
+                item = metadata(directory + '/' + name)
+                if item.get('kind') == 'file':
+                    item['appstore_related'] = bool(APPSTORE_CRASH_HINT.search(name))
+                    candidates.append(item)
+        candidates.sort(key=lambda item: item.get('mtime_ns', 0), reverse=True)
+        crash_summary_record['total_files'] = len(candidates)
+        crash_summary_record['listing_complete'] = len(candidates) <= 20
+        crash_summary_record['entries'] = [
+            {
+                'path': item['path'],
+                'size': item['size'],
+                'mtime_ns': item['mtime_ns'],
+                'appstore_related': item['appstore_related'],
+            }
+            for item in candidates[:20]
+        ]
+    result['crash_reporter'] = crash_summary_record
+    return result
+
+
 def collect():
     mounts = [line.split() for line in Path('/proc/mounts').read_text().splitlines()]
     matches = [entry for entry in mounts if entry[1] == str(ROOT)]
@@ -325,11 +577,19 @@ def collect():
                   '/private/var/db/timezone/localtime',
                   '/private/var/db/timezone/zoneinfo',
                   '/private/etc/localtime')]}
+    if Path('/mnt/share/inspect-crash').is_file():
+        result['scope'] = 'fixed CrashReporter directory; listing plus selected report headers, exceptions and faulting frames'
+        result['crash_reports'] = crash_summary()
+        return result
     if Path('/mnt/share/inspect-wifi-log').is_file():
         result['scope'] = 'fixed native Wi-Fi log and logging flag; filtered decision messages only'
         focus_path = Path('/mnt/share/inspect-wifi-log-focus')
         focus = focus_path.read_text(encoding='utf-8') if focus_path.is_file() else None
         result['wifi_log'] = wifi_log_summary(Path('/mnt/share/inspect-wifi-log-details').is_file(), focus)
+        return result
+    if Path('/mnt/share/inspect-appstore-baseline').is_file():
+        result['scope'] = 'fixed read-only AppStore/FairPlay baseline: xpc launchd, disabled plists, directory listings, CrashReporter metadata'
+        result['appstore_baseline'] = appstore_baseline_summary()
         return result
     directory = '/System/Library/LaunchDaemons'
     directory_record = metadata(directory)

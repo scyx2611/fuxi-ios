@@ -80,6 +80,34 @@ extern int nw_wifi_bss_count(void);
 extern int nw_wifi_bss_get(int, struct nw_bss_info *);
 extern struct nw_wifi_stats nw_wifi_stats;
 
+/* SoftAP (NL80211_IFTYPE_AP) entry points from fuxi_ath12k.o (must match include/nw_ap.h). */
+struct nw_ap_config {
+	uint8_t  mac[6];
+	uint8_t  ssid[32];
+	uint8_t  ssid_len;
+	uint8_t  hidden;
+	uint8_t  wpa2;
+	uint8_t  flags;
+	char     country[2];
+	uint8_t  reserved[2];
+	uint32_t freq_mhz;
+	uint16_t extra_ie_len;
+	uint8_t  extra_ie[1024];
+};
+struct nw_ap_events {
+	void (*rx)(const uint8_t *eth, size_t len);
+	void (*sta_arrive)(const uint8_t *mac, const uint8_t *rsn_ie, size_t rsn_ie_len);
+	void (*sta_leave)(const uint8_t *mac, uint16_t reason);
+};
+extern void nw_wifi_ap_set_events(const struct nw_ap_events *);
+extern int  nw_wifi_ap_start(const struct nw_ap_config *, uint32_t *);
+extern int  nw_wifi_ap_stop(void);
+extern int  nw_wifi_ap_set_key(const uint8_t *, uint8_t, uint32_t, const uint8_t *, size_t, const uint8_t *, size_t, int);
+extern int  nw_wifi_ap_get_key_seq(const uint8_t *, uint8_t, uint8_t[8]);
+extern int  nw_wifi_ap_sta_authorize(const uint8_t *, int);
+extern int  nw_wifi_ap_sta_deauth(const uint8_t *, uint16_t, int);
+extern int  nw_wifi_ap_tx(const uint8_t *, size_t);
+
 static inline int
 fwa_mac_text(const void *property, size_t length, char text[13])
 {

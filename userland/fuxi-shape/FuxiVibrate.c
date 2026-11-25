@@ -67,6 +67,7 @@ static const char *vb_name = "?";
  */
 static unsigned vb_ui_ms, vb_envelope, vb_envelope_logs, vb_amp_max;
 static unsigned vb_app_fallback; /* 一般 App：經系統聲音 1519 回退 */
+static unsigned vb_native_pcm;   /* haptic=9 且 hal-haptic>=4：原生 24kHz PCM 串流，停用舊 DIRECT_PLAY UI 回退 */
 static unsigned vb_core_ok; /* SpringBoard／App：任一 CoreHaptics engine 建成過就不再回退 */
 
 __attribute__((format(printf, 1, 2))) static void vb_say(const char *format, ...)
@@ -502,8 +503,11 @@ static uintptr_t vb_dispatch(unsigned index, id self, SEL selector, uintptr_t a,
     vb_hook *hook = &vb_hooks[index];
     vb_forward original = (vb_forward)__atomic_load_n(&hook->original, __ATOMIC_ACQUIRE);
     unsigned call = __atomic_fetch_add(&hook->calls, 1u, __ATOMIC_RELAXED);
-    if (hook->action == VB_PULSE) vb_pulse(VB_TAP_MS);
-    if (hook->action == VB_CANCEL) vb_cancel();
+    const bool suppressed = hook->action == VB_PULSE && __atomic_load_n(&vb_native_pcm, __ATOMIC_ACQUIRE) != 0u;
+    if (hook->action == VB_PULSE && !suppressed) vb_pulse(VB_TAP_MS);
+    if (hook->action == VB_CANCEL &&
+        (!__atomic_load_n(&vb_native_pcm, __ATOMIC_ACQUIRE) || __atomic_load_n(&vb_worker, __ATOMIC_ACQUIRE)))
+        vb_cancel();
     if (call < VB_LOG_CALLS) {
         const char *first = "-";
         Method method = class_getInstanceMethod(object_getClass(self), selector);
@@ -513,7 +517,8 @@ static uintptr_t vb_dispatch(unsigned index, id self, SEL selector, uintptr_t a,
             if (vb_skip_qualifiers(type)[0] == '@' && a) first = object_getClassName((id)a);
         }
         vb_say("haptic %s %s call=%u arg=%s/%s%s\n", hook->class_name, hook->selector, call + 1, type, first,
-            hook->action == VB_PULSE ? " pulse=15ms" : hook->action == VB_CANCEL ? " cancel" : "");
+            hook->action == VB_PULSE ? (suppressed ? " pulse=suppressed(pcm)" : " pulse=15ms") :
+            hook->action == VB_CANCEL ? " cancel" : "");
         if (hook->action == VB_LOG && call < 2 && strcmp(type, "@") == 0 && a) vb_describe("haptic arg", (CFTypeRef)a);
     }
     return original(self, selector, a, b, c, d, e, f);
@@ -628,7 +633,18 @@ static uintptr_t vb_play_fp(id self, SEL selector, id pattern, double gain, id s
     double when, id handler)
 {
     unsigned call = __atomic_fetch_add(&vb_play_calls, 1u, __ATOMIC_RELAXED);
-    (void)vb_vibe_request(pattern, vb_fp_value(gain, vb_gain_type), flags, vb_fp_value(when, vb_time_type), call, NULL);
+    const double g = vb_fp_value(gain, vb_gain_type);
+    const double t = vb_fp_value(when, vb_time_type);
+    if (__atomic_load_n(&vb_native_pcm, __ATOMIC_ACQUIRE)) {
+        uintptr_t result = ((vb_play_fp_t)vb_play_original)(self, selector, pattern, gain, synchronizer, flags, when,
+            handler);
+        if (call < VB_PLAY_LOGS)
+            vb_say("vibe play passthrough call=%u original=%#lx gain=%.2f flags=%#lx at=%.3f\n",
+                call + 1, (unsigned long)result, g, (unsigned long)flags, t);
+        if (result != 0) (void)vb_vibe_request(pattern, g, flags, t, call, NULL);
+        return result;
+    }
+    (void)vb_vibe_request(pattern, g, flags, t, call, NULL);
     uintptr_t result = ((vb_play_fp_t)vb_play_original)(self, selector, pattern, gain, synchronizer, flags, when,
         handler);
     if (call < VB_PLAY_LOGS) vb_say("vibe play call=%u original=%#lx\n", call + 1, (unsigned long)result);
@@ -639,7 +655,17 @@ static uintptr_t vb_play_int(id self, SEL selector, id pattern, double gain, id 
     uintptr_t when, id handler)
 {
     unsigned call = __atomic_fetch_add(&vb_play_calls, 1u, __ATOMIC_RELAXED);
-    (void)vb_vibe_request(pattern, vb_fp_value(gain, vb_gain_type), flags, (double)when, call, NULL);
+    const double g = vb_fp_value(gain, vb_gain_type);
+    if (__atomic_load_n(&vb_native_pcm, __ATOMIC_ACQUIRE)) {
+        uintptr_t result = ((vb_play_int_t)vb_play_original)(self, selector, pattern, gain, synchronizer, flags, when,
+            handler);
+        if (call < VB_PLAY_LOGS)
+            vb_say("vibe play passthrough call=%u original=%#lx gain=%.2f flags=%#lx at=%.3f\n",
+                call + 1, (unsigned long)result, g, (unsigned long)flags, (double)when);
+        if (result != 0) (void)vb_vibe_request(pattern, g, flags, (double)when, call, NULL);
+        return result;
+    }
+    (void)vb_vibe_request(pattern, g, flags, (double)when, call, NULL);
     uintptr_t result = ((vb_play_int_t)vb_play_original)(self, selector, pattern, gain, synchronizer, flags, when,
         handler);
     if (call < VB_PLAY_LOGS) vb_say("vibe play call=%u original=%#lx\n", call + 1, (unsigned long)result);
@@ -1454,6 +1480,10 @@ static const uint64_t VB_ME_HANDLE = 0x1dd2efa68ULL;   /* libVibeSynthEngine 的
 static const uint64_t VB_ME_VIBRATOR = 0x1dd2efcb8ULL; /* 建立好的震動器 */
 #define VB_ENGINE_PATH "/System/Library/Frameworks/AudioToolbox.framework/libVibeSynthEngine.dylib"
 
+typedef int (*vb_native_play_t)(CFDictionaryRef, float, void *, uint32_t, const void *);
+typedef int (*vb_native_cancel_t)(CFDictionaryRef);
+static vb_native_play_t vb_orig_native_play;
+static vb_native_cancel_t vb_orig_native_cancel;
 static unsigned vb_native_calls;
 static unsigned vb_native_cancels;
 
@@ -1462,6 +1492,16 @@ static int vb_native_play(CFDictionaryRef pattern, float gain, void *synchronize
 {
     if (pattern == NULL || CFGetTypeID(pattern) != CFDictionaryGetTypeID()) return -50;
     unsigned call = __atomic_fetch_add(&vb_native_calls, 1u, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&vb_native_pcm, __ATOMIC_ACQUIRE)) {
+        vb_native_play_t orig = __atomic_load_n(&vb_orig_native_play, __ATOMIC_ACQUIRE);
+        if (orig != NULL) {
+            int rc = orig(pattern, gain, synchronizer, flags, completion);
+            if (call < VB_PLAY_LOGS)
+                vb_say("vibe native passthrough call=%u rc=%d gain=%.2f flags=%#x synchronizer=%u completion=%u\n",
+                    call + 1, rc, (double)gain, flags, synchronizer != NULL, completion != NULL);
+            if (rc == 0) return 0;
+        }
+    }
     bool queued = vb_vibe_request((id)pattern, gain, flags, 0.0, call, completion);
     if (call < VB_PLAY_LOGS)
         vb_say("vibe native play call=%u queued=%u synchronizer=%u completion=%u\n", call + 1, queued,
@@ -1471,6 +1511,15 @@ static int vb_native_play(CFDictionaryRef pattern, float gain, void *synchronize
 
 static int vb_native_cancel(CFDictionaryRef options)
 {
+    int rc = 0;
+    if (__atomic_load_n(&vb_native_pcm, __ATOMIC_ACQUIRE)) {
+        vb_native_cancel_t orig = __atomic_load_n(&vb_orig_native_cancel, __ATOMIC_ACQUIRE);
+        if (orig != NULL) rc = orig(options);
+        if (__atomic_load_n(&vb_worker, __ATOMIC_ACQUIRE)) vb_cancel();
+        if (__atomic_fetch_add(&vb_native_cancels, 1u, __ATOMIC_RELAXED) < VB_PLAY_LOGS)
+            vb_say("vibe native passthrough cancel rc=%d\n", rc);
+        return rc;
+    }
     (void)options;
     vb_cancel();
     if (__atomic_fetch_add(&vb_native_cancels, 1u, __ATOMIC_RELAXED) < VB_PLAY_LOGS)
@@ -1505,12 +1554,15 @@ static void *vb_bridge_thread(void *argument)
             if (rc == 0) {
                 bool expected = play && cancel && slots[6] == (uintptr_t)play && slots[7] == (uintptr_t)cancel;
                 if (expected) {
+                    __atomic_store_n(&vb_orig_native_play, (vb_native_play_t)play, __ATOMIC_RELEASE);
+                    __atomic_store_n(&vb_orig_native_cancel, (vb_native_cancel_t)cancel, __ATOMIC_RELEASE);
                     slots[6] = (uintptr_t)vb_native_play;
                     slots[7] = (uintptr_t)vb_native_cancel;
                 }
                 (void)unlock((void *)slots[0]);
                 (void)dlclose(engine);
-                vb_say("vibe native bridge %s; play/cancel -> kern.fuxivibrate\n", expected ? "installed" : "refused slots");
+                vb_say("vibe native bridge %s; mode=%s\n", expected ? "installed" : "refused slots",
+                    __atomic_load_n(&vb_native_pcm, __ATOMIC_ACQUIRE) ? "native-pcm-first" : "kern.fuxivibrate");
                 return NULL;
             }
         }
@@ -1640,6 +1692,7 @@ __attribute__((constructor)) static void fuxi_vibrate_init(void)
     const char *path = _dyld_get_image_name(0);
     if (strcmp(name, "mediaserverd") == 0) vb_role = VB_MEDIA;
     else if (strcmp(name, "SpringBoard") == 0) vb_role = VB_SPRINGBOARD;
+    else if (strcmp(name, "VoiceMemos") == 0 || strcmp(name, "voicememod") == 0) return;
     /* 設定的執行檔可能從 Cryptex 載入，constructor 裡的 image[0] 路徑不一定能辨認它。 */
     else if (strcmp(name, "Preferences") == 0 || (path && strstr(path, ".app/"))) vb_role = VB_APP;
     else return;
@@ -1651,10 +1704,13 @@ __attribute__((constructor)) static void fuxi_vibrate_init(void)
     if (vb_role == VB_APP) {
         /* 沙盒可能擋 IORegistry：讀得到 fuxi,inject（注入我們的就是它）才算 ADT 可讀，讀不到就照預設開 */
         bool readable = vb_adt_u32(CFSTR("fuxi,inject")) != 0;
-        unsigned ui = readable ? vb_adt_u32(CFSTR("fuxi,haptic-ui")) : 1;
+        bool native_pcm = readable && vb_adt_u32(CFSTR("fuxi,haptic")) == 9u &&
+            vb_adt_u32(CFSTR("fuxi,hal-haptic")) >= 4u;
+        unsigned ui = readable ? (native_pcm ? 0u : vb_adt_u32(CFSTR("fuxi,haptic-ui"))) : 1u;
+        __atomic_store_n(&vb_native_pcm, native_pcm ? 1u : 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&vb_app_fallback, ui != 0, __ATOMIC_RELAXED);
-        vb_say("app haptic fallback=%u adt-readable=%u (UIFeedbackGenerator -> system sound %u)\n", ui != 0,
-            readable, (unsigned)VB_APP_SOUND);
+        vb_say("app haptic fallback=%u adt-readable=%u native-pcm=%u (UIFeedbackGenerator -> system sound %u)\n",
+            ui != 0, readable, native_pcm, (unsigned)VB_APP_SOUND);
         if (ui == 0) return;
         _dyld_register_func_for_add_image(vb_image_added);
         if (readable && vb_adt_u32(CFSTR("fuxi,haptic")) == 3)
@@ -1667,15 +1723,23 @@ __attribute__((constructor)) static void fuxi_vibrate_init(void)
         return;
     }
     if (vb_role == VB_SPRINGBOARD) {
-        unsigned ms = vb_adt_u32(CFSTR("fuxi,haptic-ui"));
+        bool native_pcm = vb_adt_u32(CFSTR("fuxi,haptic")) == 9u &&
+            vb_adt_u32(CFSTR("fuxi,hal-haptic")) >= 4u;
+        __atomic_store_n(&vb_native_pcm, native_pcm ? 1u : 0u, __ATOMIC_RELEASE);
+        unsigned ms = native_pcm ? 0u : vb_adt_u32(CFSTR("fuxi,haptic-ui"));
         if (ms) ms = ms < 8 ? 8 : ms > 40 ? 40 : ms;
         __atomic_store_n(&vb_ui_ms, ms, __ATOMIC_RELAXED);
     }
-    if (vb_role == VB_MEDIA) __atomic_store_n(&vb_envelope, vb_adt_u32(CFSTR("fuxi,haptic-env")) != 0, __ATOMIC_RELAXED);
+    if (vb_role == VB_MEDIA) {
+        bool native_pcm = vb_adt_u32(CFSTR("fuxi,haptic")) == 9u &&
+            vb_adt_u32(CFSTR("fuxi,hal-haptic")) >= 4u;
+        __atomic_store_n(&vb_native_pcm, native_pcm ? 1u : 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&vb_envelope, vb_adt_u32(CFSTR("fuxi,haptic-env")) != 0, __ATOMIC_RELAXED);
+    }
     unsigned amplitude = vb_adt_u32(CFSTR("fuxi,haptic-amp"));
     __atomic_store_n(&vb_amp_max, amplitude > 255 ? 255u : amplitude, __ATOMIC_RELAXED);
-    vb_say("vibrate kern.fuxivibrate ready; installing haptic hooks ui-fallback-ms=%u envelope=%u amplitude-max=%u\n",
-        vb_ui_ms, vb_envelope, vb_amp_max);
+    vb_say("vibrate kern.fuxivibrate ready; installing haptic hooks ui-fallback-ms=%u native-pcm=%u envelope=%u amplitude-max=%u\n",
+        vb_ui_ms, vb_native_pcm, vb_envelope, vb_amp_max);
     _dyld_register_func_for_add_image(vb_image_added);
     if (vb_role == VB_MEDIA) vb_spawn(vb_bridge_thread, "vibe native bridge waiting for MediaExperience vibrator");
     if (vb_adt_u32(CFSTR("fuxi,haptic")) != 3) return;

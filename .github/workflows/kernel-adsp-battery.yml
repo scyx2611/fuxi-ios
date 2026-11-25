@@ -38,6 +38,13 @@ on:
       - patches/kernel-taps-page1.patch
       - patches/kernel-backlight-dsi.patch
       - patches/kernel-adsp-battery.patch
+      - patches/kernel-modem-volte.patch
+      - patches/kernel-wifi-softap.patch
+      - patches/kernel-sensors-v8.patch
+      - patches/kernel-camera-imx800.patch
+      - patches/kernel-gps-gnss.patch
+      - patches/kernel-wifi-join-speed.patch
+      - patches/kernel-metal-multiclient.patch
       - tests/test-backlight-dsi.py
       - tests/test-perf-governor.py
       - tests/test-ib-profile.py
@@ -114,6 +121,24 @@ jobs:
           python3 harness/tests/test-backlight-dsi.py source
           git -C source apply --check ../harness/patches/kernel-adsp-battery.patch
           git -C source apply ../harness/patches/kernel-adsp-battery.patch
+          git -C source apply --check ../harness/patches/kernel-modem-volte.patch
+          git -C source apply ../harness/patches/kernel-modem-volte.patch
+          git -C source apply --check ../harness/patches/kernel-wifi-softap.patch
+          git -C source apply ../harness/patches/kernel-wifi-softap.patch
+          git -C source apply --check ../harness/patches/kernel-sensors-v8.patch
+          git -C source apply ../harness/patches/kernel-sensors-v8.patch
+          git -C source apply --check ../harness/patches/kernel-camera-imx800.patch
+          git -C source apply ../harness/patches/kernel-camera-imx800.patch
+          git -C source apply --check ../harness/patches/kernel-gps-gnss.patch
+          git -C source apply ../harness/patches/kernel-gps-gnss.patch
+          git -C source apply --check ../harness/patches/kernel-wifi-join-speed.patch
+          git -C source apply ../harness/patches/kernel-wifi-join-speed.patch
+          git -C source apply --check ../harness/patches/kernel-metal-multiclient.patch
+          git -C source apply ../harness/patches/kernel-metal-multiclient.patch
+          (cd source && python3 tools/sync-fuxi-modem.py --check && python3 tools/test-fuxi-modem.py --sanitize)
+          (cd source && python3 tools/test-fuxi-gnss.py --sanitize)
+          (cd source && python3 tools/sync-fuxi-camera.py --check && python3 tools/test-fuxi-camera.py --sanitize)
+          (cd source && python3 tools/sync-fuxi-sensors.py --check && python3 tools/test-fuxi-sensors.py --sanitize)
           (cd source && python3 tools/sync-fuxi-adsp.py --check && python3 tools/sync-fuxi-unixnu.py --check && python3 tools/sync-fuxi-backlight.py --check)
           (cd source && python3 tools/test-fuxi-prof.py)
           (cd source && python3 tools/test-fuxi-mfb-align.py --sanitize)
@@ -130,12 +155,17 @@ jobs:
           (cd source && python3 tools/test-fuxi-haptic-survey.py --cc clang)
           (cd source && python3 tools/test-fuxi-haptic-survey.py --cc clang --syntax-only)
           (cd source && CC=clang python3 tools/test-fuxi-haptic-runtime.py)
+          (cd source && python3 tools/test-fuxi-haptic-shape.py --sanitize)
+          (cd source && python3 tools/test-fuxi-live-audio-haptics.py --sanitize)
+          (cd source && python3 tools/test-fuxi-sandbox-ext.py --sanitize)
           (cd source && CC=clang python3 tools/test-fuxi-exec-inject.py)
+          (cd source && python3 tools/test-fuxi-media-signal.py --sanitize)
           (cd source && python3 tools/test-fuxi-audio-prep.py --sanitize)
           (cd source && python3 tools/test-fuxi-audio-spf.py)
           (cd source && python3 tools/test-fuxi-battery-prep.py --sanitize)
           (cd source && python3 tools/test-fuxi-battery-publication.py --sanitize)
           (cd source && python3 tools/test-fuxi-rtc-read.py)
+          (cd source && python3 tools/test-fuxi-rtc-persist.py --sanitize)
           (cd source && python3 tools/test-fuxi-ram-inventory.py)
           (cd source && python3 tools/test-fuxi-bluetooth.py --sanitize)
           (cd source && python3 tools/test-fuxi-bluetooth-xnu.py --sanitize)
@@ -148,6 +178,12 @@ jobs:
           (cd source && python3 tools/test-fuxi-wlan-m6i.py)
           (cd source && python3 tools/test-fuxi-wlan-rails.py)
           (cd source && python3 tools/test-fuxi-wlan-w18.py)
+          (cd source && python3 tools/sync-fuxi-wifi-ios.py --check)
+          (cd source && python3 tools/test-fuxi-wlan-ath12k.py --sanitize)
+          (cd source && python3 tools/test-fuxi-wlan-ios.py)
+          (cd source && python3 tools/test-fuxi-wifi-ios.py)
+          (cd source && python3 tools/sync-abi-backend.py --check && python3 tools/sync-fuxi-metal.py --check && python3 tools/sync-fuxi-metal2.py --check && python3 tools/sync-fuxi-adreno-shared.py --check)
+          (cd source && python3 tools/test-fuxi-gpu-irq.py && python3 tools/test-fuxi-hostimport.py && python3 tools/test-fuxi-gpu-k1.py && python3 tools/test-fuxi-metal.py && python3 tools/test-fuxi-m9-multiclient.py)
       - name: Download the pinned public ath12k link input
         if: ${{ inputs.ath12k }}
         uses: actions/download-artifact@v4
@@ -165,6 +201,7 @@ jobs:
           python3 source/tools/ci/ath12k-link.py ath12k-out
           (cd source && python3 tools/test-fuxi-wlan-ath12k.py --sanitize)
           (cd source && python3 tools/test-fuxi-wlan-ios.py)
+          (cd source && python3 tools/test-fuxi-wifi-ios.py)
           echo "FUXI_ATH12K_OBJECT=$PWD/ath12k-out/fuxi_ath12k.o" >> "$GITHUB_ENV"
       - name: Build and audit kernel
         shell: bash

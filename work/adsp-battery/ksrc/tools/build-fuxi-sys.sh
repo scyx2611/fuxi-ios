@@ -25,9 +25,9 @@ if [[ ${1:-} == --audio-only && $(uname -s) == Linux ]]; then
         -fstack-protector-strong -c tools/fuxi-audio/FuxiAudio.c -o "$out/FuxiAudio.o"
     "$linker" -arch arm64 -platform_version ios 16.0 16.5 -bundle -syslibroot "$sdk" \
         -L"$sdk/usr/lib" -F"$sdk/System/Library/Frameworks" "$out/FuxiAudio.o" \
-        -lSystem -framework CoreFoundation -adhoc_codesign -o "$bundle/FuxiAudio"
+        -lSystem -framework CoreFoundation -framework IOKit -adhoc_codesign -o "$bundle/FuxiAudio"
     llvm-nm-21 -gU "$bundle/FuxiAudio" > "$out/exports.txt"
-    rg -q ' T _FuxiAudio_Create$' "$out/exports.txt"
+    grep -q ' T _FuxiAudio_Create$' "$out/exports.txt"
     python3 "$verifier" --audio-bundle --self-test "$bundle" > "$out/signature.json"
     python3 tools/test-fuxi-sys.py --audio-only > "$out/host-tests.txt" 2>&1
     sha256sum "$cc" "$linker" "$archive" "$verifier" tools/build-fuxi-sys.sh \
@@ -46,7 +46,7 @@ bundle=$out/FuxiAudio.driver
 rm -rf "$bundle"
 mkdir -p "$bundle"
 cp tools/fuxi-audio/Info.plist "$bundle/Info.plist"
-"$cc" "${flags[@]}" -bundle tools/fuxi-audio/FuxiAudio.c -framework CoreFoundation -o "$bundle/FuxiAudio"
+"$cc" "${flags[@]}" -bundle tools/fuxi-audio/FuxiAudio.c -framework CoreFoundation -framework IOKit -o "$bundle/FuxiAudio"
 "$cc" "${flags[@]}" -dynamiclib tools/fuxi-sb/FuxiSnapshots.c -lobjc \
  -install_name /usr/local/lib/fuxi/libfuxi-sb.dylib -o "$out/libfuxi-sb.dylib"
 for binary in "$bundle" "$out/libfuxi-sb.dylib"; do

@@ -1,0 +1,54 @@
+--- a/osfmk/kern/thread_policy.c
++++ b/osfmk/kern/thread_policy.c
+@@ -41,6 +41,9 @@
+ #include <sys/ulock.h>
+ 
+ #include <mach/machine/sdt.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <kern/misc_protos.h>
++#endif
+ 
+ static KALLOC_TYPE_DEFINE(thread_qos_override_zone,
+     struct thread_qos_override, KT_DEFAULT);
+@@ -403,10 +406,41 @@
+ 
+ 		info = (thread_time_constraint_with_priority_policy_t)policy_info;
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		/*
++		 * Apple's AudioToolbox (AURemoteIO::getHALThreadPriority) hardcodes a
++		 * 50 ms computation cap of 1,200,000 ticks (50 ms @ 24 MHz Apple SoC
++		 * timebase). On SM8550 (19.2 MHz timebase), max_rt_quantum is 960,000
++		 * ticks, so low-rate RT audio streams (e.g. 16 kHz VoLTE in
++		 * avconferenced) pass computation == 1,200,000 > max_rt_quantum and
++		 * abort via caulk::mach::throw_if_mach_error. Clamp 24 MHz-capped
++		 * requests (<= 1,200,000 ticks and <= constraint) down to max_rt_quantum.
++		 */
++		if (info->computation > max_rt_quantum &&
++		    info->computation <= 1200000u &&
++		    info->computation <= info->constraint) {
++			static uint32_t fuxi_rt_clamp_log = 0;
++			uint32_t orig_comp = info->computation;
++			info->computation = max_rt_quantum;
++			if (fuxi_rt_clamp_log < 8u) {
++				fuxi_rt_clamp_log++;
++				printf("FUXI RT: clamped computation %u -> %u (period=%u constraint=%u max_rt=%u)\n",
++				    orig_comp, info->computation, info->period, info->constraint, max_rt_quantum);
++			}
++		}
++#endif
+ 
+ 		if (info->constraint < info->computation ||
+ 		    info->computation > max_rt_quantum ||
+ 		    info->computation < min_rt_quantum) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			static uint32_t fuxi_rt_reject_log = 0;
++			if (fuxi_rt_reject_log < 8u) {
++				fuxi_rt_reject_log++;
++				printf("FUXI RT: reject flavor=%u period=%u comp=%u cons=%u min=%u max=%u\n",
++				    flavor, info->period, info->computation, info->constraint, min_rt_quantum, max_rt_quantum);
++			}
++#endif
+ 			result = KERN_INVALID_ARGUMENT;
+ 			break;
+ 		}
