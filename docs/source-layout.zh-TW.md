@@ -42,7 +42,7 @@
 ### B-021 日常版 Loader 與雙系統打包結構
 
 - **Loader 組裝（`work/adsp-battery/prepare-aio-loader.py`）**：於記憶體修補並擴充 `prepare-wlan-w18-loader.py`（committed HEAD）以封裝 `B-021` 全功能日常 loader：
-  - 將 ADT 大小上限由 `64 KiB`（`0x10000`）倍增至 **`128 KiB`（`0x20000`）**（`B-021` 實產 `private.adt` 為 `71,644 B`），容納 4 顆鏡頭 `.tab` 與感測器屬性；
+  - 將 ADT 大小上限由 `64 KiB`（`0x10000`）倍增至 **`128 KiB`（`0x20000`）**（`B-021` 實產 `private.adt` 為 `71,644 B`），容納 4 顆鏡頭（6 份 `.tab`）與感測器屬性；
   - 將 `.sensor_pack`（`pack.bin`，`440,332 B`）置於 `_payload_end` 之後並 8-byte 對齊，開機時由 `stage_sensor_pack()` 複製至固定實體位址 `0xE8800000`；
   - 支援 `--gpu-clients none`（`B-021` 依決策暫緩排除 Class 1 Apple Maps）、`--gpu-bb-recover 3`、`--wifi-ux 8191`、`--modem-gnss 3`、`--atx-fix 1`、`--rtc-persist --rtc-user 1`、`--display-fit aspect` 與 `--statusbar-width 360 --statusbar-height 86`；
   - 啟用 `--camera-dylib` 時自動移除 `fuxi,capsrc-stub`（避免與 `/Developer/libfuxi-camera.dylib` 衝突並維持 `fuxi,inject`），同時將開機命令列嚴格控制在 `<= 607 B` 上限內（`B-021` 實產 `602 B`）。

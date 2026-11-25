@@ -40,7 +40,7 @@
 | 系統啟動與雙系統選單 | 已常駐 `boot_a`（`B-021`） | iOS 16.7.16／XNU 8796.141.3；`menu-daily-b021-20261125`（預設 10 秒進 Android、音量鍵選 iOS，454 項斷言、整區讀回 `INSTALLED_ANDROID_VERIFIED`）。b 槽選 Android 循環與冷開機全選項未逐一驗收。[E27](docs/status-20261125.zh-TW.md#e27) · [B-021](records/items/B-boot.zh-TW.md#b-021-雙系統日常常駐-boot_a-升級25-補丁主分支imx800-四鏡頭-c-af閃光燈gnsswi-fi-加速gpu-class-0-1280-mib120-hz-te手電筒控制中心修復暫緩-maps) |
 | 螢幕顯示與去紫 | `1125×2500` 等比全寬＋系統模糊去紫 | `--display-fit aspect` 縮放填滿 `1080×2400` 面板；`--atx-fix 1` 修復單手模式、通話背景、Safari 分頁總覽與多工切換器發紫（洋紅像素 `0 / 1,296,000`）。須維持不改寫磁碟 `.atx` 為大寫 `'ASTC'`。[G-050](records/items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) · [E19](docs/status-20261125.zh-TW.md#e19) · [U-026](records/items/U-userland.zh-TW.md#u-026-springboardpreferences-偽-pre-twiddled-astc-atx-cpu-解碼改走線性解碼修復系統模糊背景區域發紫fuxiatx-fix) |
 | 狀態欄與右側音量條 | 已依前鏡頭與側面按鍵校準 | 狀態欄保留 `360×86` 避讓區；右側音量條 `volhud=238128`（`y=238 h=128`）已併入日常版。[B-015](records/items/B-boot.zh-TW.md#b-015-以面板比例排版的日常版) · [E18](docs/status-20261125.zh-TW.md#e18) |
-| Metal GPU（Class 0） | `1280 MiB` 桌面與相機穩定 | `FUXI GPU: through stage 16 PASS`、`gpu_fault_lost=0`、`fuxi,gpu-bb-recover=3`、二次進出相機不掉 GPU；**Class 1（Apple Maps）已暫緩關閉（`--gpu-clients none`）**。[E25](docs/status-20261125.zh-TW.md#e25) · [G-051](records/items/G-gpu.zh-TW.md#g-051-gpu-class-0-1280-mib-配額120-hz-te-鎖定backboardd-恢復與多用戶端閘門) |
+| Metal GPU（Class 0） | `1280 MiB` 桌面與相機穩定 | `FUXI GPU: through stage 16 PASS`、GPU fault／lost 為 0（日誌見 `failures=0`、`gfsr=0`）、`fuxi,gpu-bb-recover=3`、二次進出相機不掉 GPU；**Class 1（Apple Maps）已暫緩關閉（`--gpu-clients none`）**。[E25](docs/status-20261125.zh-TW.md#e25) · [G-051](records/items/G-gpu.zh-TW.md#g-051-gpu-class-0-1280-mib-配額120-hz-te-鎖定backboardd-恢復與多用戶端閘門) |
 | 螢幕更新時序 | `120 Hz` TE 鎖定 | `SWEET FB: vsync te-locked=600 fallback=0 period_us 8253`（8249..8256 us）；此為面板 TE 鎖定統計，不等於全系統與應用層 120 fps 流暢度已完成。[E25](docs/status-20261125.zh-TW.md#e25) |
 | 觸控、按鍵與背光 | 已驗證可用 | SweetHID 單指典型回報約 `120 Hz`（中位間隔 `8.333 ms`）、電源／音量鍵 `20 ms` 輪詢、DSI 背光控制。[E1](docs/status-20261118.zh-TW.md#e1) · [E2](docs/status-20261118.zh-TW.md#e2) · [E10](docs/status-20261118.zh-TW.md#e10) |
 
@@ -67,7 +67,7 @@
 | 觸覺震動（HAP525） | Mode 9 v2.2 併入日常版 | `haptic=9 / damp=0x9`（`manual-b020-v2-accept-1124` 117 次 burst `clp=0 / underruns=0`，交響樂／斷音爆震消除）＋手電筒零轉子；手感屬於主觀回饋。[E18](docs/status-20261125.zh-TW.md#e18) · [B-020](records/items/B-boot.zh-TW.md#b-020-大一統整合日常版震動交響樂斷音修復錄音聽寫原生相機感測器指南針wda-時序與關熱點-wi-fi-穩定性修復) |
 | 感測器、電池與 RTC | 多感測器 v8、ADSP 電量與動態校時 | `.sensor_pack` v8（`440,332 B` 置 `0xE8800000`，`drop=0/0`）；ADSP 電量與插拔偵測；動態持久化 RTC（`--rtc-persist --rtc-user 1`：`persist:/time/ats_2`＋`timed` 持久化）。完整電池續航未測。[E4](docs/status-20261118.zh-TW.md#e4) · [E17](docs/status-20261125.zh-TW.md#e17) · [B-016](records/items/B-boot.zh-TW.md#b-016-動態-rtc-校時日常版persisttimeats_2-與-timed-持久化) |
 | 手電筒與控制中心 | 五檔調光＋權限過濾修復 | 0 關閉＋1–4 亮度不閃；`libfuxi-sb.dylib`（`sb-local-daily-b021-clean-artifact`）修復 `FlashlightModule` 權限准入與清單保護（`native FlashlightModule capability admitted`）。[E5](docs/status-20261118.zh-TW.md#e5) · [E26](docs/status-20261125.zh-TW.md#e26) · [U-029](records/items/U-userland.zh-TW.md#u-029-控制中心手電筒模組權限過濾與設定清單保護) |
-| 本機建置工具（WSL） | 9g 核心＋`libfuxi-sb.dylib` 可編可驗 | `B-021` 乾淨重編 24 s（make 4 s）、ISA 0 禁止指令、56 項主機測試命令；`libfuxi-sb.dylib` 8 s（52 碼頁簽署校驗）。屬 **`local-wsl (not a CI artifact)`**，不宣稱與 macOS CI 逐位元相同。[E27](docs/status-20261125.zh-TW.md#e27) |
+| 本機建置工具（WSL） | 9g 核心＋`libfuxi-sb.dylib` 可編可驗 | `B-021` 乾淨重編 24 s（make 4 s）、ISA 0 禁止指令、56 項主機測試命令；`libfuxi-sb.dylib` 8 s（57 碼頁簽署校驗）。屬 **`local-wsl (not a CI artifact)`**，不宣稱與 macOS CI 逐位元相同。[E27](docs/status-20261125.zh-TW.md#e27) |
 
 ### 暫緩與尚未驗收項目
 
@@ -86,7 +86,7 @@
 | `tests/`、`tools/`、`userland/` | 主機測試、ath12k 與震動／手電筒等工具，以及 iOS 端 `libfuxi-sb.dylib`（`userland/fuxi-shape/`） |
 | `.github/workflows/` | 既有 CI 工作流程，未改觸發條件（見[來源與目錄說明](docs/source-layout.zh-TW.md#ci)） |
 | `work/adsp-battery/ksrc/` | 核心原始碼樹：上游 `zgl97/ios-fuxi` `979e2f08` 加本機修改（XNU 驅動、內嵌只讀 `/Developer` 相機/基帶 HFS+ 映像、loader、ADT 產生器） |
-| `work/adsp-battery/prepare-aio-loader.py` | `B-021` 全功能日常 loader 建置腳本（128 KiB ADT、`.sensor_pack` `0xE8800000`、4 鏡頭 `.tab`、`--gpu-clients none`） |
+| `work/adsp-battery/prepare-aio-loader.py` | `B-021` 全功能日常 loader 建置腳本（128 KiB ADT、`.sensor_pack` `0xE8800000`、4 顆鏡頭（6 份 `.tab`）、`--gpu-clients none`） |
 | `ios-fuxi/` | loader 與工具原始碼樹：上游 `bangprovn/ios-fuxi` `27f6a31` 加本機修改（14 個檔案） |
 | `dualboot/` | 雙系統圖形選單、安裝與救援工具（說明見 [`dualboot/README.zh-TW.md`](dualboot/README.zh-TW.md)） |
 | `records/` | 研發紀錄庫索引、分類條目（`items/`）、去識別化日誌與對照表（`catalog/`），見 [`records/README.zh-TW.md`](records/README.zh-TW.md) |
