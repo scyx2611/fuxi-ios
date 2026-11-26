@@ -39,7 +39,7 @@ assert hashlib.sha256(payload).hexdigest() == expected
 target = Path('/dst/usr/local/lib/libvulkan_freedreno_hyb.dylib')
 assert target.is_file() and not target.is_symlink()
 before = hashlib.sha256(target.read_bytes()).hexdigest()
-assert before in ('90051d41c6b2ed7497e8618c6cd0447b5973e257898904ce79356d0474cf32a6', expected), before
+assert before in ('90051d41c6b2ed7497e8618c6cd0447b5973e257898904ce79356d0474cf32a6', '65b032dda535ed4763494c13c5a78a9e7d8e2ade2b7433db7bc910db8ccab702', 'f9f010adb3466d934f32d6328a0cfdcbc946ae125429a78ac1b6090c872e53c3', expected), before
 information = target.stat()
 assert information.st_uid == 0 and information.st_mode & 0o7777 == 0o755
 temporary = target.with_suffix('.fuxitmp')

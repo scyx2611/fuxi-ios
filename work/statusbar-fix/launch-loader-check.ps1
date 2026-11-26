@@ -16,6 +16,7 @@ param(
     [Parameter(ParameterSetName = 'Boot')][string]$TurnipHybrid,
     [Parameter(ParameterSetName = 'Boot')][ValidatePattern('^[a-f0-9]{64}$')][string]$TurnipSha,
     [Parameter(ParameterSetName = 'Boot')][switch]$TemporaryEnableFairPlayd,
+    [Parameter(ParameterSetName = 'Boot')][switch]$AllowAppStoreHybrid,
     [Parameter(ParameterSetName = 'Boot')][string]$AppStoreDylib,
     [Parameter(ParameterSetName = 'Boot')][ValidatePattern('^[a-f0-9]{64}$')][string]$AppStoreDylibSha,
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectWifi')][switch]$InspectWifi,
@@ -111,7 +112,7 @@ function Test-FairPlaydDisabledSafe([int]$ExitCode, [string]$GuestLogPath, [stri
     }
     return ($beforeMatched -and $stageOk -and $guestOk -and (-not $wroteBlocks))
 }
-function Assert-BootLaunchdPrecheck([string]$WorkspacePath, [string]$StoragePath, [string]$LoaderName, [string]$OutName, [bool]$TemporaryEnableFairPlayd) {
+function Assert-BootLaunchdPrecheck([string]$WorkspacePath, [string]$StoragePath, [string]$LoaderName, [string]$OutName, [bool]$TemporaryEnableFairPlayd, [bool]$AllowAppStoreHybrid = $false) {
     $payloadPath = Join-Path (Join-Path $StoragePath $LoaderName) 'payload.bin'
     if (-not (Test-Path -LiteralPath $payloadPath)) {
         throw "Boot precheck missing loader payload.bin: $payloadPath"
@@ -144,10 +145,13 @@ if chosen is None:
 def u32(name):
     raw = chosen.prop(name)
     return struct.unpack("<I", raw)[0] if raw is not None and len(raw) == 4 else 0
+inject_val = u32("fuxi,inject")
 print(json.dumps({
     "has_sweetnoexec_fairplayd": sweetnoexec_has_fp,
     "appstore_ui": u32("fuxi,appstore-ui"),
     "appstore_fix": u32("fuxi,appstore-fix"),
+    "appstore_hybrid": u32("fuxi,appstore-hybrid"),
+    "inject_appstore_bit": bool(inject_val & 1024),
 }))
 '@
     $adtTool = Join-Path $WorkspacePath 'work\adsp-battery\ksrc\tools\adt.py'
@@ -157,10 +161,22 @@ print(json.dumps({
     }
     $meta = ($jsonOut -join "`n") | ConvertFrom-Json
     if ($TemporaryEnableFairPlayd) {
-        if ($meta.appstore_ui -eq 0 -or $meta.appstore_fix -ne 0) {
-            throw "TemporaryEnableFairPlayd requires ADT fuxi,appstore-ui != 0 and fuxi,appstore-fix == 0 (got ui=$($meta.appstore_ui), fix=$($meta.appstore_fix))"
+        if ($AllowAppStoreHybrid) {
+            if ($meta.appstore_ui -eq 0 -or $meta.appstore_fix -eq 0 -or $meta.appstore_hybrid -eq 0 -or (-not $meta.inject_appstore_bit)) {
+                throw "AllowAppStoreHybrid requires ADT fuxi,appstore-ui != 0, fuxi,appstore-fix != 0, fuxi,appstore-hybrid != 0, and fuxi,inject bit 10 set (got ui=$($meta.appstore_ui), fix=$($meta.appstore_fix), hybrid=$($meta.appstore_hybrid), inject_bit=$($meta.inject_appstore_bit))"
+            }
+            return
+        }
+        if ($meta.appstore_ui -eq 0 -or $meta.appstore_fix -ne 0 -or $meta.appstore_hybrid -ne 0 -or $meta.inject_appstore_bit) {
+            throw "TemporaryEnableFairPlayd requires ADT fuxi,appstore-ui != 0, fuxi,appstore-fix == 0, fuxi,appstore-hybrid == 0, and fuxi,inject bit 10 unset (got ui=$($meta.appstore_ui), fix=$($meta.appstore_fix), hybrid=$($meta.appstore_hybrid), inject_bit=$($meta.inject_appstore_bit))"
         }
         return
+    }
+    if ($AllowAppStoreHybrid) {
+        throw 'AllowAppStoreHybrid requires -TemporaryEnableFairPlayd'
+    }
+    if ($meta.appstore_hybrid -ne 0) {
+        throw "Loader ADT fuxi,appstore-hybrid != 0 requires -TemporaryEnableFairPlayd -AllowAppStoreHybrid (got hybrid=$($meta.appstore_hybrid))"
     }
     if ($meta.has_sweetnoexec_fairplayd -and $meta.appstore_ui -eq 0) {
         if ($OutName -cnotmatch '^[a-z0-9-]+$') {
@@ -213,6 +229,12 @@ if ([bool]$AppStoreDylib -ne [bool]$AppStoreDylibSha) { throw 'AppStoreDylib and
 if ($AppStoreDylib -and ($Dylib -or $TurnipHybrid)) { throw 'Stage one library per phone validation' }
 if ($AppStoreDylib -and (Get-FileHash -LiteralPath $AppStoreDylib -Algorithm SHA256).Hash.ToLowerInvariant() -ne $AppStoreDylibSha) {
     throw 'AppStoreDylib hash differs from the verified build'
+}
+if ($AllowAppStoreHybrid -and (-not $TemporaryEnableFairPlayd)) {
+    throw 'AllowAppStoreHybrid requires -TemporaryEnableFairPlayd'
+}
+if ($AllowAppStoreHybrid -and ((-not $AppStoreDylib) -or (-not $AppStoreDylibSha))) {
+    throw 'AllowAppStoreHybrid requires paired -AppStoreDylib and -AppStoreDylibSha'
 }
 if ($RemoveAppName) {
     if ($Out -cnotmatch '^[a-z0-9-]+$') { throw 'Invalid app removal output name' }
@@ -405,7 +427,7 @@ if ($RemoveAppStoreDylib) {
     if ($LASTEXITCODE -ne 0) { throw 'AppStore dylib removal staging failed' }
     return
 }
-Assert-BootLaunchdPrecheck -WorkspacePath $workspace -StoragePath $storage -LoaderName $Loader -OutName $Out -TemporaryEnableFairPlayd ([bool]$TemporaryEnableFairPlayd)
+Assert-BootLaunchdPrecheck -WorkspacePath $workspace -StoragePath $storage -LoaderName $Loader -OutName $Out -TemporaryEnableFairPlayd ([bool]$TemporaryEnableFairPlayd) -AllowAppStoreHybrid ([bool]$AllowAppStoreHybrid)
 if ($Dylib) {
     $stageOutput = Join-Path $workspace "work\statusbar-fix\run-$Out-stage"
     Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
