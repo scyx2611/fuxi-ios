@@ -889,7 +889,7 @@
   - `T0` 唯讀檢查目錄：`work/statusbar-fix/inspect-b023-appstore-baseline-1126/`（不動分區與 rootfs）。
   - 實機 `boot #472` 對應產物：`work/localbuild/b023-appstore-ui-1126/artifact/libfuxi-appstore.dylib`、`work/Codex-Xiaomi13-GPU-20261109/kernel-local-b023-appstore-ui-9g-artifact/`、`work/Codex-Xiaomi13-GPU-20261109/native-b023-appstore-proxy-tap-1126-loader/`（`boot.img` `12092fad…`、`payload.bin` `27206600…`、`private.adt` `72,044 B`），暫時開機（不更動常駐 `boot_a`/`boot_b`）。
 - **主機測試**：
-  - `work/localbuild/b023-appstore-ui-1126/tests/`（`test_prepare_aio_loader.py`、`test_launch_loader_check.ps1`、`test_phone_readthrough_appstore.py`）與 `work/localbuild/verify-sb-shape.py` 驗簽（含 `--forbid-interpose`）於工具鏈整合（`T-062`）確認通過。
+  - `work/localbuild/b023-appstore-ui-1126/tests/`（`test_prepare_aio_loader.py`、`test_launch_loader_check.ps1`、`test_phone_readthrough_appstore.py`）與 `work/localbuild/verify-sb-shape.py` 驗簽（含 `--forbid-interpose`）於 Task M-2 工具鏈整合（`ws: a155a58`，並對齊 `T-048`、`T-052`）確認通過。
   - `T0` 現場雜湊校驗：`powerlog-state.json` 實測 SHA-256 `85f75872021d6e6143035cebcf203d6c9fa59f053967a5568e5acea03c1691f4` 與 `provenance.json` `summary_sha256` 完全一致；`libfuxi-appstore.dylib` 實測 `88,448 B`（`4d0f5473d5d1fa2699a0c8c16dc8ae6e5d8afd7862ea93319b9e2e61603839d2`）與 `SHA256SUMS` 一致。
 - **驗證紀錄**：
   - **`T0` 唯讀基線（`work/statusbar-fix/inspect-b023-appstore-baseline-1126/`）**：`provenance.json` (`360 B`, `dc12e9c1…`) 實測 `method="locked read-only phone NBD; HFS and guest block read-only"`、`guest_root_overlay_writes=0`、`phone_read_blocks=47`、`appstore_baseline=true`；`powerlog-state.json` (`13,336 B`, `85f75872…`) 實測 `hfs_readonly=true`、`block_readonly=true`、`database_contents_read=false`、`root_writes=0`、`/System/Library/xpc/launchd.plist` 內 `com.apple.fairplayd.H2 Disabled=true`（其餘 8 個 job 為 `missing`）、`/private/var/mobile/Library/FairPlay` `exists=false`、`/private/var/mobile/Library/Accounts` 存在（`6` 項含 `Accounts3.sqlite`）、`/private/var/db/timed` 存在（含 `fuxi-rtc-offset.bin` `64 B`）、`crash_reporter` 前 20 筆均 `appstore_related=false`。
@@ -899,7 +899,7 @@
     - 事件主行口徑（`|AppStore| APSD `）：`INIT=3`、`INST=15`、`AMS_DONE=80`（實測 **`http=200: 80`、`non200=0`**）、`PROXY_TOK=44`、`PROXY_RW=42`、`PROXY_IMG=66`。
     - 含 `APSD+` 續行總行數口徑：`AMS_DONE=156` 行（80 主行 + 76 續行）、`PROXY_RW=153` 行（42 主行 + 111 續行）、`PROXY_IMG=67` 行（66 主行 + 1 續行）。
   - **新發現待查問題**：實機操作期間使用者回報頁面移動／多工切換器卡片偶發閃現黑色矩形條（實拍存於對話附件 `media_1795703878037_71d095e2.jpg`），已獨立立案於 **`G-054`**。
-- **參考來源**：`B-022`、`U-026`、`G-054`、`T-062`、`work/adsp-battery/prepare-aio-loader.py`、`work/statusbar-fix/launch-loader-check.ps1`、`work/statusbar-fix/phone-readthrough.py`、`work/localbuild/verify-sb-shape.py`。
+- **參考來源**：`B-022`、`U-026`、`G-054`、`T-048`、`T-052`、`ws: a155a58`、`work/adsp-battery/prepare-aio-loader.py`、`work/statusbar-fix/launch-loader-check.ps1`、`work/statusbar-fix/phone-readthrough.py`、`work/localbuild/verify-sb-shape.py`。
 - **結論／未完成**：
   - `T0` 唯讀基線與 `boot #472` `AppStore` UI Route 2 瀏覽／搜尋／登入及 `APSD` 代理請求（`http=200` 零非 200 錯誤）已於實機驗證通過；`/usr/local/lib/fuxi/libfuxi-appstore.dylib`（`4d0f5473…`）暫留測試機待後續推進或清理。
   - 後續待辦：① 修正自動化點擊座標避開 `Podcasts`（不影響手動實證）；② 續推原生/完整 `T4` 安裝／登入鏈路（`b023-appstore-t4-1126` 隔離線）；③ 針對 `#472` 回報之頁動／多工黑塊依 **`G-054`** 專門定位。
