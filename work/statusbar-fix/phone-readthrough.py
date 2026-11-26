@@ -27,6 +27,117 @@ RESIGN = HERE / 'resign-app-adhoc.py'
 GUEST_INSTALLER = HERE / 'install-app-guest.py'
 GUEST_REMOVER = HERE / 'remove-app-guest.py'
 
+APPSTORE_DYLIB_TARGET = '/usr/local/lib/fuxi/libfuxi-appstore.dylib'
+
+STAGE_APPSTORE_DYLIB_SH = '''#!/bin/sh
+set -eu
+trap 'echo APPSTORE_STAGE_FAILED' EXIT
+P=/mnt/share/hfs-journal-block-probe.py
+[ "$(cat /sys/block/vda/ro)" = 0 ]
+[ "$(cat /sys/block/vda/size)" = 41943040 ]
+(cd /mnt/share && sha256sum -c appstore-sha256.txt)
+
+check() {
+  fsck.hfsplus -fn /dev/vda > "/tmp/fsck-$1.txt" 2>&1 || true
+  cat "/tmp/fsck-$1.txt"
+  if grep -q "appears to be OK" "/tmp/fsck-$1.txt"; then
+    echo "FSCK_$1 OK"
+    return 0
+  fi
+  bad=$(grep -E '^[[:space:]]+[^[:space:]]' "/tmp/fsck-$1.txt" | grep -vE 'Executing fsck_hfs|The volume name is|Orphaned open unlinked file' || true)
+  [ -z "$bad" ] || { echo "FSCK_$1 NOT_CLEAN"; return 1; }
+  echo "FSCK_$1 OK_APART_FROM_ORPHANS"
+}
+
+python3 "$P" /dev/vda --apply > /tmp/replay.txt
+cat /tmp/replay.txt
+grep -qxE 'JOURNAL_REPLAYED|JOURNAL_EMPTY' /tmp/replay.txt
+python3 "$P" /dev/vda | grep -q '^JOURNAL_EMPTY$'
+check before
+python3 "$P" /dev/vda --mark-unmounted
+mkdir -p /dst
+mount -t hfsplus -o force,rw /dev/vda /dst
+grep -q ' /dst hfsplus rw' /proc/mounts
+python3 - <<'PY'
+import hashlib
+import os
+from pathlib import Path
+
+root = Path('/dst')
+source = Path('/mnt/share/libfuxi-appstore.dylib')
+expected = Path('/mnt/share/appstore-sha256.txt').read_text().split()[0]
+assert hashlib.sha256(source.read_bytes()).hexdigest() == expected
+target = root / 'usr/local/lib/fuxi/libfuxi-appstore.dylib'
+target.parent.mkdir(parents=True, exist_ok=True)
+temporary = target.with_suffix('.fuxitmp')
+temporary.write_bytes(source.read_bytes())
+os.chown(temporary, 0, 0)
+os.chmod(temporary, 0o755)
+temporary.replace(target)
+assert hashlib.sha256(target.read_bytes()).hexdigest() == expected
+print('APPSTORE_DYLIB_INSTALLED', target, expected)
+PY
+sync
+umount /dst
+check after
+python3 "$P" /dev/vda --mark-journaled
+python3 "$P" /dev/vda | grep -q '^JOURNAL_EMPTY$'
+check final
+trap - EXIT
+echo APPSTORE_STAGE_SUCCESS
+'''
+
+STAGE_REMOVE_APPSTORE_DYLIB_SH = '''#!/bin/sh
+set -eu
+trap 'echo APPSTORE_REMOVE_STAGE_FAILED' EXIT
+P=/mnt/share/hfs-journal-block-probe.py
+[ "$(cat /sys/block/vda/ro)" = 0 ]
+[ "$(cat /sys/block/vda/size)" = 41943040 ]
+grep -qx '/usr/local/lib/fuxi/libfuxi-appstore.dylib' /mnt/share/remove-appstore-target.txt
+
+check() {
+  fsck.hfsplus -fn /dev/vda > "/tmp/fsck-$1.txt" 2>&1 || true
+  cat "/tmp/fsck-$1.txt"
+  if grep -q "appears to be OK" "/tmp/fsck-$1.txt"; then
+    echo "FSCK_$1 OK"
+    return 0
+  fi
+  bad=$(grep -E '^[[:space:]]+[^[:space:]]' "/tmp/fsck-$1.txt" | grep -vE 'Executing fsck_hfs|The volume name is|Orphaned open unlinked file' || true)
+  [ -z "$bad" ] || { echo "FSCK_$1 NOT_CLEAN"; return 1; }
+  echo "FSCK_$1 OK_APART_FROM_ORPHANS"
+}
+
+python3 "$P" /dev/vda --apply > /tmp/replay.txt
+cat /tmp/replay.txt
+grep -qxE 'JOURNAL_REPLAYED|JOURNAL_EMPTY' /tmp/replay.txt
+python3 "$P" /dev/vda | grep -q '^JOURNAL_EMPTY$'
+check before
+python3 "$P" /dev/vda --mark-unmounted
+mkdir -p /dst
+mount -t hfsplus -o force,rw /dev/vda /dst
+grep -q ' /dst hfsplus rw' /proc/mounts
+python3 - <<'PY'
+from pathlib import Path
+
+target = Path('/dst/usr/local/lib/fuxi/libfuxi-appstore.dylib')
+if target.exists() or target.is_symlink():
+    assert not target.is_dir() or target.is_symlink()
+    target.unlink()
+    print('APPSTORE_DYLIB_REMOVED', target)
+else:
+    print('APPSTORE_DYLIB_ALREADY_ABSENT', target)
+assert not target.exists() and not target.is_symlink()
+PY
+sync
+umount /dst
+check after
+python3 "$P" /dev/vda --mark-journaled
+python3 "$P" /dev/vda | grep -q '^JOURNAL_EMPTY$'
+check final
+trap - EXIT
+echo APPSTORE_REMOVE_STAGE_SUCCESS
+'''
+
 
 def say(*values):
     print(time.strftime('%H:%M:%S'), *values, flush=True)
@@ -289,6 +400,8 @@ def stage(arguments):
     job = arguments.disable_job
     enable_job = arguments.enable_job
     turnip = arguments.turnip_hybrid
+    appstore_dylib = getattr(arguments, 'appstore_dylib', None)
+    remove_appstore_dylib = bool(getattr(arguments, 'remove_appstore_dylib', False))
     wifi_logging = arguments.wifi_logging
     apps = arguments.install_staged_apps
     app_dir = Path(arguments.install_app).resolve() if arguments.install_app else None
@@ -300,25 +413,25 @@ def stage(arguments):
     # 第三方 App 約 140 MiB 資料＋catalog／extents／bitmap，同樣用 256。NativeMetal bridge ~21 MiB 用 96。
     limit = 256 if apps or app_dir else (96 if nm_dir else 64)
     if apps and (zone is not None or job is not None or enable_job is not None or turnip or wifi_logging is not None or
-                 remove_name is not None or arguments.dylib or arguments.sha256):
+                 remove_name is not None or arguments.dylib or appstore_dylib or remove_appstore_dylib or arguments.sha256):
         raise ValueError('--install-staged-apps is a separate staging run')
     if app_dir and (apps or zone is not None or job is not None or enable_job is not None or turnip or wifi_logging is not None or
-                    remove_name is not None or arguments.dylib or arguments.sha256):
+                    remove_name is not None or arguments.dylib or appstore_dylib or remove_appstore_dylib or arguments.sha256):
         raise ValueError('--install-app is a separate staging run')
     if wifi_logging is not None and (zone is not None or job is not None or enable_job is not None or turnip or
-                                     remove_name is not None or arguments.dylib or arguments.sha256):
+                                     remove_name is not None or arguments.dylib or appstore_dylib or remove_appstore_dylib or arguments.sha256):
         raise ValueError('--wifi-logging is a separate configuration staging run')
-    if turnip and (zone is not None or job is not None or enable_job is not None or remove_name is not None or arguments.dylib):
+    if turnip and (zone is not None or job is not None or enable_job is not None or remove_name is not None or arguments.dylib or appstore_dylib or remove_appstore_dylib):
         raise ValueError('--turnip-hybrid is a separate library staging run')
     if sum(x is not None for x in (zone, job, enable_job)) > 1:
         raise ValueError('--timezone, --disable-job, and --enable-job are separate runs')
     if nm_dir:
-        if any((zone, job, enable_job, turnip, wifi_logging, apps, app_dir, remove_name, audio_hal, arguments.dylib, arguments.sha256)):
+        if any((zone, job, enable_job, turnip, wifi_logging, apps, app_dir, remove_name, audio_hal, arguments.dylib, appstore_dylib, remove_appstore_dylib, arguments.sha256)):
             raise ValueError('--nativemetal-dir is a separate staging run')
         nm_items, nm_sums = nativemetal_plan(nm_dir)
         script, token = 'stage-nativemetal.sh', 'NATIVEMETAL_STAGE_SUCCESS'
     elif audio_hal:
-        if any((zone, job, enable_job, turnip, wifi_logging, apps, app_dir, remove_name, arguments.dylib)):
+        if any((zone, job, enable_job, turnip, wifi_logging, apps, app_dir, remove_name, arguments.dylib, appstore_dylib, remove_appstore_dylib)):
             raise ValueError('--audio-hal is a separate staging run')
         bundle = Path(arguments.audio_bundle).resolve(strict=True)
         editor, audio_plan = audio_hal_plan(audio_hal, bundle, arguments.sha256)
@@ -329,7 +442,7 @@ def stage(arguments):
         tweaks_sha = hashlib.sha256(TWEAKS.read_bytes()).hexdigest()
         app_text, app_tar, app_files = app_description(app_dir)
     elif remove_name is not None:
-        if any((zone, job, enable_job, turnip, wifi_logging, apps, app_dir, audio_hal, nm_dir, arguments.dylib, arguments.sha256)):
+        if any((zone, job, enable_job, turnip, wifi_logging, apps, app_dir, audio_hal, nm_dir, arguments.dylib, appstore_dylib, remove_appstore_dylib, arguments.sha256)):
             raise ValueError('--remove-app-name/--remove-app-bundle-id is a separate staging run')
         if not re.fullmatch(r'[a-z0-9-]+', output.name):
             raise ValueError('Invalid output run name (must match ^[a-z0-9-]+$)')
@@ -347,19 +460,30 @@ def stage(arguments):
         script, token = 'stage-wifi-logging.sh', 'WIFI_LOGGING_STAGE_SUCCESS'
     elif zone is not None:
         # 時區模式：只換 /private/var/db/timezone/localtime 這個 symlink，不帶 dylib。
-        if not re.fullmatch(r'[A-Za-z_]+/[A-Za-z_]+', zone) or arguments.dylib or arguments.sha256:
+        if not re.fullmatch(r'[A-Za-z_]+/[A-Za-z_]+', zone) or arguments.dylib or appstore_dylib or remove_appstore_dylib or arguments.sha256:
             raise ValueError('--timezone takes Area/City and no dylib')
         script, token = 'stage-timezone.sh', 'TIMEZONE_STAGE_SUCCESS'
     elif job is not None:
         # launchd 模式：在 launchd.plist 把一個 job 標成 Disabled，不帶 dylib。
-        if not re.fullmatch(r'com\.apple\.[A-Za-z0-9.]+', job) or arguments.dylib or arguments.sha256:
+        if not re.fullmatch(r'com\.apple\.[A-Za-z0-9.]+', job) or arguments.dylib or appstore_dylib or remove_appstore_dylib or arguments.sha256:
             raise ValueError('--disable-job takes one com.apple label and no dylib')
         script, token = 'stage-launchd-disable.sh', 'LAUNCHD_STAGE_SUCCESS'
     elif enable_job is not None:
         # launchd 暫時啟用模式：移除 launchd.plist 中該 job 的 Disabled=True，不帶 dylib。
-        if not re.fullmatch(r'com\.apple\.[A-Za-z0-9.]+', enable_job) or arguments.dylib or arguments.sha256:
+        if not re.fullmatch(r'com\.apple\.[A-Za-z0-9.]+', enable_job) or arguments.dylib or appstore_dylib or remove_appstore_dylib or arguments.sha256:
             raise ValueError('--enable-job takes one com.apple label and no dylib')
         script, token = 'stage-launchd-enable.sh', 'LAUNCHD_ENABLE_STAGE_SUCCESS'
+    elif appstore_dylib:
+        if arguments.dylib or turnip or remove_appstore_dylib:
+            raise ValueError('--appstore-dylib is a separate library staging run')
+        dylib = Path(appstore_dylib).resolve()
+        if not arguments.sha256 or hashlib.sha256(dylib.read_bytes()).hexdigest() != arguments.sha256:
+            raise ValueError('AppStore dylib hash differs from the verified build')
+        script, token = 'stage-appstore-dylib.sh', 'APPSTORE_STAGE_SUCCESS'
+    elif remove_appstore_dylib:
+        if arguments.dylib or turnip or arguments.sha256:
+            raise ValueError('--remove-appstore-dylib takes no dylib or --sha256')
+        script, token = 'stage-remove-appstore-dylib.sh', 'APPSTORE_REMOVE_STAGE_SUCCESS'
     else:
         dylib = Path(turnip or arguments.dylib).resolve()
         if hashlib.sha256(dylib.read_bytes()).hexdigest() != arguments.sha256:
@@ -429,9 +553,19 @@ def stage(arguments):
                 elif enable_job is not None:
                     if (share / 'job.txt').read_text(encoding='ascii').strip() != enable_job:
                         raise ValueError('The staged launchd enable job differs')
+                elif appstore_dylib:
+                    if (hashlib.sha256((share / 'libfuxi-appstore.dylib').read_bytes()).hexdigest() != arguments.sha256 or
+                            (share / 'library-kind.txt').read_text(encoding='ascii').strip() != 'appstore'):
+                        raise ValueError('The staged AppStore dylib differs')
+                elif remove_appstore_dylib:
+                    if ((share / 'library-kind.txt').read_text(encoding='ascii').strip() != 'remove-appstore' or
+                            (share / 'remove-appstore-target.txt').read_text(encoding='ascii').strip() != APPSTORE_DYLIB_TARGET):
+                        raise ValueError('The staged AppStore dylib removal differs')
                 elif hashlib.sha256((share / 'libfuxi-sb.dylib').read_bytes()).hexdigest() != arguments.sha256:
                     raise ValueError('The staged dylib differs')
-                if zone is None and job is None and enable_job is None and wifi_logging is None and not apps and not app_dir and remove_name is None and not audio_hal and not nm_dir:
+                if (zone is None and job is None and enable_job is None and wifi_logging is None and
+                        not apps and not app_dir and remove_name is None and not audio_hal and not nm_dir and
+                        not appstore_dylib and not remove_appstore_dylib):
                     kind_path = share / 'library-kind.txt'
                     staged_kind = kind_path.read_text(encoding='ascii').strip() if kind_path.exists() else 'shape'
                     if staged_kind != ('turnip-hybrid' if turnip else 'shape'):
@@ -440,8 +574,16 @@ def stage(arguments):
                 blocks = PhoneBlocks(output / 'read-cache', lambda index: adb(
                     serial, f'dd if={MAPPER} bs={BLOCK} skip={index} count=1 2>/dev/null'))
                 share.mkdir()
-                for name in (script, 'stage-share/hfs-journal-block-probe.py'):
-                    shutil.copy2(Path(__file__).resolve().parent / name, share)
+                shutil.copy2(Path(__file__).resolve().parent / 'stage-share/hfs-journal-block-probe.py', share)
+                guest_script_src = Path(__file__).resolve().parent / script
+                if guest_script_src.is_file():
+                    shutil.copy2(guest_script_src, share)
+                elif script == 'stage-appstore-dylib.sh':
+                    (share / script).write_text(STAGE_APPSTORE_DYLIB_SH, encoding='ascii', newline='\n')
+                elif script == 'stage-remove-appstore-dylib.sh':
+                    (share / script).write_text(STAGE_REMOVE_APPSTORE_DYLIB_SH, encoding='ascii', newline='\n')
+                else:
+                    shutil.copy2(guest_script_src, share)
                 if nm_dir:
                     for share_name, src, _ in nm_items:
                         shutil.copy2(src, share / share_name)
@@ -471,6 +613,15 @@ def stage(arguments):
                     (share / 'job.txt').write_text(job + '\n', encoding='ascii', newline='\n')
                 elif enable_job is not None:
                     (share / 'job.txt').write_text(enable_job + '\n', encoding='ascii', newline='\n')
+                elif appstore_dylib:
+                    shutil.copy2(dylib, share / 'libfuxi-appstore.dylib')
+                    (share / 'library-kind.txt').write_text('appstore\n', encoding='ascii', newline='\n')
+                    (share / 'appstore-sha256.txt').write_text(
+                        f'{arguments.sha256}  libfuxi-appstore.dylib\n', encoding='ascii', newline='\n')
+                elif remove_appstore_dylib:
+                    (share / 'library-kind.txt').write_text('remove-appstore\n', encoding='ascii', newline='\n')
+                    (share / 'remove-appstore-target.txt').write_text(
+                        APPSTORE_DYLIB_TARGET + '\n', encoding='ascii', newline='\n')
                 else:
                     shutil.copy2(dylib, share / 'libfuxi-sb.dylib')
                     (share / 'library-kind.txt').write_text(
@@ -539,11 +690,13 @@ def stage(arguments):
                 say(adb(serial, f'sync; {MANAGER} unmap').decode().strip())
 
 
-if __name__ == '__main__':
+def build_arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--dylib')
     parser.add_argument('--turnip-hybrid')
+    parser.add_argument('--appstore-dylib')
+    parser.add_argument('--remove-appstore-dylib', action='store_true')
     parser.add_argument('--sha256')
     parser.add_argument('--output')
     parser.add_argument('--write-staged', action='store_true')
@@ -569,18 +722,33 @@ if __name__ == '__main__':
     parser.add_argument('--nativemetal-dir', metavar='DIR',
                         help='Stage verified FuxiNativeMetal.bundle + libnative_metal_bridge.dylib from CI artifact')
     parser.add_argument('--serial', default=os.environ.get('FUXI_ANDROID_SERIAL', ''))
+    return parser
+
+
+def validate_cli_arguments(parser, arguments):
+    if bool(arguments.audio_hal) != bool(arguments.audio_bundle) or (arguments.audio_hal and not arguments.sha256):
+        parser.error('--audio-hal needs --audio-bundle and the verified binary --sha256')
+    if bool(arguments.remove_app_name) != bool(arguments.remove_app_bundle_id):
+        parser.error('--remove-app-name and --remove-app-bundle-id must be provided together')
+    if arguments.appstore_dylib and not arguments.sha256:
+        parser.error('--appstore-dylib needs the verified --sha256')
+    if arguments.remove_appstore_dylib and arguments.sha256:
+        parser.error('--remove-appstore-dylib takes no --sha256')
+    if sum(bool(x) for x in (arguments.dylib, arguments.turnip_hybrid, arguments.appstore_dylib, arguments.remove_appstore_dylib)) > 1:
+        parser.error('--dylib, --turnip-hybrid, --appstore-dylib, and --remove-appstore-dylib are mutually exclusive')
+    if not arguments.output or not (arguments.timezone or arguments.disable_job or arguments.enable_job or
+                                    arguments.wifi_logging or
+                                    arguments.install_staged_apps or arguments.install_app or arguments.remove_app_name or arguments.audio_hal or
+                                    arguments.nativemetal_dir or arguments.remove_appstore_dylib or
+                                    ((arguments.dylib or arguments.turnip_hybrid or arguments.appstore_dylib) and arguments.sha256)):
+        parser.error('--output plus a configuration action or a library and --sha256 are required')
+
+
+if __name__ == '__main__':
+    parser = build_arg_parser()
     arguments = parser.parse_args()
     if arguments.self_test:
         self_test()
     else:
-        if bool(arguments.audio_hal) != bool(arguments.audio_bundle) or (arguments.audio_hal and not arguments.sha256):
-            parser.error('--audio-hal needs --audio-bundle and the verified binary --sha256')
-        if bool(arguments.remove_app_name) != bool(arguments.remove_app_bundle_id):
-            parser.error('--remove-app-name and --remove-app-bundle-id must be provided together')
-        if not arguments.output or not (arguments.timezone or arguments.disable_job or arguments.enable_job or
-                                        arguments.wifi_logging or
-                                        arguments.install_staged_apps or arguments.install_app or arguments.remove_app_name or arguments.audio_hal or
-                                        arguments.nativemetal_dir or
-                                        ((arguments.dylib or arguments.turnip_hybrid) and arguments.sha256)):
-            parser.error('--output plus a configuration action or a library and --sha256 are required')
+        validate_cli_arguments(parser, arguments)
         stage(arguments)

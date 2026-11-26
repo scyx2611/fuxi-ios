@@ -11,7 +11,7 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def inspect(data, *, audio_bundle=False):
+def inspect(data, *, audio_bundle=False, install_name='/usr/local/lib/fuxi/libfuxi-sb.dylib', forbid_interpose=False):
     require(len(data) >= 32, 'Truncated Mach-O header')
     magic, cpu, subtype, kind, commands, commands_size = struct.unpack_from('<6I', data)
     binary_type, type_name = (8, 'MH_BUNDLE') if audio_bundle else (6, 'MH_DYLIB')
@@ -24,6 +24,7 @@ def inspect(data, *, audio_bundle=False):
     minimum = None
     identifier = None
     dependencies = []
+    interpose_sections = 0
     for _ in range(commands):
         command, size = struct.unpack_from('<II', data, offset)
         require(size >= 8 and size % 8 == 0 and offset + size <= commands_end, 'Invalid load command')
@@ -35,6 +36,21 @@ def inspect(data, *, audio_bundle=False):
                     (memory_size % 4096 == 0 or segment == b'__LINKEDIT'),
                     'Segment cannot map on 4K pages')
             require(file_offset + file_size <= len(data) and file_size <= memory_size, 'Invalid segment bounds')
+            nsects = struct.unpack_from('<I', data, offset + 64)[0]
+            require(size >= 72 + nsects * 80, 'Truncated segment sections')
+            for sec_index in range(nsects):
+                sec_offset = offset + 72 + sec_index * 80
+                sectname = data[sec_offset:sec_offset + 16].split(b'\0', 1)[0]
+                segname = data[sec_offset + 16:sec_offset + 32].split(b'\0', 1)[0]
+                sec_flags = struct.unpack_from('<I', data, sec_offset + 64)[0]
+                if sectname == b'__interpose' or (sec_flags & 0xff) == 0x0e:
+                    interpose_sections += 1
+                    if forbid_interpose:
+                        seg_label = segname.decode('ascii', 'replace')
+                        sec_label = sectname.decode('ascii', 'replace')
+                        raise ValueError(
+                            f'Forbidden ({seg_label},{sec_label}) interpose section (flags=0x{sec_flags:x})'
+                        )
         elif command == 0x32:
             require(size >= 24 and minimum is None, 'Invalid build version')
             platform, minimum, sdk = struct.unpack_from('<3I', data, offset + 8)
@@ -56,7 +72,7 @@ def inspect(data, *, audio_bundle=False):
                 dependencies.append(name)
         offset += size
     require(offset == commands_end and minimum is not None and signature is not None, 'Missing load commands')
-    expected_name = None if audio_bundle else '/usr/local/lib/fuxi/libfuxi-sb.dylib'
+    expected_name = None if audio_bundle else install_name
     require(identifier == expected_name, 'Unexpected dylib identifier')
     expected_dependencies = {
         '/usr/lib/libSystem.B.dylib',
@@ -118,7 +134,7 @@ def inspect(data, *, audio_bundle=False):
     require(directories, 'No verified code directory')
     return {
         'architecture': 'arm64', 'minimum_ios': '16.0', 'sdk': f'{sdk >> 16}.{sdk >> 8 & 255}',
-        'install_name': identifier, 'dependencies': sorted(dependencies), 'signatures': directories,
+        'install_name': identifier, 'dependencies': sorted(dependencies), 'interpose_sections': interpose_sections, 'signatures': directories,
         'sha256': hashlib.sha256(data).hexdigest(),
         'verification': 'Mach-O structure and ad hoc page hashes; no Apple certificate trust claim',
     }
@@ -128,8 +144,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('path', type=Path)
     parser.add_argument('--audio-bundle', action='store_true', help='verify an arm64 FuxiAudio.driver')
+    parser.add_argument('--install-name', default='/usr/local/lib/fuxi/libfuxi-sb.dylib',
+                        help='expected LC_ID_DYLIB install name')
+    parser.add_argument('--forbid-interpose', action='store_true',
+                        help='reject any __interpose or S_INTERPOSING (0x0e) Mach-O section')
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
+    if args.audio_bundle and args.install_name != '/usr/local/lib/fuxi/libfuxi-sb.dylib':
+        parser.error('--install-name cannot be used with --audio-bundle')
     binary = args.path
     if args.audio_bundle:
         binary = args.path / 'FuxiAudio'
@@ -140,7 +162,8 @@ def main():
         factory, = info.get('CFPlugInTypes', {}).get('443ABAB8-E7B3-491A-B985-BEB9187030DB', [])
         require(info.get('CFPlugInFactories', {}).get(factory) == 'FuxiAudio_Create', 'Missing FuxiAudio factory')
     data = binary.read_bytes()
-    result = inspect(data, audio_bundle=args.audio_bundle)
+    result = inspect(data, audio_bundle=args.audio_bundle, install_name=args.install_name,
+                     forbid_interpose=args.forbid_interpose)
     if args.audio_bundle:
         result.update(factory='FuxiAudio_Create', info_sha256=hashlib.sha256(info_bytes).hexdigest())
     if args.self_test:
@@ -148,7 +171,8 @@ def main():
             changed = bytearray(data)
             changed[position] ^= 1
             try:
-                inspect(changed, audio_bundle=args.audio_bundle)
+                inspect(changed, audio_bundle=args.audio_bundle, install_name=args.install_name,
+                        forbid_interpose=args.forbid_interpose)
             except (ValueError, struct.error):
                 continue
             raise ValueError(f'Corruption at {position} was accepted')

@@ -99,6 +99,8 @@ BINARY_CHOSEN_PROPS = frozenset({
     'fuxi,camera-tab-tele-60',
     'fuxi,user-app-noplatform',
     'fuxi,gpu-c1-bos',
+    'fuxi,appstore-fix',
+    'fuxi,appstore-ui',
 })
 
 
@@ -321,6 +323,102 @@ def validate_kernel_user_app_noplatform(kernel_bytes: bytes, enabled: int) -> No
         )
 
 
+def validate_appstore_proxy(value: int) -> int:
+    """Validate --appstore-proxy (0=off, 1=on)."""
+    _require_gpu(
+        type(value) is int and value in (0, 1),
+        f'--appstore-proxy must be 0 or 1, got {value!r}',
+    )
+    return value
+
+
+def validate_appstore_ui(value: int) -> int:
+    """Validate --appstore-ui (0=off, 1=on)."""
+    _require_gpu(
+        type(value) is int and value in (0, 1),
+        f'--appstore-ui must be 0 or 1, got {value!r}',
+    )
+    return value
+
+
+def validate_appstore_flags(proxy: int, ui: int) -> tuple[int, int]:
+    """Validate orthogonal AppStore opt-in flags (0|1 and mutually exclusive)."""
+    proxy_val = validate_appstore_proxy(proxy)
+    ui_val = validate_appstore_ui(ui)
+    _require_gpu(not (proxy_val and ui_val), '--appstore-proxy and --appstore-ui are mutually exclusive')
+    return proxy_val, ui_val
+
+
+def merge_appstore_sweetnull(adt_sweetnull: str | None, stderr_log: str | None = None) -> str:
+    """Ensure AppStore is present in --adt-sweetnull without exceeding 127 ASCII bytes."""
+    if stderr_log:
+        raise SystemExit('--appstore-proxy 1 is exclusive with --stderr-log (boot-args must increase by 0 B)')
+    if adt_sweetnull is None:
+        merged = 'AppStore'
+    else:
+        _validate_adt_sweetnull(adt_sweetnull, None)
+        tokens = [tok for tok in adt_sweetnull.split(',') if tok]
+        if 'AppStore' not in tokens:
+            tokens.append('AppStore')
+        merged = ','.join(tokens)
+    _validate_adt_sweetnull(merged, None)
+    return merged
+
+
+def apply_appstore_adt_patch(
+    chosen,
+    kernel_bytes: bytes,
+    report: dict,
+    *,
+    appstore_proxy: int = 0,
+    appstore_ui: int = 0,
+    require_fn=_require_gpu,
+) -> None:
+    """Apply orthogonal AppStore ADT properties right before adt.serialize(tree)."""
+    proxy_val, ui_val = validate_appstore_flags(appstore_proxy, appstore_ui)
+    require_fn(chosen.prop('fuxi,appstore-fix') is None, 'ADT chosen already carries fuxi,appstore-fix')
+    require_fn(chosen.prop('fuxi,appstore-ui') is None, 'ADT chosen already carries fuxi,appstore-ui')
+    require_fn(chosen.prop('fuxi,fpiokit') is None, 'ADT chosen already carries fuxi,fpiokit')
+    if proxy_val:
+        require_fn(
+            b'AppStore gets ' in kernel_bytes and b'/usr/local/lib/fuxi/libfuxi-appstore.dylib' in kernel_bytes,
+            'kernel missing 0118 FUXI_INJECT_APPSTORE marker',
+        )
+        require_fn(
+            not any(t.startswith('fxinj=') for t in report.get('command_line', '').split()),
+            'command line pins fxinj=, which would override ADT fuxi,inject',
+        )
+        current = chosen.prop('fuxi,inject')
+        require_fn(current is not None and len(current) == 4, 'ADT chosen lacks 4-byte fuxi,inject')
+        mode = struct.unpack('<I', current)[0] | 1024
+        chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
+        chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
+        chosen.props.append(('fuxi,appstore-fix', 0, struct.pack('<I', 1)))
+        require_fn(chosen.prop('fuxi,appstore-ui') is None, 'ADT chosen unexpectedly carries fuxi,appstore-ui')
+        require_fn(chosen.prop('fuxi,fpiokit') is None, 'ADT chosen unexpectedly carries fuxi,fpiokit')
+        raw_sn = chosen.prop('fuxi,sweetnull')
+        require_fn(
+            raw_sn is not None and raw_sn.endswith(b'\0') and b'\0' not in raw_sn[:-1],
+            'ADT chosen missing valid fuxi,sweetnull for --appstore-proxy 1',
+        )
+        sn_text = raw_sn[:-1].decode('ascii')
+        require_fn(len(sn_text.encode('ascii')) <= 127, 'ADT fuxi,sweetnull exceeds 127 ASCII bytes')
+        require_fn('AppStore' in sn_text.split(','), 'ADT fuxi,sweetnull missing AppStore token')
+        report['inject'] = mode
+        report['appstore_proxy'] = 1
+    elif ui_val:
+        require_fn(
+            b'fuxi,appstore-ui' in kernel_bytes and b'com_apple_driver_FairPlayIOKit' in kernel_bytes,
+            'kernel missing 0095/0134 fuxi,appstore-ui / FairPlayIOKit markers',
+        )
+        chosen.props.append(('fuxi,appstore-ui', 0, struct.pack('<I', 1)))
+        require_fn(chosen.prop('fuxi,appstore-fix') is None, 'ADT chosen unexpectedly carries fuxi,appstore-fix')
+        current = chosen.prop('fuxi,inject')
+        if current is not None and len(current) == 4:
+            require_fn((struct.unpack('<I', current)[0] & 1024) == 0, 'fuxi,inject bit 10 must be 0 with --appstore-ui 1')
+        report['appstore_ui'] = 1
+
+
 def validate_surfrow(value: int | None) -> int | None:
     """Validate --surfrow (0=off, 1=every row 256B align, 2=kernel default)."""
     if value is None:
@@ -488,6 +586,8 @@ def verify_adt_b022(
     camera_dylib: bool = False,
     expected_gpu_c1_bos: int | None = None,
     expected_user_app_noplatform: int = 0,
+    expected_appstore_proxy: int = 0,
+    expected_appstore_ui: int = 0,
 ) -> None:
     """Post-build binary ADT verification for B-022 (Plan 1 + U-026 + sRGB + Wave 2 + zero Wave 1)."""
     _require_gpu(len(adt_bytes) <= 0x20000, f'generated private.adt size {len(adt_bytes)} exceeds 128 KiB limit')
@@ -557,6 +657,42 @@ def verify_adt_b022(
         )
     else:
         _require_gpu(raw_noplat is None, 'generated private.adt unexpectedly carries fuxi,user-app-noplatform')
+
+    appstore_proxy_val, appstore_ui_val = validate_appstore_flags(expected_appstore_proxy, expected_appstore_ui)
+    raw_appstore_fix = out_chosen.prop('fuxi,appstore-fix')
+    raw_appstore_ui = out_chosen.prop('fuxi,appstore-ui')
+    raw_fpiokit = out_chosen.prop('fuxi,fpiokit')
+    if appstore_proxy_val:
+        _require_gpu(
+            raw_appstore_fix == struct.pack('<I', 1),
+            f'generated private.adt fuxi,appstore-fix mismatch: {raw_appstore_fix!r} != 1',
+        )
+        _require_gpu(raw_appstore_ui is None, 'generated private.adt unexpectedly carries fuxi,appstore-ui with --appstore-proxy 1')
+        _require_gpu(raw_fpiokit is None, 'generated private.adt unexpectedly carries fuxi,fpiokit with --appstore-proxy 1')
+        _require_gpu(
+            (inj_val & 1024) != 0,
+            f'generated private.adt fuxi,inject={inj_val} missing bit 10 (1024) for --appstore-proxy 1',
+        )
+        raw_sn = out_chosen.prop('fuxi,sweetnull')
+        _require_gpu(
+            raw_sn is not None and raw_sn.endswith(b'\0') and b'\0' not in raw_sn[:-1],
+            'generated private.adt missing valid fuxi,sweetnull for --appstore-proxy 1',
+        )
+        sn_str = raw_sn[:-1].decode('ascii')
+        _require_gpu(len(sn_str.encode('ascii')) <= 127, f'generated private.adt fuxi,sweetnull exceeds 127 B: {len(sn_str.encode("ascii"))}')
+        _require_gpu('AppStore' in sn_str.split(','), f'generated private.adt fuxi,sweetnull missing AppStore token: {sn_str!r}')
+    else:
+        _require_gpu(raw_appstore_fix is None, 'generated private.adt unexpectedly carries fuxi,appstore-fix')
+
+    if appstore_ui_val:
+        _require_gpu(
+            raw_appstore_ui == struct.pack('<I', 1),
+            f'generated private.adt fuxi,appstore-ui mismatch: {raw_appstore_ui!r} != 1',
+        )
+        _require_gpu(raw_appstore_fix is None, 'generated private.adt unexpectedly carries fuxi,appstore-fix with --appstore-ui 1')
+        _require_gpu((inj_val & 1024) == 0, f'generated private.adt fuxi,inject={inj_val} unexpectedly sets bit 10 with --appstore-ui 1')
+    else:
+        _require_gpu(raw_appstore_ui is None, 'generated private.adt unexpectedly carries fuxi,appstore-ui')
 
     disps = [n for b in out_tree.children if b.name == 'arm-io' for n in b.children if n.name == 'disp0']
     if disps:
@@ -907,6 +1043,15 @@ def _patch_generator_source(source: bytes, has_drop: bool, sensor_pack_path: Pat
     assert source.count(objcopy_old) == 1, 'unexpected llvm-objcopy site'
     source = source.replace(objcopy_old, objcopy_new, 1)
 
+    # 8. Hook AppStore ADT opt-in patching right before private.write_bytes(adt.serialize(tree))
+    adt_write_old = b"        private.write_bytes(adt.serialize(tree))"
+    adt_write_new = (
+        b"        _fuxi_appstore_patch_adt(chosen, kernel, report)\n"
+        b"        private.write_bytes(adt.serialize(tree))"
+    )
+    assert source.count(adt_write_old) == 1, 'unexpected private.write_bytes(adt.serialize(tree)) site'
+    source = source.replace(adt_write_old, adt_write_new, 1)
+
     return source
 
 
@@ -1041,6 +1186,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Option B user-app noplatform switch (0133)
     ap.add_argument('--user-app-noplatform', type=int, choices=(0, 1), default=0,
                     help='Write ADT /chosen fuxi,user-app-noplatform uint32 (0=off [default], 1=on)')
+    # B-023 AppStore orthogonal opt-in switches
+    ap.add_argument('--appstore-proxy', type=int, choices=(0, 1), default=0,
+                    help='Write ADT /chosen fuxi,appstore-fix=1, fuxi,inject |= 1024, and AppStore in fuxi,sweetnull (0=off [default], 1=on; exclusive with --appstore-ui)')
+    ap.add_argument('--appstore-ui', type=int, choices=(0, 1), default=0,
+                    help='Write ADT /chosen fuxi,appstore-ui=1 for FairPlayIOKit + sweetnoexec exemption (0=off [default], 1=on; exclusive with --appstore-proxy)')
     # M6 GNSS & Camera diagnostics
     ap.add_argument('--modem-gnss', type=lambda v: int(v, 0), default=3,
                     help='ADT /chosen fuxi,modem-gnss bitmask (default 3=probe+bridge, 0=off)')
@@ -1083,6 +1233,7 @@ def parse_and_validate_args(argv: list[str] | None = None, *, workspace: Path = 
         gpu_irqslice_val = validate_gpu_irqslice(args.gpu_irqslice)
         gpu_c1_bos_val = validate_gpu_c1_bos(args.gpu_c1_bos)
         user_app_noplatform_val = validate_user_app_noplatform(args.user_app_noplatform)
+        appstore_proxy_val, appstore_ui_val = validate_appstore_flags(args.appstore_proxy, args.appstore_ui)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -1104,6 +1255,9 @@ def parse_and_validate_args(argv: list[str] | None = None, *, workspace: Path = 
     rest, preset_meta = _apply_selftest_preset(rest, args.selftest_preset)
     for tok in rest:
         _reject_banned_tokens(tok, 'CLI remainder')
+
+    if appstore_proxy_val and _has_cli_flag(rest, '--stderr-log'):
+        raise SystemExit('--appstore-proxy 1 is exclusive with --stderr-log (boot-args must increase by 0 B)')
 
     # Pre-build strict rejection of p / p\d* tap commands (including preset-expanded tap scripts)
     for tap_val in _extract_cli_opt_values(rest, '--tap-script'):
@@ -1144,6 +1298,8 @@ def parse_and_validate_args(argv: list[str] | None = None, *, workspace: Path = 
         'gpu_irqslice_val': gpu_irqslice_val,
         'gpu_c1_bos_val': gpu_c1_bos_val,
         'user_app_noplatform_val': user_app_noplatform_val,
+        'appstore_proxy_val': appstore_proxy_val,
+        'appstore_ui_val': appstore_ui_val,
         'probe_source_path': probe_source_path,
         'probe_source_sha256': probe_source_sha256,
     }
@@ -1365,6 +1521,8 @@ def main():
     gpu_irqslice_val = parsed['gpu_irqslice_val']
     gpu_c1_bos_val = parsed['gpu_c1_bos_val']
     user_app_noplatform_val = parsed['user_app_noplatform_val']
+    appstore_proxy_val = parsed['appstore_proxy_val']
+    appstore_ui_val = parsed['appstore_ui_val']
     probe_source_path = parsed['probe_source_path']
     probe_source_sha256 = parsed['probe_source_sha256']
 
@@ -1510,6 +1668,17 @@ def main():
     module.__dict__['_stage_mkpayload_128k'] = _stage_mkpayload_128k
     module.__dict__['_write_sensor_ld'] = _write_sensor_ld
     module.__dict__['_verify_sensor_pack_elf'] = _verify_sensor_pack_elf
+    def _fuxi_appstore_patch_adt(chosen, kernel, report):
+        apply_appstore_adt_patch(
+            chosen,
+            kernel.read_bytes(),
+            report,
+            appstore_proxy=appstore_proxy_val,
+            appstore_ui=appstore_ui_val,
+            require_fn=module.require,
+        )
+
+    module.__dict__['_fuxi_appstore_patch_adt'] = _fuxi_appstore_patch_adt
     module.__dict__['verify_elf_probe_and_relocs'] = verify_elf_probe_and_relocs
     exec(compile(source, str(path), 'exec'), module.__dict__)
 
@@ -1554,12 +1723,19 @@ def main():
         for prop_name, _, _ in tab_blobs:
             module.require(prop_name.encode('ascii') in kernel, f'kernel missing camera tab prop {prop_name}')
 
+        effective_adt_sweetnull = args.adt_sweetnull
+        if appstore_proxy_val:
+            module.require(not getattr(gargs, 'stderr_log', None),
+                           '--appstore-proxy 1 is exclusive with --stderr-log (boot-args must increase by 0 B)')
+            effective_adt_sweetnull = merge_appstore_sweetnull(args.adt_sweetnull, getattr(gargs, 'stderr_log', None))
+            gargs.adt_sweetnull = effective_adt_sweetnull
+
         full_sweetnull = None
-        if args.adt_sweetnull is not None:
-            full_sweetnull = _validate_adt_sweetnull(args.adt_sweetnull, getattr(gargs, 'stderr_log', None))
+        if effective_adt_sweetnull is not None:
+            full_sweetnull = _validate_adt_sweetnull(effective_adt_sweetnull, getattr(gargs, 'stderr_log', None))
             module.require(gargs.native_ath12k, '--adt-sweetnull requires --native-ath12k')
             if getattr(gargs, 'adt_sweetnull', None) is None:
-                gargs.adt_sweetnull = args.adt_sweetnull
+                gargs.adt_sweetnull = effective_adt_sweetnull
 
         chosen = module.chosen_node(tree)
         forbidden_prefixes = (
@@ -1568,6 +1744,7 @@ def main():
             'fuxi,sweetnull', 'fuxi,gpu-bb-recover', 'fuxi,gpu-clients',
             'fuxi,gpu-locksplit', 'fuxi,nopoll', 'fuxi,gpu-irqslice',
             'fuxi,gpu-c1-bos', 'fuxi,user-app-noplatform',
+            'fuxi,appstore-', 'fuxi,fpiokit',
         )
         module.require(not any(n.startswith(forbidden_prefixes) for n, _, _ in chosen.props),
                        'source ADT already carries merged switches')
@@ -1669,6 +1846,8 @@ def main():
         report['adt_sweetnull'] = full_sweetnull
         report['gpu_clients'] = gpu_clients_val
         report['user_app_noplatform'] = user_app_noplatform_val
+        report['appstore_proxy'] = appstore_proxy_val
+        report['appstore_ui'] = appstore_ui_val
         report['gpu_aio'] = {
             'fuxigpuncimport': args.gpu_ncimport or '2405960',
             'gpu_bb_recover': args.gpu_bb_recover,
@@ -1728,7 +1907,10 @@ def main():
                 file=sys.stderr,
             )
 
+        pre_cmdline = report.get('command_line')
         original(gargs, report, tree, source_inputs)
+        if pre_cmdline is not None and (appstore_proxy_val or appstore_ui_val):
+            module.require(report.get('command_line') == pre_cmdline, 'AppStore opt-in flags must keep boot-args delta at 0 B')
 
         out_dir = module.STORAGE / gargs.name
         cmdline_final = report.get('command_line', '')
@@ -1761,6 +1943,8 @@ def main():
             camera_dylib=bool(args.camera and args.camera_dylib),
             expected_gpu_c1_bos=gpu_c1_bos_val,
             expected_user_app_noplatform=user_app_noplatform_val,
+            expected_appstore_proxy=appstore_proxy_val,
+            expected_appstore_ui=appstore_ui_val,
         )
         for prop_name in (b'fuxi,modem', b'fuxi,wifi-ap', b'fuxi,atx-fix', b'fuxi,audio-voice',
                           b'fuxi,camera', b'fuxi,camera-back-sensor', b'fuxi,camera-multicam',

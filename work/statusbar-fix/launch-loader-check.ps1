@@ -15,6 +15,9 @@ param(
     [Parameter(ParameterSetName = 'Boot')][ValidatePattern('^[a-f0-9]{64}$')][string]$DylibSha,
     [Parameter(ParameterSetName = 'Boot')][string]$TurnipHybrid,
     [Parameter(ParameterSetName = 'Boot')][ValidatePattern('^[a-f0-9]{64}$')][string]$TurnipSha,
+    [Parameter(ParameterSetName = 'Boot')][switch]$TemporaryEnableFairPlayd,
+    [Parameter(ParameterSetName = 'Boot')][string]$AppStoreDylib,
+    [Parameter(ParameterSetName = 'Boot')][ValidatePattern('^[a-f0-9]{64}$')][string]$AppStoreDylibSha,
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectWifi')][switch]$InspectWifi,
     [Parameter(Mandatory = $true, ParameterSetName = 'WifiLogging')][ValidateSet('enable', 'disable')][string]$WifiLogging,
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectWifiLog')][switch]$InspectWifiLog,
@@ -52,7 +55,8 @@ param(
     [ValidatePattern('^[a-z0-9-]+$')][string]$InstallReport,
     [Parameter(Mandatory = $true, ParameterSetName = 'UpgradePersistent')][switch]$UpgradePersistent,
     [Parameter(Mandatory = $true, ParameterSetName = 'RescueAndroid')][switch]$RescueAndroid,
-    [Parameter(Mandatory = $true, ParameterSetName = 'StartDaily')][ValidatePattern('^chain-[a-z0-9-]+$')][string]$StartDailyChain
+    [Parameter(Mandatory = $true, ParameterSetName = 'StartDaily')][ValidatePattern('^chain-[a-z0-9-]+$')][string]$StartDailyChain,
+    [Parameter(Mandatory = $true, ParameterSetName = 'RemoveAppStoreDylib')][switch]$RemoveAppStoreDylib
 )
 $ErrorActionPreference = 'Stop'
 $workspace = 'D:\xiaomi13\fuxi_ios'
@@ -60,6 +64,8 @@ $storage = Join-Path $workspace 'work\Codex-Xiaomi13-GPU-20261109'
 $phoneLock = Join-Path $workspace 'work\PHONE-LOCK-000'
 $phoneHold = Join-Path $workspace 'work\hybrid-driver\HOLD-PHONE'
 $phonePause = Join-Path $workspace 'work\adsp-battery\hw000\HOLD'
+$fairplaydRescueHold = Join-Path $workspace 'work\statusbar-fix\FAIRPLAYD-RESCUE-HOLD'
+$fairplaydDisabledLaunchdSha = '8bd346db6c54c11a25bfd6b8b45642f1c56f1d02440b8be2633b6ba3ab6505b6'
 $gitBash = 'C:\Program Files\Git\bin\bash.exe'
 $serial = $env:FUXI_ANDROID_SERIAL; if (-not $serial) { throw 'Set FUXI_ANDROID_SERIAL to the phone serial shown by adb devices' }
 $token = "000 loader check $Out pid=$PID $(Get-Date -Format o)"
@@ -76,6 +82,106 @@ function Invoke-Native([scriptblock]$Block) {
 }
 function Test-AndroidBooted {
     "$(Invoke-Native { & adb -s $serial shell getprop sys.boot_completed 2>$null })" -match '^1'
+}
+function Get-LaunchdAfterSha256([string]$GuestLogPath) {
+    if (-not (Test-Path -LiteralPath $GuestLogPath)) { return $null }
+    $last = $null
+    foreach ($line in [System.IO.File]::ReadAllLines($GuestLogPath)) {
+        if ($line -match '^LAUNCHD_AFTER\s+\d+\s+([a-f0-9]{64})\s*$') {
+            $last = $Matches[1].ToLowerInvariant()
+        }
+    }
+    return $last
+}
+function Test-FairPlaydDisabledSafe([int]$ExitCode, [string]$GuestLogPath, [string]$ExpectedSha) {
+    if (-not (Test-Path -LiteralPath $GuestLogPath)) { return $false }
+    $lines = [System.IO.File]::ReadAllLines($GuestLogPath)
+    $afterSha = Get-LaunchdAfterSha256 -GuestLogPath $GuestLogPath
+    if ($afterSha -ne $ExpectedSha) { return $false }
+    if ($ExitCode -eq 0) { return $true }
+    $beforeMatched = $false
+    $stageOk = $false
+    $guestOk = $false
+    $wroteBlocks = $false
+    foreach ($line in $lines) {
+        if ($line -match ('^LAUNCHD_BEFORE\s+\d+\s+' + [regex]::Escape($ExpectedSha) + '\s*$')) { $beforeMatched = $true }
+        if ($line.Trim() -eq 'LAUNCHD_STAGE_SUCCESS') { $stageOk = $true }
+        if ($line.Trim() -eq 'GUEST_OK') { $guestOk = $true }
+        if ($line -match 'WRITE_CHANGED_BLOCKS') { $wroteBlocks = $true }
+    }
+    return ($beforeMatched -and $stageOk -and $guestOk -and (-not $wroteBlocks))
+}
+function Assert-BootLaunchdPrecheck([string]$WorkspacePath, [string]$StoragePath, [string]$LoaderName, [string]$OutName, [bool]$TemporaryEnableFairPlayd) {
+    $payloadPath = Join-Path (Join-Path $StoragePath $LoaderName) 'payload.bin'
+    if (-not (Test-Path -LiteralPath $payloadPath)) {
+        throw "Boot precheck missing loader payload.bin: $payloadPath"
+    }
+    $pyCode = @'
+import importlib.util, json, pathlib, struct, sys
+payload = pathlib.Path(sys.argv[1]).read_bytes()
+adt_py = pathlib.Path(sys.argv[2])
+if payload[:8] != b"SWEETXNU":
+    raise SystemExit("invalid payload.bin magic")
+raw_cmd = payload[72:680]
+cmd_bytes, sep, _ = raw_cmd.partition(b"\0")
+if sep != b"\0":
+    raise SystemExit("unterminated payload.bin cmdline")
+cmdline = cmd_bytes.decode("ascii")
+sweetnoexec_has_fp = False
+for tok in cmdline.split(" "):
+    if tok.startswith("sweetnoexec="):
+        sweetnoexec_has_fp = "fairplayd.H2" in tok.partition("=")[2].split(",")
+adt_off, adt_size = struct.unpack_from("<2Q", payload, 32)
+spec = importlib.util.spec_from_file_location("fuxi_adt", adt_py)
+adt_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(adt_mod)
+tree, consumed = adt_mod.parse(payload[adt_off:adt_off + adt_size])
+if consumed != adt_size:
+    raise SystemExit("invalid embedded ADT size")
+chosen = next((c for c in tree.children if c.name == "chosen"), None)
+if chosen is None:
+    raise SystemExit("missing /chosen in embedded ADT")
+def u32(name):
+    raw = chosen.prop(name)
+    return struct.unpack("<I", raw)[0] if raw is not None and len(raw) == 4 else 0
+print(json.dumps({
+    "has_sweetnoexec_fairplayd": sweetnoexec_has_fp,
+    "appstore_ui": u32("fuxi,appstore-ui"),
+    "appstore_fix": u32("fuxi,appstore-fix"),
+}))
+'@
+    $adtTool = Join-Path $WorkspacePath 'work\adsp-battery\ksrc\tools\adt.py'
+    $jsonOut = Invoke-Native { $pyCode | & python -X utf8 -B - $payloadPath $adtTool }
+    if ($LASTEXITCODE -ne 0 -or -not $jsonOut) {
+        throw "Failed to parse loader payload.bin for launchd precheck: $payloadPath"
+    }
+    $meta = ($jsonOut -join "`n") | ConvertFrom-Json
+    if ($TemporaryEnableFairPlayd) {
+        if ($meta.appstore_ui -eq 0 -or $meta.appstore_fix -ne 0) {
+            throw "TemporaryEnableFairPlayd requires ADT fuxi,appstore-ui != 0 and fuxi,appstore-fix == 0 (got ui=$($meta.appstore_ui), fix=$($meta.appstore_fix))"
+        }
+        return
+    }
+    if ($meta.has_sweetnoexec_fairplayd -and $meta.appstore_ui -eq 0) {
+        if ($OutName -cnotmatch '^[a-z0-9-]+$') {
+            throw "Boot launchd precheck requires lowercase alphanumeric-hyphen -Out name (got '$OutName')"
+        }
+        $precheckDir = Join-Path $WorkspacePath "work\statusbar-fix\inspect-precheck-$OutName"
+        Invoke-Native { & python -X utf8 -B (Join-Path $WorkspacePath 'work\statusbar-fix\inspect-powerlog-state.py') `
+            --output $precheckDir --appstore-baseline }
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Read-only launchd.plist precheck failed; refusing to boot with sweetnoexec=fairplayd.H2'
+        }
+        $statePath = Join-Path $precheckDir 'powerlog-state.json'
+        if (-not (Test-Path -LiteralPath $statePath)) {
+            throw "Missing precheck state file: $statePath"
+        }
+        $state = [System.IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+        $disabled = $state.appstore_baseline.xpc_launchd.jobs.'com.apple.fairplayd.H2'.configuration.Disabled
+        if ($disabled -ne $true) {
+            throw "U-010 guard: com.apple.fairplayd.H2 Disabled is '$disabled' (expected True) under sweetnoexec=fairplayd.H2"
+        }
+    }
 }
 Set-Location $workspace
 if ([bool]$PeerTestPython -ne [bool]$PeerIdentityRuns) { throw 'Provide both the peer-test Python and two reference runs' }
@@ -103,6 +209,11 @@ if ($TurnipHybrid -and $Dylib) { throw 'Stage one library per phone validation' 
 if ($TurnipHybrid -and (Get-FileHash -LiteralPath $TurnipHybrid -Algorithm SHA256).Hash.ToLowerInvariant() -ne $TurnipSha) {
     throw 'Turnip hash differs from the verified build'
 }
+if ([bool]$AppStoreDylib -ne [bool]$AppStoreDylibSha) { throw 'AppStoreDylib and its verified SHA256 must be provided together' }
+if ($AppStoreDylib -and ($Dylib -or $TurnipHybrid)) { throw 'Stage one library per phone validation' }
+if ($AppStoreDylib -and (Get-FileHash -LiteralPath $AppStoreDylib -Algorithm SHA256).Hash.ToLowerInvariant() -ne $AppStoreDylibSha) {
+    throw 'AppStoreDylib hash differs from the verified build'
+}
 if ($RemoveAppName) {
     if ($Out -cnotmatch '^[a-z0-9-]+$') { throw 'Invalid app removal output name' }
     if ($RemoveAppName -cnotmatch '\.app$') { throw 'RemoveAppName must end with lowercase .app' }
@@ -110,6 +221,13 @@ if ($RemoveAppName) {
 }
 foreach ($path in @($phoneLock, $phoneHold, $phonePause)) {
     if (Test-Path -LiteralPath $path) { throw "Phone is reserved: $path" }
+}
+$fairplaydRescueBlockedSets = @(
+    'Boot', 'LaunchdJobEnable', 'DeployChain', 'StartDaily',
+    'DualBoot', 'InstallPersistent', 'ValidatePersistent', 'UpgradePersistent'
+)
+if ((Test-Path -LiteralPath $fairplaydRescueHold) -and ($PSCmdlet.ParameterSetName -in $fairplaydRescueBlockedSets)) {
+    throw "FairPlayd rescue hold active ($fairplaydRescueHold); run -RescueAndroid then -LaunchdJobDisable com.apple.fairplayd.H2 first"
 }
 $running = Get-CimInstance Win32_Process | Where-Object {
     $_.ProcessId -ne $PID -and $_.CommandLine -notmatch 'Get-CimInstance' -and
@@ -228,9 +346,21 @@ if ($LaunchdJobEnable) {
     return
 }
 if ($LaunchdJobDisable) {
+    $disableOut = Join-Path $workspace "work\statusbar-fix\$Out"
+    $disableGuestLog = Join-Path $disableOut 'guest.log'
     Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
-        --disable-job $LaunchdJobDisable --output (Join-Path $workspace "work\statusbar-fix\$Out") }
-    if ($LASTEXITCODE -ne 0) { throw 'Launchd job disable staging failed' }
+        --disable-job $LaunchdJobDisable --output $disableOut }
+    $disableExit = $LASTEXITCODE
+    if ($LaunchdJobDisable -eq 'com.apple.fairplayd.H2') {
+        if (-not (Test-FairPlaydDisabledSafe -ExitCode $disableExit -GuestLogPath $disableGuestLog -ExpectedSha $fairplaydDisabledLaunchdSha)) {
+            throw "Launchd job disable failed or LAUNCHD_AFTER SHA-256 != $fairplaydDisabledLaunchdSha"
+        }
+        if (Test-Path -LiteralPath $fairplaydRescueHold) {
+            Remove-Item -LiteralPath $fairplaydRescueHold
+        }
+    } elseif ($disableExit -ne 0) {
+        throw 'Launchd job disable staging failed'
+    }
     return
 }
 if ($InspectAudio) {
@@ -269,6 +399,13 @@ if ($RemoveAppName) {
     if ($LASTEXITCODE -ne 0) { throw 'App removal staging failed' }
     return
 }
+if ($RemoveAppStoreDylib) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --remove-appstore-dylib --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'AppStore dylib removal staging failed' }
+    return
+}
+Assert-BootLaunchdPrecheck -WorkspacePath $workspace -StoragePath $storage -LoaderName $Loader -OutName $Out -TemporaryEnableFairPlayd ([bool]$TemporaryEnableFairPlayd)
 if ($Dylib) {
     $stageOutput = Join-Path $workspace "work\statusbar-fix\run-$Out-stage"
     Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
@@ -281,59 +418,101 @@ if ($TurnipHybrid) {
         --turnip-hybrid $TurnipHybrid --sha256 $TurnipSha --output $stageOutput }
     if ($LASTEXITCODE -ne 0) { throw 'Turnip staging failed; next boot stopped' }
 }
+if ($AppStoreDylib) {
+    $stageOutput = Join-Path $workspace "work\statusbar-fix\run-$Out-appstore-stage"
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --appstore-dylib $AppStoreDylib --sha256 $AppStoreDylibSha --output $stageOutput }
+    if ($LASTEXITCODE -ne 0) { throw 'AppStore dylib staging failed; next boot stopped' }
+}
+$fairplaydEnabledForRun = $false
+$fairplaydRestoreError = $null
 try {
-    foreach ($path in @($phoneLock, $phoneHold)) {
-        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew)
-        try {
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes($token)
-            $stream.Write($bytes, 0, $bytes.Length)
-        } finally {
-            $stream.Dispose()
+    if ($TemporaryEnableFairPlayd) {
+        $fpEnableOut = Join-Path $workspace "work\statusbar-fix\run-$Out-fp-enable"
+        Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+            --enable-job com.apple.fairplayd.H2 --output $fpEnableOut }
+        if ($LASTEXITCODE -ne 0) { throw 'Temporary FairPlayd enable failed; next boot stopped' }
+        $fairplaydEnabledForRun = $true
+    }
+    try {
+        foreach ($path in @($phoneLock, $phoneHold)) {
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew)
+            try {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($token)
+                $stream.Write($bytes, 0, $bytes.Length)
+            } finally {
+                $stream.Dispose()
+            }
+            $ownedLocks += $path
         }
-        $ownedLocks += $path
-    }
-    if (Test-Path -LiteralPath $phonePause) { throw 'Phone work was paused' }
-    "$(Get-Date -Format HH:mm:ss) PHONE_START $token"
-    if ($PeerTestPython) {
-        $peerJob = Start-Job -ScriptBlock {
-            param($interpreter, $arguments)
-            & $interpreter @arguments
-            if ($LASTEXITCODE -ne 0) { throw 'Windows Bluetooth peer check failed' }
-        } -ArgumentList $PeerTestPython,$peerArgs
-    }
-    & (Join-Path $storage 'boot-exp-v.ps1') -Loader $Loader -Out $Out -Kernel $Kernel `
-        -Seconds $Seconds -Reset $Reset -Verifier 'verify-loader-safety.py' `
-        -TourShots:(-not $FinalFramebuffer) -Framebuffer:$FinalFramebuffer `
-        -FramebufferHeight $FramebufferHeight
-    if (-not (Test-AndroidBooted)) {
-        Push-Location $storage
-        try {
-            Invoke-Native { & python reset-soon.py 1 }
-        } finally {
-            Pop-Location
+        if (Test-Path -LiteralPath $phonePause) { throw 'Phone work was paused' }
+        "$(Get-Date -Format HH:mm:ss) PHONE_START $token"
+        if ($PeerTestPython) {
+            $peerJob = Start-Job -ScriptBlock {
+                param($interpreter, $arguments)
+                & $interpreter @arguments
+                if ($LASTEXITCODE -ne 0) { throw 'Windows Bluetooth peer check failed' }
+            } -ArgumentList $PeerTestPython,$peerArgs
         }
+        & (Join-Path $storage 'boot-exp-v.ps1') -Loader $Loader -Out $Out -Kernel $Kernel `
+            -Seconds $Seconds -Reset $Reset -Verifier 'verify-loader-safety.py' `
+            -TourShots:(-not $FinalFramebuffer) -Framebuffer:$FinalFramebuffer `
+            -FramebufferHeight $FramebufferHeight
+        if (-not (Test-AndroidBooted)) {
+            Push-Location $storage
+            try {
+                Invoke-Native { & python reset-soon.py 1 }
+            } finally {
+                Pop-Location
+            }
+        }
+        $deadline = (Get-Date).AddMinutes(5)
+        do {
+            if (Test-AndroidBooted) { break }
+            if ((Get-Date) -gt $deadline) { throw 'Android did not return after the test' }
+            Start-Sleep -Seconds 5
+        } while ($true)
+        "$(Get-Date -Format HH:mm:ss) LOADER_CHECK_DONE $Out"
+    } finally {
+        if ($peerJob) {
+            if ($peerJob.State -eq 'Running') { Stop-Job -Job $peerJob }
+            $peerState = $peerJob.State
+            Receive-Job -Job $peerJob -ErrorAction Continue
+            Remove-Job -Job $peerJob -Force
+        }
+        foreach ($path in $ownedLocks) {
+            if ((Test-Path -LiteralPath $path) -and
+                [System.IO.File]::ReadAllText($path) -eq $token) {
+                Remove-Item -LiteralPath $path
+            }
+        }
+        "$(Get-Date -Format HH:mm:ss) PHONE_RELEASED $Out"
     }
-    $deadline = (Get-Date).AddMinutes(5)
-    do {
-        if (Test-AndroidBooted) { break }
-        if ((Get-Date) -gt $deadline) { throw 'Android did not return after the test' }
-        Start-Sleep -Seconds 5
-    } while ($true)
-    "$(Get-Date -Format HH:mm:ss) LOADER_CHECK_DONE $Out"
 } finally {
-    if ($peerJob) {
-        if ($peerJob.State -eq 'Running') { Stop-Job -Job $peerJob }
-        $peerState = $peerJob.State
-        Receive-Job -Job $peerJob -ErrorAction Continue
-        Remove-Job -Job $peerJob -Force
-    }
-    foreach ($path in $ownedLocks) {
-        if ((Test-Path -LiteralPath $path) -and
-            [System.IO.File]::ReadAllText($path) -eq $token) {
-            Remove-Item -LiteralPath $path
+    if ($fairplaydEnabledForRun) {
+        $fpDisableOut = Join-Path $workspace "work\statusbar-fix\run-$Out-fp-disable"
+        $fpGuestLog = Join-Path $fpDisableOut 'guest.log'
+        $fpRestored = $false
+        try {
+            Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+                --disable-job com.apple.fairplayd.H2 --output $fpDisableOut }
+            if (Test-FairPlaydDisabledSafe -ExitCode $LASTEXITCODE -GuestLogPath $fpGuestLog -ExpectedSha $fairplaydDisabledLaunchdSha) {
+                $fpRestored = $true
+            } else {
+                $fairplaydRestoreError = "FairPlayd disable failed (exit=$LASTEXITCODE) or LAUNCHD_AFTER SHA-256 != $fairplaydDisabledLaunchdSha"
+            }
+        } catch {
+            $fairplaydRestoreError = $_.Exception.Message
+        }
+        if (-not $fpRestored) {
+            $holdBody = "FAIRPLAYD-RESCUE-HOLD out=$Out time=$(Get-Date -Format o) reason=$fairplaydRestoreError`n"
+            [System.IO.File]::WriteAllText($fairplaydRescueHold, $holdBody, [System.Text.Encoding]::UTF8)
+            Write-Warning "Wrote independent rescue hold $fairplaydRescueHold : $fairplaydRestoreError"
         }
     }
-    "$(Get-Date -Format HH:mm:ss) PHONE_RELEASED $Out"
+}
+if ($fairplaydRestoreError) {
+    throw "Temporary FairPlayd restore failed; rescue hold written to ${fairplaydRescueHold}: $fairplaydRestoreError"
 }
 if ($peerState -and $peerState -ne 'Completed') {
     throw "Windows peer test ended with state $peerState"
