@@ -2,10 +2,10 @@
 
 > 本檔由 `records/tools/build-catalog.py` 產生，請勿手改；改 `records/map.tsv` 或紀錄項目後重新產生。
 
-共 419 筆，時間用台北時間。來源版本為 ws `9f600c44adca`、harness `2ce4028c3984`、ksrc `a00205b328f3`。ksrc 從 `979e2f08` 之後起算。
+共 421 筆，時間用台北時間。來源版本為 ws `297b0e3052c6`、harness `2ce4028c3984`、ksrc `a00205b328f3`。ksrc 從 `979e2f08` 之後起算。
 
 
-## 工作區（D:\xiaomi13\fuxi_ios）：123 筆
+## 工作區（D:\xiaomi13\fuxi_ios）：125 筆
 
 | 提交 | 時間 | 說明 | 紀錄 |
 |---|---|---|---|
@@ -132,6 +132,8 @@
 | `638f1a3` | 2026-11-26 23:19 | Task M-3: fix U-031 dangling T-062 reference | [T-060](../items/T-tools.zh-TW.md#t-060-修復紀錄庫的維護驗證與匯出) |
 | `488a20a` | 2026-11-26 23:20 | Task M-3: sync records catalog for 638f1a3 and 746 tracked files | [T-060](../items/T-tools.zh-TW.md#t-060-修復紀錄庫的維護驗證與匯出) |
 | `9f600c4` | 2026-11-27 00:38 | records: add U-032 (boot #473 T4) and update G-054/G-053 (Task C-3 & hybrid CI) | [T-060](../items/T-tools.zh-TW.md#t-060-修復紀錄庫的維護驗證與匯出) |
+| `b65656f` | 2026-11-27 00:39 | sync records catalog for 9f600c4 | [T-060](../items/T-tools.zh-TW.md#t-060-修復紀錄庫的維護驗證與匯出) |
+| `297b0e3` | 2026-11-27 00:49 | records: fix G-054 CI status, line conventions, and U-032 path clarity | [T-060](../items/T-tools.zh-TW.md#t-060-修復紀錄庫的維護驗證與匯出) |
 
 ## harness（work/adsp-battery/harness）：170 筆
 

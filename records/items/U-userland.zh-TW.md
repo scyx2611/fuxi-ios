@@ -927,11 +927,11 @@
   - `work/localbuild/b023-appstore-t4-1126/t4-offline-verification.md` 記載 `13/13` 項 `T4` 離線配置、ADT 長度與安全邊界驗收全數 PASS。
 - **驗證紀錄**：
   - **三階段 `guest.log`／`write.log` 還原與鎖驗證**：
-    - `work/statusbar-fix/clean-b023-t4-dylib-1126/guest.log`（`2,319 B`, `66 L`）：`APPSTORE_DYLIB_REMOVED /dst/usr/local/lib/fuxi/libfuxi-appstore.dylib`、`FSCK_before/after/final OK`、`PRE_OK 5 / WRITE_OK 5`。
-    - `work/statusbar-fix/run-run-b023-appstore-native-t4-1126-fp-enable/guest.log`（`2,441 B`, `66 L`）：`LAUNCHD_BEFORE 840840 3149f57a… -> LAUNCHD_AFTER 840836 a83d4f12…`、`FSCK_final OK`、`LAUNCHD_ENABLE_STAGE_SUCCESS`。
-    - `work/statusbar-fix/run-run-b023-appstore-native-t4-1126-fp-disable/guest.log`（`2,492 B`, `67 L`）：`LAUNCHD_BEFORE 840836 a83d4f12… -> LAUNCHD_AFTER 840840 8bd346db6c54c11a25bfd6b8b45642f1c56f1d02440b8be2633b6ba3ab6505b6`、`FSCK_final OK`、`LAUNCHD_STAGE_SUCCESS`、`PRE_OK 7 / WRITE_OK 7`（`sb-list.txt` 與 `sb-undo-list.txt` 7 區塊雜湊完全對稱），且 `FAIRPLAYD-RESCUE-HOLD=False`。
+    - `work/statusbar-fix/clean-b023-t4-dylib-1126/guest.log`（`2,319 B`, `66 LF 行` / `splitlines()=130`）：`APPSTORE_DYLIB_REMOVED /dst/usr/local/lib/fuxi/libfuxi-appstore.dylib`、`FSCK_before/after/final OK`、`PRE_OK 5 / WRITE_OK 5`。
+    - `work/statusbar-fix/run-run-b023-appstore-native-t4-1126-fp-enable/guest.log`（`2,441 B`, `66 LF 行` / `splitlines()=130`）：`LAUNCHD_BEFORE 840840 3149f57a… -> LAUNCHD_AFTER 840836 a83d4f12…`、`FSCK_final OK`、`LAUNCHD_ENABLE_STAGE_SUCCESS`。
+    - `work/statusbar-fix/run-run-b023-appstore-native-t4-1126-fp-disable/guest.log`（`2,492 B`, `67 LF 行` / `splitlines()=132`）：`LAUNCHD_BEFORE 840836 a83d4f12… -> LAUNCHD_AFTER 840840 8bd346db6c54c11a25bfd6b8b45642f1c56f1d02440b8be2633b6ba3ab6505b6`、`FSCK_final OK`、`LAUNCHD_STAGE_SUCCESS`、`PRE_OK 7 / WRITE_OK 7`（`sb-list.txt` 與 `sb-undo-list.txt` 7 區塊雜湊完全對稱），且 `FAIRPLAYD-RESCUE-HOLD=False`。
   - **`boot #473` 實機日誌（`boot.log` 與完整 `mtd` `console.txt`）**：
-    - `work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-native-t4-1126/boot.log`：`763,314 B`（`\n=10,219` / `splitlines()=10,224`，SHA-256 `0922ababbc0a8bc5fc3475551a2267082fc4ec6da36c33bab6f1faa384e20b5a`）；同層 `run-b023-appstore-native-t4-1126-monitor.log`（`60,459 B`, `587 L`, `c017bfbe…`, `monitor_exit=0`）。
+    - `work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-native-t4-1126/boot.log`：`763,314 B`（`\n=10,219` / `splitlines()=10,224`，SHA-256 `0922ababbc0a8bc5fc3475551a2267082fc4ec6da36c33bab6f1faa384e20b5a`）；同層外側之 `work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-native-t4-1126-monitor.log`（`60,459 B`, `587 L`, `c017bfbe…`, `monitor_exit=0`）。
     - `work/adsp-battery/fuxilog/20261126-235259/console.txt`：**`909,132 B`**，雙行數口徑：**`\n=11,661` / `splitlines()=11,666`**（含 5 個獨立 `\r`），SHA-256 `9dfc161c26f384f54a9e6e341ad2309a34302e1b3175a9d156440c1d30d2cdfc`。
     - 穩定性統計：`panic=0`、`REAL_FAULTS=0`、`DEV_LOST=0`；`CRASH` 全檔僅 `driverkitd:1`（`L1184-1187`, `sig 9`）與 `AegirPoster:38`（`L7490..L11633`, `sig 6`，既有背景鎖定畫面 extension 問題）；`AppStore`/`SpringBoard`/`backboardd`/`fairplayd.H2`/`appstored`/`itunesstored`/`amsaccountsd`/`storekitd`/`adid`/`absd` 皆 **`0` 崩潰**。
     - 原生 FairPlay／Store daemon 精確行號（`splitlines()` 口徑，括號附 `\n` 行號）：
