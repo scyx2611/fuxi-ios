@@ -899,8 +899,51 @@
     - 事件主行口徑（`|AppStore| APSD `）：`INIT=3`、`INST=15`、`AMS_DONE=80`（實測 **`http=200: 80`、`non200=0`**）、`PROXY_TOK=44`、`PROXY_RW=42`、`PROXY_IMG=66`。
     - 含 `APSD+` 續行總行數口徑：`AMS_DONE=156` 行（80 主行 + 76 續行）、`PROXY_RW=153` 行（42 主行 + 111 續行）、`PROXY_IMG=67` 行（66 主行 + 1 續行）。
   - **新發現待查問題**：實機操作期間使用者回報頁面移動／多工切換器卡片偶發閃現黑色矩形條（實拍存於對話附件 `media_1795703878037_71d095e2.jpg`），已獨立立案於 **`G-054`**。
-- **參考來源**：`B-022`、`U-026`、`G-054`、`T-048`、`T-052`、`ws: a155a58`、`work/adsp-battery/prepare-aio-loader.py`、`work/statusbar-fix/launch-loader-check.ps1`、`work/statusbar-fix/phone-readthrough.py`、`work/localbuild/verify-sb-shape.py`。
+- **參考來源**：`B-022`、`U-026`、`U-032`、`G-054`、`T-048`、`T-052`、`ws: a155a58`、`work/adsp-battery/prepare-aio-loader.py`、`work/statusbar-fix/launch-loader-check.ps1`、`work/statusbar-fix/phone-readthrough.py`、`work/localbuild/verify-sb-shape.py`。
 - **結論／未完成**：
   - `T0` 唯讀基線與 `boot #472` `AppStore` UI Route 2 瀏覽／搜尋／登入及 `APSD` 代理請求（`http=200` 零非 200 錯誤）已於實機驗證通過；`/usr/local/lib/fuxi/libfuxi-appstore.dylib`（`4d0f5473…`）暫留測試機待後續推進或清理。
-  - 後續待辦：① 修正自動化點擊座標避開 `Podcasts`（不影響手動實證）；② 續推原生/完整 `T4` 安裝／登入鏈路（`b023-appstore-t4-1126` 隔離線）；③ 針對 `#472` 回報之頁動／多工黑塊依 **`G-054`** 專門定位。
+  - 後續待辦：① 修正自動化點擊座標避開 `Podcasts`（不影響手動實證）；② 續推原生/完整 `T4` 安裝／登入鏈路（見 **`U-032`** `boot #473` 實測紀錄）；③ 針對 `#472` 回報之頁動／多工黑塊依 **`G-054`** 專門定位。
 - **出處**：`work/statusbar-fix/inspect-b023-appstore-baseline-1126/`、`work/statusbar-fix/inspect-precheck-run-b023-appstore-proxy-t1-1126/`、`work/statusbar-fix/run-run-b023-appstore-proxy-t1-1126-appstore-stage/`、`work/Codex-Xiaomi13-GPU-20261109/kernel-local-b023-appstore-ui-9g-artifact/`、`work/Codex-Xiaomi13-GPU-20261109/native-b023-appstore-proxy-tap-1126-loader/`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-proxy-t1-1126/`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`、`work/localbuild/b023-appstore-ui-1126/artifact/libfuxi-appstore.dylib`。
+
+### U-032 B-023 AppStore 原生鏈路 T4 探針實機驗證（boot #473：`FairPlayIOKit`／`fairplayd.H2`／`adid`／`absd` 常駐過關與 Mescal 斷點定位）
+
+- **日期**：2026-11-26（台北時間）
+- **狀態**：`B-023` AppStore 原生鏈路 `T4` 探針（`boot #473`）已完成安全暫啟與完整退場還原（`FSCK_final OK`、`FAIRPLAYD-RESCUE-HOLD=False`）；實證 `FairPlayIOKit`、`fairplayd.H2` 單次啟動常駐與 `adid`/`absd`/Store daemon `AKS` 均 `0x0`，純原生 `AppStore` 畫面顯示「無法連接 App Store」，交叉對比定位斷點落於 `AMSMediaTokenService`/`AMSMescalFairPlay`（正推進 `T5` 混合探針）；屬 `B-023` 隔離線（未併入 `B-022` 常駐日常 `boot_a`）
+- **開關**：`--appstore-proxy 0 --appstore-ui 1`、`--adt-sweetnull Preferences,AppStore,fairplayd.H2,appstored,itunesstored,amsaccountsd,absd,adid,installd,storekitd`、`--allow-exec vmd --allow-exec fairplayd.H2`（`fuxi,appstore-ui=1`、`fuxi,inject=382` `bit 10=0`、`fuxi,sweetnull` `121 B <= 127 B`、`boot-args` `532 B <= 607 B` 無 `sweetnoexec=`、`fuxi,fpiokit=None` 由 `0134` `fuxi_fpiokit_enabled()` 聯集啟用）；前置移除 `/usr/local/lib/fuxi/libfuxi-appstore.dylib`，並以 `fp-enable` / `fp-disable` 僅於 RAM 開機期間暫啟 `com.apple.fairplayd.H2`
+- **問題／現象**：
+  1. `U-031`（`boot #472`）驗證了 Route 2 代理路徑可進入商店介面，但測試機 rootfs 尚留存 `/usr/local/lib/fuxi/libfuxi-appstore.dylib`（`4d0f5473…`），且尚未獨立驗證純原生無代理路徑下 `FairPlayIOKit`、`fairplayd.H2`、`adid`、`absd` 與 Store daemon 能否穩定啟動而不重啟迴圈或觸發保護機制。
+  2. `boot #473` 移除代理 dylib 並暫啟 `com.apple.fairplayd.H2` 後，使用者實機點擊原生 `AppStore` 畫面仍顯示「無法連接 App Store」，須結合前後日誌精確定位實際阻斷層級。
+- **根因**：
+  1. `boot #473` 實測證明問題**不在** `fairplayd.H2`、`adid`、`absd` 啟動或 `FairPlayIOKit`（`0x15/0x16/0x17/0x1a`）／`AKS` 呼叫：`fairplayd.H2` 全程僅 `exec` 1 次無早退重啟迴圈，上述呼叫全數回傳 `0x0`，同時排除了 `0135`（`IOPlatformSerialNumber`）作為當前初始化或首頁連線阻礙。
+  2. 由於 `boot #473` 未注入 `libfuxi-appstore.dylib`，`console.txt` 本身不含 `APSD`、`AMSMediaTokenService`、`AMSMescalFairPlay` 或「無法連接 App Store」文字紀錄；經交叉對比 `boot #472`（`U-031`、`console.txt` `L9972-10047`）與歷史無代理純診斷日誌 `native-hw000-appstore-diag-r4b-1123`（`boot.log` `L6408-6555`, `L6927`），證實 `bag.xml` 與 `ios-appstore.jetpack` 無需代理即為 `http=200`，斷點精確落於 **`AMSMediaTokenService.fetchMediaToken` → `AMSMescalFairPlay.initWithMescalType(1)`（`AMSErrorDomain:12 Mescal Failed`）與 `sf-api-token-service.itunes.apple.com/apiToken`（`http=401`）**，致使 `amp-api*.apps.apple.com` 首頁請求無法發出。
+- **做法**：
+  1. **前置清理（`clean-b023-t4-dylib-1126`）**：透過 QEMU/HFS+ 安全移除 `/usr/local/lib/fuxi/libfuxi-appstore.dylib`（`PRE_OK 5 / WRITE_OK 5`、`FSCK_final OK`）。
+  2. **暫啟與實機開機（`fp-enable` → `boot #473`）**：於 `fp-enable` 將 `com.apple.fairplayd.H2` `Disabled` 暫設為未停用狀態（`LAUNCHD_AFTER 840836 a83d4f12…`、`FSCK_final OK`），以 `native-b023-appstore-native-t4-1126-loader`（沿用 `kernel-local-b023-appstore-ui-9g-artifact` `6a0efbbf…`）進行 RAM 暫時開機約 297 秒並取回完整 `mtd` `console.txt`。
+  3. **對稱退場還原（`fp-disable`）**：回 Android 前自動執行 `fp-disable` 還原 `com.apple.fairplayd.H2` 為 `Disabled=True`（`PRE_OK 7 / WRITE_OK 7`、`LAUNCHD_AFTER 840840 8bd346db…`、`FSCK_final OK`），並確認 `FAIRPLAYD-RESCUE-HOLD` 與三把手機鎖皆未觸發／無殘留。
+- **復現**：
+  - 隔離設計與離線建置日誌：`work/localbuild/b023-appstore-t4-1126/`（`t4-build.log` 記載 `prepare-aio-loader.py` 參數、`boot-args = 532 B`、`fuxi,sweetnull = 121 B`）。
+  - Loader 與核心產物：`work/Codex-Xiaomi13-GPU-20261109/native-b023-appstore-native-t4-1126-loader/`（基於 `native-dly-ram9g-rtctorch-sb127-loader` 與 `kernel-local-b023-appstore-ui-9g-artifact` `6a0efbbf…`；`boot.img` `20,512,768 B`, `95047dc9…`、`payload.bin` `19,439,104 B`, `ca0df958…`、`private.adt` `72,004 B`, `bbc48b97…`），經 `launch-loader-check.ps1` 暫時開機（不更動常駐 `boot_a`/`boot_b`）。
+- **主機測試**：
+  - `work/localbuild/b023-appstore-t4-1126/t4-offline-verification.md` 記載 `13/13` 項 `T4` 離線配置、ADT 長度與安全邊界驗收全數 PASS。
+- **驗證紀錄**：
+  - **三階段 `guest.log`／`write.log` 還原與鎖驗證**：
+    - `work/statusbar-fix/clean-b023-t4-dylib-1126/guest.log`（`2,319 B`, `66 L`）：`APPSTORE_DYLIB_REMOVED /dst/usr/local/lib/fuxi/libfuxi-appstore.dylib`、`FSCK_before/after/final OK`、`PRE_OK 5 / WRITE_OK 5`。
+    - `work/statusbar-fix/run-run-b023-appstore-native-t4-1126-fp-enable/guest.log`（`2,441 B`, `66 L`）：`LAUNCHD_BEFORE 840840 3149f57a… -> LAUNCHD_AFTER 840836 a83d4f12…`、`FSCK_final OK`、`LAUNCHD_ENABLE_STAGE_SUCCESS`。
+    - `work/statusbar-fix/run-run-b023-appstore-native-t4-1126-fp-disable/guest.log`（`2,492 B`, `67 L`）：`LAUNCHD_BEFORE 840836 a83d4f12… -> LAUNCHD_AFTER 840840 8bd346db6c54c11a25bfd6b8b45642f1c56f1d02440b8be2633b6ba3ab6505b6`、`FSCK_final OK`、`LAUNCHD_STAGE_SUCCESS`、`PRE_OK 7 / WRITE_OK 7`（`sb-list.txt` 與 `sb-undo-list.txt` 7 區塊雜湊完全對稱），且 `FAIRPLAYD-RESCUE-HOLD=False`。
+  - **`boot #473` 實機日誌（`boot.log` 與完整 `mtd` `console.txt`）**：
+    - `work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-native-t4-1126/boot.log`：`763,314 B`（`\n=10,219` / `splitlines()=10,224`，SHA-256 `0922ababbc0a8bc5fc3475551a2267082fc4ec6da36c33bab6f1faa384e20b5a`）；同層 `run-b023-appstore-native-t4-1126-monitor.log`（`60,459 B`, `587 L`, `c017bfbe…`, `monitor_exit=0`）。
+    - `work/adsp-battery/fuxilog/20261126-235259/console.txt`：**`909,132 B`**，雙行數口徑：**`\n=11,661` / `splitlines()=11,666`**（含 5 個獨立 `\r`），SHA-256 `9dfc161c26f384f54a9e6e341ad2309a34302e1b3175a9d156440c1d30d2cdfc`。
+    - 穩定性統計：`panic=0`、`REAL_FAULTS=0`、`DEV_LOST=0`；`CRASH` 全檔僅 `driverkitd:1`（`L1184-1187`, `sig 9`）與 `AegirPoster:38`（`L7490..L11633`, `sig 6`，既有背景鎖定畫面 extension 問題）；`AppStore`/`SpringBoard`/`backboardd`/`fairplayd.H2`/`appstored`/`itunesstored`/`amsaccountsd`/`storekitd`/`adid`/`absd` 皆 **`0` 崩潰**。
+    - 原生 FairPlay／Store daemon 精確行號（`splitlines()` 口徑，括號附 `\n` 行號）：
+      - `L74`（74）：`FUXI FPIOKIT: com_apple_driver_FairPlayIOKit registered`
+      - `L554`（554）：`FUXI INJECT: fxinj=382: ...`（無 `libfuxi-appstore.dylib` 注入）
+      - `L1078`（1078）：`exec fairplayd.H2`（全程僅此 **1 次**，0 次重啟迴圈／0 次 `EXIT`）
+      - `L1369-1371`（1369–1371）：`FUXI FPIOKIT: fairplayd.H2 sel 0x16/0x17/0x15 -> 0x0`
+      - `L5870`（5867）：`exec adid`，隨後 `L6110-6112`（6107–6109）`FUXI FPIOKIT: adid sel 0x16/0x17/0x1a -> 0x0`
+      - `L6229`（6226）：`exec absd`（無 `AKS`/`FPIOKIT` 呼叫）
+      - `L9219`（9214）：`exec AppStore`（`L9259-9260` `AppStore AKS sel 0/7 -> 0x0`、`L9275-9279 gate deny AppStore`）
+      - Store/Auth daemon `AKS` 全回 `0x0`：`appstored`（`L2542 exec`, `L4033/4100 AKS sel 17/7 -> 0x0`）、`itunesstored`（`L2678 exec`, `L2737-2738 AKS sel 0/7 -> 0x0`）、`amsaccountsd`（`L2374 exec`, `L3620-3621 AKS sel 0/7 -> 0x0`）、`storekitd`（`L2372 exec`, `L6342-6343 AKS sel 0/7 -> 0x0`）。
+  - **實機畫面與交叉定位證據**：使用者實機點擊原生 `AppStore` 顯示「無法連接 App Store」（`L9312..9585` 重試點擊無新 `FPIOKIT`/`AKS` 推進）。誠實註記：`boot #473` `console.txt` 本身不含 `AMSMediaTokenService`／`AMSMescalFairPlay`／`APSD` 字串（0 hits）；該斷點係交叉對比 `boot #472`（`U-031`）與歷史無代理純診斷日誌 `work/Codex-Xiaomi13-GPU-20261109/native-hw000-appstore-diag-r4b-1123/boot.log`（`L6408-6555`, `L6927`）所得定位。
+- **參考來源**：`U-031`、`B-022`、`T-048`、`T-052`、`work/Codex-Xiaomi13-GPU-20261109/native-hw000-appstore-diag-r4b-1123/boot.log`。
+- **結論／未完成**：`boot #473`（`T4`）以零殘留、零故障驗證純原生環境下 `FairPlayIOKit`、`fairplayd.H2` 單次常駐、`adid`、`absd` 與 Store daemon `AKS` 皆已過關（排除 `0135` 作為當前首頁阻礙），並交叉鎖定剩餘斷點在 `AMSMediaTokenService.fetchMediaToken` / `AMSMescalFairPlay.initWithMescalType(1)` / `sf-api-token-service.itunes.apple.com/apiToken`（`http=401`）；後續正於 `work/localbuild/b023-appstore-t5-1126/` 推進 `T5` 混合探針（保留 `AppStore` Route 2 `PROXY_TOK`+`PROXY_RW` 並同步啟用 `0134` `FairPlayIOKit` + `fairplayd.H2` 及唯讀診斷）。
+- **出處**：`work/localbuild/b023-appstore-t4-1126/`、`work/statusbar-fix/clean-b023-t4-dylib-1126/`、`work/statusbar-fix/run-run-b023-appstore-native-t4-1126-fp-enable/`、`work/statusbar-fix/run-run-b023-appstore-native-t4-1126-fp-disable/`、`work/Codex-Xiaomi13-GPU-20261109/native-b023-appstore-native-t4-1126-loader/`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-native-t4-1126/`、`work/adsp-battery/fuxilog/20261126-235259/console.txt`。

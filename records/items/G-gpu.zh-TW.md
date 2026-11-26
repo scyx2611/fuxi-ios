@@ -933,31 +933,49 @@
   - **上架與還原對稱實證（`stage-b023-m43v3-p12da-1126` / `stage-b023-restore-stick14-1126`）**：上架寫入 `FuxiNativeMetal`（`102d52d6… -> 3f64a023…`）與 `libnative_metal_bridge.dylib`（`31a4cd97… -> 0539008e…`，`m43v3` 版本，不同於 `0029` CI 的 `c07c1a57…`），`PRE_OK 24 / WRITE_OK 24 / FSCK_before/after/final OK`；實驗後還原 `PRE_OK 21 / WRITE_OK 21 / FSCK_before/after/final OK`，兩檔雜湊精確回寫至 `Stick-14`（`102d52d6ec27e55f75276ed6f16c446d81d416e2943cc2d67260848baecbe657` 與 `31a4cd9718b37bde339101eb9539973628ac8ecc7c709be54d351db478ba9249`）。
   - **`boot #471` 實測日誌與截圖（`work/Codex-Xiaomi13-GPU-20261109/run-b023-maps-p12da-1126/`）**：`boot.log` `757,012 B`（`\n=10,085`、含 `2` 獨立 `\r`，`splitlines()=10,087` 行；SHA-256 `7389e04254fa427d00e0ac0a4e9b74a290dd379a183b5f5402bcf640750c5a4c`），全程 `panic=0`、`REAL_FAULTS=0`、`DEV_LOST=0`、GPU／ath12k／BT `dropped=0`、`stuck=0`、`present_reading=0/0/0`；`L9430 gate allow Maps`、`L10025 cb=600 rpasses=202 draws=138748 surf_pass=200 resolve_surf_passes=198 turnip_res(nat/sh/dc)=198/0/0`；`L10074 backboardd frames=1402 gpu_ms=3.985 late=277 failures=0 hz=12.70`（開 Maps 前 `78.97 Hz` → 開後 `16.92`/`18.17`/`12.70 Hz`）；`L9922 SWEET FB: blend_stats frames=188 diff=92 hit=1402 miss=108 snap_us=3770 comp_us=2747 wc_us=3504`（三項合計 `10,021 us` ≈ `10.02 ms/frame`）。目錄含 `6` 張 `1080×2400` 截圖，`framebuffer-shot3-step.png`（`1,026,545 B`, `50bfafbb…`）與 `framebuffer-shot3-step-b.png`（`672,211 B`, `546299fc…`）經實地視覺檢視確認已呈現台灣新北真實向量地圖實景，惟路網邊線帶黑色虛線描邊且 `shot3-step-b.png` 底部約 1/4 全黑。
   - **CI `#45838039605` 實機狀態**：已下載驗簽完畢，本輪尚未上機實測。
-- **參考來源**：`G-052`、`U-026`、`work/localbuild/b023-m2v-bofix-1126/`、`work/localbuild/b023-gpu-scanout-phaseb-1126/`。
-- **結論／未完成**：`#471` 證實 Phase 12D-A 雙層合成可繪出真實 Maps 向量地圖且已對稱還原 `Stick-14` 未影響日常環境，惟存在 `12.70 Hz`（CPU blend ~`10.02 ms/frame`）、路網黑線描邊與底部 1/4 黑塊待改善；macOS CI `#45838039605`（`0029` BO 修補）產物已備妥，待後續獨立隔離測試驗證是否徹底消除 `#469` 之 4096 BO 洩漏。
+- **參考來源**：`G-052`、`G-054`、`U-026`、`work/localbuild/b023-m2v-bofix-1126/`、`work/localbuild/b023-gpu-scanout-phaseb-1126/`。
+- **結論／未完成**：`#471` 證實 Phase 12D-A 雙層合成可繪出真實 Maps 向量地圖且已對稱還原 `Stick-14` 未影響日常環境，惟存在 `12.70 Hz`（CPU blend ~`10.02 ms/frame`）與路網黑線描邊待改善（`shot3-step-b.png` 底部 1/4 全黑已於 `G-054` 釐清屬 `probe.c:1175-1201` + `fuxi_framebuffer.py:6-31` `512 B` 跨幀／息屏讀屏假象，而路網描邊為 `m2v_warn=29`/`0028` sRGB 實質瑕疵）；macOS CI `#45838039605`（`0029` BO 修補）產物已備妥，待後續獨立隔離測試驗證是否徹底消除 `#469` 之 4096 BO 洩漏。
 - **出處**：`work/Codex-Xiaomi13-GPU-20261109/kernel-local-b023-p12da-9g-artifact/`、`work/Codex-Xiaomi13-GPU-20261109/native-b023-p12da-maps-tap-1126-loader/`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-maps-p12da-1126/`、`work/statusbar-fix/stage-b023-m43v3-p12da-1126/`、`work/statusbar-fix/stage-b023-restore-stick14-1126/`、`work/Codex-Xiaomi13-GPU-20261109/nativemetal-ci-0029-45838039605/`。
 
-### G-054 未解決問題：頁面移動與多工切換器卡片偶發閃現黑色矩形條（#472 實機回報）
+### G-054 B-023 多工切換卡片頂部 13.2% 黑塊根因定案（clear_reach + 0002-fresh-zero + Turnip DRM_FORMAT_MOD_LINEAR 雙門檻）、#471 黑邊切割與雙 macOS CI 建置中
 
 - **日期**：2026-11-26（台北時間）
-- **狀態**：未解決（已獨立立案；於 `boot #472` 實機回報，預留隔離工作區 `work/localbuild/b023-gpu-blacktile-1126/` 待專門定位與復現）
-- **開關**：`boot #472`（`native-b023-appstore-proxy-tap-1126-loader` / `kernel-local-b023-appstore-ui-9g-artifact`）測試現場出現；尚待比對是否僅於特定核心／負載／合成路徑復現
-- **問題／現象**：`boot #472`（`B-023` AppStore UI Route 2 手動測試）期間，使用者於桌面／App 頁面移動以及進入多工切換器（App Switcher）滑動卡片時，實機觀察到卡片與畫面邊緣偶發閃現黑色矩形條（實拍留存於對話附件 `media_1795703878037_71d095e2.jpg`）。
-- **根因**：尚未定論（待專門離線剖析與實機二分復現）。經查閱 `boot #472` 完整 `mtd` 日誌（`work/adsp-battery/fuxilog/20261126-224305/console.txt`），雖未見致命 GPU crash／`DeviceLost`，但同期實測存在 4 項與合成／Metal／Scanout 相關的顯著異常壓力線索（詳見「驗證紀錄」）；以上線索是否直接造成黑色矩形條尚不得僅憑日誌臆測因果。
-- **做法**：依鑑識紀錄原則，於 `G-054` 獨立立案登錄實機現象與 `console.txt` 關聯線索，預留隔離工作區 `work/localbuild/b023-gpu-blacktile-1126/` 供後續 GPU 除錯專線進行離線剖析、最小復現與修復驗證，不混入 `U-031`（AppStore 代理驗證）或已定案 `B-022` 紀錄。
-- **復現**：依 `boot #472` 環境（`kernel-local-b023-appstore-ui-9g-artifact`、`native-b023-appstore-proxy-tap-1126-loader`）開機進入桌面／`AppStore` 後快速滑動頁面或上滑開啟多工切換器卡片，觀察卡片與頁面移動期間畫面是否偶發閃現黑色矩形條（同時須與 `B-022` 日常基線比對是否受 `kernel-local-b023-appstore-ui-9g-artifact` 或高負載影響）。
-- **主機測試**：尚未建立針對此黑條現象之專門主機回歸測試（待定位根因後補入）。
+- **狀態**：根因已離線定案（Task C-3），雙補丁已推送至遠端 `scyx2611/fuxi-metal-frontend-check-20261108` 分支 `codex/hybrid-lane`（`d035a72d…`）並觸發雙 macOS CI 建置中（觀察時間 `2026-11-26T16:36:03Z`：Run `45858992163` `queued`、Run `45858992261` `in_progress`），待 CI 產物下載與實機驗證；屬 `B-023` 隔離線（未併入 `B-022` 日常版）
+- **開關**：遠端 `scyx2611/fuxi-metal-frontend-check-20261108` 分支 `codex/hybrid-lane` 導入 `FUXI_M2V_DONT_CARE_PRESERVE`（`OnceLock<bool>`，預設 `false`）與 `dont_care_cleared_attachments()` / `dont_care_preserved_attachments()` 診斷，並於 Turnip 放行 `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT`（`DRM_FORMAT_MOD_LINEAR`）+ `HOST_ALLOCATION_BIT_EXT` 搭配 `need_y2_align = true`；現場復現來自 `boot #472`（`native-b023-appstore-proxy-tap-1126-loader` / `kernel-local-b023-appstore-ui-9g-artifact`）
+- **問題／現象**：
+  1. **`boot #472` 頁面移動／多工卡片頂部 `13.2%` 黑塊**：實機進入多工切換器滑動卡片時（實拍附件 `media_1795703878037_71d095e2.jpg`），中央卡片高 `≈ 740 px`（`y ≈ 152..892`），頂緣至過渡線（`y = 250`）出現高 `≈ 98 px`（`98 / 740 ≈ 13.2%`）純黑條，嚴格受限於卡片圓角內部且綠色電量 `100` 疊畫其上，背景桌布無 `U-026` 發紫。
+  2. **`boot #471` 截圖底部黑邊 vs 路網描邊**：`G-053`（`run-b023-maps-p12da-1126`）曾觀察到 `framebuffer-shot3-step-b.png` 底部約 1/4 全黑與道路／鐵路黑色虛線描邊，須釐清兩者是否與 `#472` 黑塊同源。
+- **根因**：
+  1. **Userland 雙門檻與 `clear_reach`／`0002-fresh-zero`（定案 `#472` 頂部 `13.2%` 黑塊，已排除核心 Scanout）**：
+     - **`console.txt` 排除核心 Scanout**：`L12315` 上滑進入多工切換後，至 `L15892`（含 `L15886` `FUXI SCANOUT: summary frames=12000 GPU=11282 CPU=718`）`CPU` fallback 維持 `718`（新增 **`0`** 幀），`L15817` `presents GPU 619 CPU 0`；且 `0029` CI 下載（`22:44:42`）晚於 `boot #472` 寫出（`22:43:05`），`boot #472` 實跑 `Stick-14`。
+     - **`clear_reach::PassReach::of` + `0002-fresh-zero`**：原版 `clear_reach::PassReach::of` 在單層 render pass 同時含 `Clear + Store` 附件與非 memoryless stored `DontCare` 附件時，一律回傳 `PassReach::Every`，導致 `render.rs` 跳過 `DrawnArea::tiles` 並透過 `dont_care_loads` 將整張 render area（含未觸及區域）清成 `(0,0,0,0)` 純黑；配合 `0002-fresh-zero`（將 iOS 新建未寫入之 `Private` 紋理預設清為全零，取代原本壓縮洋紅 pattern）即在視窗圓角內呈現純黑矩形條。
+     - **Turnip `DRM_FORMAT_MOD_LINEAR` 雙門檻**：Turnip `tu_formats.cc:747` 拒收 `HOST_ALLOCATION_BIT_EXT` 搭配 `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT`（`DRM_FORMAT_MOD_LINEAR`），同時 `fd6_layout.c:287-288` 尾端 `align(nblocksy, 4)` 造成 `slice->size0 > height * row_pitch` 被 M2V `padded_alone` 拒絕，使 `backboardd` 大量線性紋理退回 `Storage::Shadow`（實測 `ERROR_FORMAT_NOT` `53` 筆、`shadow made` `57` 筆、`shadow copy-ins` `34,000`）。
+  2. **`#471` 底部黑邊與路網描邊切割**：
+     - `framebuffer-shot3-step-b.png`（`672,211 B`）底部 1/4 全黑於 `byte offset = 7,616,000 = 14875 * 512`（`y=1762, x=1040`）精確切斷為全零，源於 `ios-fuxi/tools/fuxi_framebuffer.py:6-31` 以 USB request `0x4e` 每次讀取最多 `512 B`（全幅 `10,368,000 B` = `20,250` 封包、費時 ~14.5s）且 `ksrc:shim/fuxi-probe/probe.c:1175-1201` 於 `off == 0` 鎖存 `latched_base` 時不暫停核心／GPU 翻轉，屬跨幀／息屏讀屏假象。
+     - 相對地，`boot.log:10023` `|Maps| FUXI MAPS DIAG` 記錄 `msaa(p/max)=198/4`、`vkpipe_fail=0`、`null_draws=0`、**`m2v_warn=29`**、`turnip_res(nat/sh/dc)=198/0/0`，確認 Maps 路網黑色虛線描邊屬 Userland `0028` Turnip 原生 `BLIT_EVENT_STORE` sRGB 實質瑕疵，與 `#472` 黑塊及 `probe.c` 假象獨立。
+- **做法**：
+  1. **離線根因剖析與修補開發（`work/localbuild/b023-gpu-blacktile-1126/`）**：產出 `ROOT_CAUSE_ANALYSIS.zh-TW.md`（`21,121 B`, `1b8f245e…`）與 `COMBINED_DEVICE_VALIDATION_PLAN.zh-TW.md`（`14,101 B`, `06f54fb5…`），完成 M2V `0030` 與 Mesa Turnip 雙補丁並通過 Task C-3 獨立審核（`VICTORY CONFIRMED`）。
+  2. **導入遠端並觸發雙 macOS CI**：於 `scyx2611/fuxi-metal-frontend-check-20261108` 分支 `codex/hybrid-lane` 提交 `d035a72dd393f95f18a1718971495b08f8722d03`：
+     - 遠端 `patches/metal2vulkan-fuxi-0030-dont-care-preserve-and-diag.patch`（`20,097 B`, `e7bd2645…`）：修改 `crates/metal2vulkan-runtime/src/clear_reach.rs` 與 `src/lib.rs`，新增 `pass_reach_from_access` 使混合 `Clear+Store` 與非 memoryless stored `DontCare` 且 `drew == true` 時維持 `PassReach::Draws`；新增 `FUXI_M2V_DONT_CARE_PRESERVE` 保留 `LoadAction::Load` 並匯出診斷計數。
+     - 遠端 `patches/mesa-hyb-drm-linear-hostimport.patch`（`3,297 B`, `88bbcff2…`）：修改 `fd6_layout.c`、`tu_formats.cc`、`tu_image.cc`，放行 `HOST_ALLOCATION_BIT_EXT` + `2D` + `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT` + `DRM_FORMAT_MOD_LINEAR`，豁免單層單面 2D explicit linear 尾端 `align(nblocksy, 4)`，並於 `tu_image_view_init` 設 `iview->view.need_y2_align = true` 走安全 `store_cp_blit`。
+     - 遠端 `.github/workflows/native-metal-check.yml`（`8,797 B`, `5d89ccaf…`）第 112 行納入金鑰對齊複製該 `0030` 補丁；另 `.github/workflows/turnip-rebuild.yml`（`4,373 B`, `daeaef25…`）自動拾取 `mesa-hyb-*.patch`。
+- **復現**：
+  - 現場 `boot #472`：`work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-proxy-t1-1126/` 與 `work/adsp-battery/fuxilog/20261126-224305/console.txt`。
+  - 遠端 CI 建置：倉庫 `scyx2611/fuxi-metal-frontend-check-20261108` 分支 `codex/hybrid-lane`（提交 `d035a72dd393f95f18a1718971495b08f8722d03`），Run `45858992163`（`Build and test the NativeMetal alternative`，`workflow_dispatch`）與 Run `45858992261`（`Rebuild Turnip for the hybrid lane`，`push`）。
+- **主機測試**：
+  - `work/localbuild/b023-gpu-blacktile-1126/tests/test-drm-linear-hostimport.py`（`23,233 B`, SHA-256 `61b29f37be41823f5a284f22d860db171865e558c579bf0f1b16560512d7f374`）與遠端 `0030` 補丁內附 2 支 `clear_reach` 單元測試（於隔離工作區通過 Task C-3 Stage 3 Gate 與 `Victory Audit` `VERDICT: VICTORY CONFIRMED`）。
 - **驗證紀錄**：
-  - **現象證據**：使用者實機目擊與實拍照片（對話附件 `media_1795703878037_71d095e2.jpg`）確認 `#472` 頁面移動與多工切換器卡片存在偶發黑色矩形條閃現。
-  - **`boot #472` `mtd` 日誌安全基線（`work/adsp-battery/fuxilog/20261126-224305/console.txt`）**：`DeviceLost=0`、`BoAlloc slots refused=0`、`FUXI MTL failures=0`、`FUXI GPU ABI dropped=0`、`stuck=0`、`SWEET FB unshown failed_copy=0 / lost=0 / stale=0`、`FUXI SCANOUT mismatch=0`、`backboardd`/`SpringBoard` `CRASH=0`。
-  - **`boot #472` 同期觀測之 4 項渲染／合成異常壓力線索（僅列實測觀測，待驗證因果）**：
-    1. `FUXI M2V: shadow made new_linear_texture ... ERROR_FORMAT_NOT_SUPPORTED`：於 `backboardd` 大量觸發（L4719–L15766），涵蓋 `VK_FORMAT_R8G8_UNORM`、`A8_UNORM`、`B8G8R8A8_UNORM`、`R8G8B8A8_UNORM`；特別在手勢底部上滑進入桌面／多工切換過場（L15605 `touch 0 down at 559,2353 edge`）時，L15606–L15766 連續觸發多次 `58×74 RGBA8Unorm` shadow texture `ERROR_FORMAT_NOT_SUPPORTED`。
-    2. `FUXI SCANOUT` 大量退回 `CPU` 與複製尖峰：`CPU` fallback 幀數由開機初段 `2`（`L8323`）累升至 `37`，操作 AppStore 期間再暴增至 **`718`**（`L12351–L15892 frames=12000 GPU=11282 CPU=718`）；同期 `SWEET FB: stats` 記錄 `copy_max_us` 達 **`81,979–84,575 us`**（`wait_mode1` 升至 `647`）。
-    3. GPU 提交佇列滿載拒絕：`FUXI GPU ABI` 於 L13220–L15821 出現 `full` 拒絕累計 **`29` 次**（`wired_mb` 峰值 `849 MB`、`peak_bos=2,836`、`ibs max=119`、`queue queued 598 deepest 4 refused present 0 full 29`）。
-    4. `FUXI MTL: gate deny` 與圖層警告：`SpringBoard`（L3627）與 `AppStore`（L9990、L15294、L15599）均按規則 `gate deny`（僅 `backboardd` 走 native Metal）；`AppStore` 日誌另有 `CATransformLayer` `masksToBounds`/`allowsGroupBlending` 警告。
-- **參考來源**：`U-026`、`U-031`、`G-052`、`G-053`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`。
-- **結論／未完成**：已將 `#472` 頁面移動／多工切換器黑色矩形條獨立立案為 `G-054`；目前僅完成日誌線索彙整，尚未定位單一根因，須於隔離目錄 `work/localbuild/b023-gpu-blacktile-1126/` 針對 `M2V shadow texture ERROR_FORMAT_NOT_SUPPORTED`、`SCANOUT CPU fallback` 尖峰、`queue full` 與過場時序進行專門二分除錯與復現驗證。
-- **出處**：`work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-proxy-t1-1126/`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`（待建隔離區：`work/localbuild/b023-gpu-blacktile-1126/`）。
+  - **`boot #472` `console.txt`（`1,287,480 B`, `1433cd58…`, `splitlines()=15,930`）核實統計**：
+    - `ERROR_FORMAT_NOT`：共 **`53`** 筆（`L4734..L15766`；其中 `25` 筆完整 `ERROR_FORMAT_NOT_SUPPORTED`、`28` 筆因 256 B 行尾截斷，53/53 全屬 `|backboardd|`）。
+    - `FUXI M2V: shadow made`：共 **`57`** 筆（含 `787x1750`、`1065x282`、`281x625`、`58x74` 等尺寸）。
+    - `FUXI M2V: shadow copy-ins`：`console.txt:15876-15883`（`splitlines L15882-15887`）實測 **`34,000`**（`texels 31273 K images 17`）。
+    - Scanout 多工期間不退化：`L12315` 上滑後至 `L15892`（`frames=12000 GPU=11282 CPU=718`）`CPU` fallback 保持 `718` 零增量，`presents GPU 619 CPU 0`，且安全計數 `DeviceLost=0`、`BoAlloc slots refused=0`、`FUXI MTL failures=0`、`dropped=0`、`stuck=0`、`backboardd`/`SpringBoard` `CRASH=0`。
+  - **雙 macOS CI 即時狀態（觀察時間 `2026-11-26T16:36:03Z`）**：
+    - Run **`45858992163`**（`Build and test the NativeMetal alternative`，`codex/hybrid-lane` / `d035a72dd393f95f18a1718971495b08f8722d03`）：`status = "queued"`、`conclusion = ""`、`updatedAt = "2026-11-26T16:27:48Z"`。
+    - Run **`45858992261`**（`Rebuild Turnip for the hybrid lane`，`codex/hybrid-lane` / `d035a72dd393f95f18a1718971495b08f8722d03`）：`status = "in_progress"`、`conclusion = ""`、`updatedAt = "2026-11-26T16:32:52Z"`（正在執行 Turnip 建置，尚未產出最終結果）。
+- **參考來源**：`U-026`、`U-031`、`G-052`、`G-053`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-maps-p12da-1126/boot.log`、`ios-fuxi/tools/fuxi_framebuffer.py`、`ksrc:shim/fuxi-probe/probe.c`。
+- **結論／未完成**：Task C-3 已離線定案 `#472` 頂部 `13.2%` 黑塊根因（`clear_reach` + `0002-fresh-zero` + Turnip `DRM_FORMAT_MOD_LINEAR` 雙門檻）並切割 `#471` 底部黑邊（`probe.c` `512 B` 跨幀／息屏假象 vs `Maps` 路網 `m2v_warn=29`/`0028` sRGB 實質瑕疵）；兩份修補已合入遠端 `scyx2611/fuxi-metal-frontend-check-20261108` 分支 `codex/hybrid-lane`（`d035a72d…`），截至 `2026-11-26T16:36:03Z` 雙 macOS CI（`45858992163`、`45858992261`）仍在排隊／建置中，尚待 CI 完成下載產物後依 `COMBINED_DEVICE_VALIDATION_PLAN.zh-TW.md` 執行實機對照驗證。
+- **出處**：`work/localbuild/b023-gpu-blacktile-1126/ROOT_CAUSE_ANALYSIS.zh-TW.md`、`work/localbuild/b023-gpu-blacktile-1126/COMBINED_DEVICE_VALIDATION_PLAN.zh-TW.md`、`work/localbuild/b023-gpu-blacktile-1126/tests/test-drm-linear-hostimport.py`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-proxy-t1-1126/`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-maps-p12da-1126/`（遠端補丁與 workflow 位於 `scyx2611/fuxi-metal-frontend-check-20261108` 分支 `codex/hybrid-lane` 提交 `d035a72dd393f95f18a1718971495b08f8722d03`）。
 
 ## 盤點附註（2026-11-18）
 
