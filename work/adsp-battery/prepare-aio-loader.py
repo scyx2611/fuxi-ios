@@ -27,12 +27,15 @@ import os
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import struct
 import subprocess
+import tempfile
 import types
 
 
@@ -1055,6 +1058,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument('--probe-source', type=Path, default=None,
                     help=f'Optional probe C source override (default: {DEFAULT_PROBE_REL})')
     ap.add_argument('--generator-rev', default='HEAD')
+    ap.add_argument('--self-test', action='store_true',
+                    help='Run offline self-tests without touching hardware or STORAGE')
     ap.add_argument('rest', nargs=argparse.REMAINDER)
     return ap
 
@@ -1144,7 +1149,209 @@ def parse_and_validate_args(argv: list[str] | None = None, *, workspace: Path = 
     }
 
 
+def run_self_test() -> None:
+    # 1. Verify _get_archive_storages() defaults to empty and no E-drive archive paths remain hardcoded
+    saved_archive_env = os.environ.pop('FUXI_ARCHIVE_DIRS', None)
+    try:
+        assert _get_archive_storages() == (), 'FUXI_ARCHIVE_DIRS unset must yield empty tuple'
+    finally:
+        if saved_archive_env is not None:
+            os.environ['FUXI_ARCHIVE_DIRS'] = saved_archive_env
+    self_text = Path(__file__).read_text(encoding='utf-8')
+    forbidden_drive = 'E:' + '\\'
+    forbidden_archive = 'fuxi_Backup' + '-archive'
+    assert forbidden_drive not in self_text, 'hardcoded E-drive path found in prepare-aio-loader.py'
+    assert forbidden_archive not in self_text, 'hardcoded archive path found in prepare-aio-loader.py'
+
+    # 2. Verify _patch_generator_source() applies cleanly to current worktree and HEAD generator
+    gen_path = WORKSPACE / GENERATOR
+    worktree_src = gen_path.read_bytes()
+    patched_wt = _patch_generator_source(worktree_src, False, None)
+    _patch_generator_source(worktree_src, True, None)
+    head_rev = subprocess.check_output(
+        ['git', '-C', str(WORKSPACE), 'rev-parse', 'HEAD^{commit}'],
+        text=True,
+    ).strip()
+    head_src = subprocess.check_output(['git', '-C', str(WORKSPACE), 'show', f'{head_rev}:{GENERATOR}'])
+    _patch_generator_source(head_src, False, None)
+    _patch_generator_source(head_src, True, None)
+
+    # 3. Verify patched generator module handles --like fallback safely in isolated fake STORAGE
+    module = types.ModuleType('fuxi_aio_loader_generator_selftest')
+    module.__file__ = str(gen_path)
+    probe_path = resolve_probe_source(None, workspace=WORKSPACE)
+    probe_sha = hashlib.sha256(probe_path.read_bytes()).hexdigest()
+    module.__dict__['_no_pyc_env'] = _no_pyc_env
+    module.__dict__['_resolve_input_dir'] = _resolve_input_dir
+    module.__dict__['_ALLOW_SHIM_DRIFT'] = set()
+    module.__dict__['_PROBE_SOURCE_PATH'] = probe_path
+    module.__dict__['_PROBE_SOURCE_SHA256'] = probe_sha
+    module.__dict__['_PROBE_BASELINE_SHA256'] = []
+    module.__dict__['_fuxi_wrapper_drop'] = lambda kept: kept
+    module.__dict__['_fuxi_aio_cmdline_transform'] = lambda tokens: tokens
+    module.__dict__['_SENSOR_PACK_PATH'] = None
+    module.__dict__['_patch_loader_c'] = _patch_loader_c
+    module.__dict__['_stage_mkpayload_128k'] = _stage_mkpayload_128k
+    module.__dict__['_write_sensor_ld'] = _write_sensor_ld
+    module.__dict__['_verify_sensor_pack_elf'] = _verify_sensor_pack_elf
+    module.__dict__['verify_elf_probe_and_relocs'] = verify_elf_probe_and_relocs
+    exec(compile(patched_wt, str(gen_path), 'exec'), module.__dict__)
+
+    expected_default_source = 'native-dly-ram9g-rtctorch-sb127-loader'
+    assert module.SOURCE == expected_default_source, f'unexpected default SOURCE: {module.SOURCE!r}'
+
+    with tempfile.TemporaryDirectory(prefix='fuxi-aio-like-test-') as tmp:
+        fake_storage = Path(tmp)
+        default_dir = fake_storage / expected_default_source
+        default_dir.mkdir()
+        for fname in ('sha256.txt', 'payload.bin', 'boot.img', 'memory-layout.json', 'source-input-sha256.txt'):
+            (default_dir / fname).write_bytes(b'ok')
+
+        like_dir = fake_storage / 'native-like-complete-loader'
+        like_dir.mkdir()
+        for fname in ('sha256.txt', 'payload.bin', 'boot.img', 'source-input-sha256.txt'):
+            (like_dir / fname).write_bytes(b'like')
+        (like_dir / 'wlan-ath12k-profile.json').write_text(
+            json.dumps({
+                'source': 'native-missing-src-loader',
+                'shim_reference': 'native-missing-ref-loader',
+                'native_ath12k': True,
+                'sleep_clock': 'on',
+            }),
+            encoding='utf-8',
+        )
+
+        like_incomplete = fake_storage / 'native-like-incomplete-loader'
+        like_incomplete.mkdir()
+        for fname in ('sha256.txt', 'payload.bin', 'boot.img'):
+            (like_incomplete / fname).write_bytes(b'partial')
+
+        saved_storage = module.STORAGE
+        saved_resolver = module.__dict__.get('_resolve_input_dir')
+        saved_inspect = module.inspect
+        saved_argv = list(sys.argv)
+        saved_stdout = sys.stdout
+        saved_stderr = sys.stderr
+        try:
+            module.STORAGE = fake_storage
+            module.__dict__['_resolve_input_dir'] = lambda name: fake_storage / name
+
+            err1 = io.StringIO()
+            src1, ref1 = module.resolve_like_inputs(
+                'native-like-complete-loader',
+                {'source': 'native-missing-src-loader', 'shim_reference': 'native-missing-ref-loader'},
+                expected_default_source,
+                None,
+                stderr=err1,
+            )
+            assert src1 == expected_default_source and ref1 == 'native-like-complete-loader'
+            assert expected_default_source in err1.getvalue() and 'native-like-complete-loader' in err1.getvalue()
+
+            err2 = io.StringIO()
+            src2, ref2 = module.resolve_like_inputs(
+                'native-like-incomplete-loader',
+                {'source': 'native-missing-src-loader', 'shim_reference': 'native-missing-ref-loader'},
+                expected_default_source,
+                None,
+                stderr=err2,
+            )
+            assert src2 == expected_default_source and ref2 == expected_default_source
+            assert len(err2.getvalue().splitlines()) == 2
+
+            err3 = io.StringIO()
+            src3, ref3 = module.resolve_like_inputs(
+                'native-like-complete-loader',
+                {'source': 'native-missing-src-loader', 'shim_reference': 'native-missing-ref-loader'},
+                'native-explicit-src-loader',
+                'native-explicit-ref-loader',
+                stderr=err3,
+            )
+            assert src3 == 'native-explicit-src-loader' and ref3 == 'native-explicit-ref-loader' and err3.getvalue() == ''
+
+            observed: dict[str, object] = {}
+
+            def _fake_inspect(gargs):
+                observed['source'] = gargs.source
+                observed['shim_reference'] = gargs.shim_reference
+                return {'status': 'mocked_ok', 'source': gargs.source, 'shim_reference': gargs.shim_reference}, None, {}
+
+            module.inspect = _fake_inspect
+            out_buf = io.StringIO()
+            err_buf = io.StringIO()
+            sys.stdout = out_buf
+            sys.stderr = err_buf
+            sys.argv = [str(gen_path), 'inspect', '--like', 'native-like-complete-loader']
+            module.main()
+            parsed_out = json.loads(out_buf.getvalue())
+            assert observed == {
+                'source': expected_default_source,
+                'shim_reference': 'native-like-complete-loader',
+            }
+            assert parsed_out['source'] == expected_default_source
+            assert 'falling back to' in err_buf.getvalue()
+        finally:
+            module.STORAGE = saved_storage
+            module.__dict__['_resolve_input_dir'] = saved_resolver
+            module.inspect = saved_inspect
+            sys.argv = saved_argv
+            sys.stdout = saved_stdout
+            sys.stderr = saved_stderr
+
+    # 4. Verify Wave 2, U-026 --gpu-clients, --user-app-noplatform, --gpu-c1-bos, and p-tap guards
+    valid = parse_and_validate_args(
+        [
+            '--gpu-clients', 'core',
+            '--user-app-noplatform', '1',
+            '--gpu-c1-bos', '2048',
+            '--', 'build', '--display-gamut', 'sRGB',
+        ],
+        workspace=WORKSPACE,
+    )
+    assert valid['gpu_clients_val'] == GPU_CLIENT_PROFILES['core']
+    assert valid['gpu_locksplit_val'] == 1
+    assert valid['nopoll_val'] == 1
+    assert valid['gpu_irqslice_val'] == 8000
+    assert valid['gpu_c1_bos_val'] == 2048
+    assert valid['user_app_noplatform_val'] == 1
+
+    for bad_argv in (
+        ['--gpu-hyb8-ovsh', '--', 'build', '--display-gamut', 'sRGB'],
+        ['--gpu-locksplit', '0', '--', 'build', '--display-gamut', 'sRGB'],
+        ['--nopoll', '0', '--', 'build', '--display-gamut', 'sRGB'],
+        ['--gpu-irqslice', '4000', '--', 'build', '--display-gamut', 'sRGB'],
+        ['--gpu-clients', 'Maps,PosterBoard', '--', 'build', '--display-gamut', 'sRGB'],
+        ['--gpu-clients', 'SpringBoard', '--', 'build', '--display-gamut', 'sRGB'],
+        ['--user-app-noplatform', '2', '--', 'build', '--display-gamut', 'sRGB'],
+        ['--gpu-c1-bos', '512', '--', 'build', '--display-gamut', 'sRGB'],
+        ['--', 'build', '--display-gamut', 'sRGB', '--tap-script', 'p1000'],
+        ['--', 'build', '--display-gamut', 'sRGB', '--tap-script', 't100,200;p300'],
+        ['--', 'build'],
+    ):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                parse_and_validate_args(bad_argv, workspace=WORKSPACE)
+        except SystemExit:
+            continue
+        raise AssertionError(f'invalid CLI arguments accepted: {bad_argv!r}')
+    try:
+        validate_user_app_noplatform(2)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('validate_user_app_noplatform(2) accepted')
+
+    print('PASS prepare-aio-loader self-test: zero E-drive paths, generator patching, --like fallback, and Wave 2/U-026 guards')
+
+
 def main():
+    if '--self-test' in sys.argv[1:]:
+        ap = build_arg_parser()
+        ns = ap.parse_args(sys.argv[1:])
+        if ns.self_test:
+            if ns.rest:
+                raise SystemExit('--self-test does not accept trailing generator arguments')
+            run_self_test()
+            return
     parsed = parse_and_validate_args()
     args = parsed['args']
     rest = parsed['rest']

@@ -4,6 +4,7 @@ import argparse
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ WORKSPACE = Path(__file__).resolve().parents[2]
 STORAGE = WORKSPACE / 'work/Codex-Xiaomi13-GPU-20261109'
 TOOLS = WORKSPACE / 'work/adsp-battery/ksrc/tools'
 COMPILER = Path(os.environ.get('LOCALAPPDATA', ''), r'Android\Sdk\ndk\26.1.10909125\toolchains\llvm\prebuilt\windows-x86_64\bin')
-SOURCE = 'native-dly-ram9g-sb127-user-loader'
+SOURCE = 'native-dly-ram9g-rtctorch-sb127-loader'
 ARTIFACT = 'kernel-adsp-iter2-ram9g-artifact'
 ROOT_PATH = '/data/gsi/codexnative1108b/codexnative_root_1108b.img.0000'
 ROOT_BYTES = 20 * 1024**3
@@ -484,6 +485,82 @@ def hal_haptic_mode(args):
     if getattr(args, 'hal_haptics_mode', None) is not None:
         return args.hal_haptics_mode
     return 4 if args.haptic == 9 else 3 if args.haptic_pcm else 2 if args.haptic == 5 else 1
+
+
+SOURCE_REQUIRED_FILES = ('sha256.txt', 'payload.bin', 'boot.img', 'memory-layout.json')
+SHIM_REF_REQUIRED_FILES = ('sha256.txt', 'payload.bin', 'boot.img', 'source-input-sha256.txt')
+
+
+def _has_loader_files(directory: Path, required_files: tuple[str, ...]) -> bool:
+    return directory.is_dir() and all((directory / name).is_file() for name in required_files)
+
+
+def resolve_like_inputs(
+    like_name: str,
+    earlier: dict,
+    source_arg: str,
+    shim_reference_arg: str | None,
+    *,
+    storage: Path | None = None,
+    default_source: str | None = None,
+    resolve_dir=None,
+    stderr=None,
+) -> tuple[str, str | None]:
+    if default_source is None:
+        default_source = SOURCE
+    if resolve_dir is None:
+        if storage is None:
+            resolver = globals().get('_resolve_input_dir')
+            resolve_dir = resolver if callable(resolver) else (lambda name: STORAGE / name)
+        else:
+            resolve_dir = lambda name: storage / name
+    if storage is None:
+        storage = STORAGE
+    if stderr is None:
+        stderr = sys.stderr
+
+    resolved_source = source_arg
+    if source_arg == default_source:
+        cand_source = earlier.get('source')
+        if (
+            isinstance(cand_source, str)
+            and cand_source
+            and _has_loader_files(resolve_dir(cand_source), SOURCE_REQUIRED_FILES)
+        ):
+            resolved_source = cand_source
+        else:
+            resolved_source = default_source
+            print(
+                f'NOTE: --like {like_name} source {cand_source!r} missing or incomplete; '
+                f'falling back to {default_source!r}',
+                file=stderr,
+            )
+
+    resolved_shim_ref = shim_reference_arg
+    if shim_reference_arg is None:
+        cand_ref = earlier.get('shim_reference')
+        if (
+            isinstance(cand_ref, str)
+            and cand_ref
+            and _has_loader_files(resolve_dir(cand_ref), SHIM_REF_REQUIRED_FILES)
+        ):
+            resolved_shim_ref = cand_ref
+        elif _has_loader_files(resolve_dir(like_name), SHIM_REF_REQUIRED_FILES):
+            resolved_shim_ref = like_name
+            print(
+                f'NOTE: --like {like_name} shim_reference {cand_ref!r} missing or incomplete; '
+                f'falling back to {like_name!r}',
+                file=stderr,
+            )
+        else:
+            resolved_shim_ref = resolved_source
+            print(
+                f'NOTE: --like {like_name} shim_reference {cand_ref!r} and {like_name!r} '
+                f'missing or incomplete; falling back to {resolved_source!r}',
+                file=stderr,
+            )
+
+    return resolved_source, resolved_shim_ref
 
 
 def inspect(args):
@@ -2081,6 +2158,102 @@ def self_test():
         except ValueError:
             continue
         raise ValueError(f'invalid --dict-oslog accepted: {bad_dict}, procs={procs}')
+    with tempfile.TemporaryDirectory(prefix='fuxi-w18-like-test-') as temporary:
+        fake_storage = Path(temporary)
+        default_dir = fake_storage / SOURCE
+        default_dir.mkdir()
+        for fname in set(SOURCE_REQUIRED_FILES) | set(SHIM_REF_REQUIRED_FILES):
+            (default_dir / fname).write_bytes(b'ok')
+
+        like_dir = fake_storage / 'native-like-complete-loader'
+        like_dir.mkdir()
+        for fname in SHIM_REF_REQUIRED_FILES:
+            (like_dir / fname).write_bytes(b'like')
+
+        # (1) --like 的 source 與 shim_reference 均缺失 -> 回退至 SOURCE 與 args.like，stderr 印出兩條提示
+        err1 = io.StringIO()
+        src1, ref1 = resolve_like_inputs(
+            'native-like-complete-loader',
+            {'source': 'native-missing-src-loader', 'shim_reference': 'native-missing-ref-loader'},
+            SOURCE,
+            None,
+            storage=fake_storage,
+            stderr=err1,
+        )
+        require(src1 == SOURCE and ref1 == 'native-like-complete-loader', 'missing --like fallback to SOURCE/like failed')
+        notes1 = err1.getvalue().splitlines()
+        require(len(notes1) == 2 and SOURCE in notes1[0] and 'native-like-complete-loader' in notes1[1],
+                f'unexpected --like fallback notes: {notes1!r}')
+
+        # (2) args.like 亦缺 source-input-sha256.txt -> shim_reference 回退至 SOURCE，stderr 印出提示
+        like_incomplete = fake_storage / 'native-like-incomplete-loader'
+        like_incomplete.mkdir()
+        for fname in ('sha256.txt', 'payload.bin', 'boot.img'):
+            (like_incomplete / fname).write_bytes(b'partial')
+        err2 = io.StringIO()
+        src2, ref2 = resolve_like_inputs(
+            'native-like-incomplete-loader',
+            {'source': 'native-missing-src-loader', 'shim_reference': 'native-missing-ref-loader'},
+            SOURCE,
+            None,
+            storage=fake_storage,
+            stderr=err2,
+        )
+        require(src2 == SOURCE and ref2 == SOURCE, 'incomplete --like shim_reference fallback to SOURCE failed')
+        notes2 = err2.getvalue().splitlines()
+        require(len(notes2) == 2 and SOURCE in notes2[0] and SOURCE in notes2[1],
+                f'unexpected incomplete --like fallback notes: {notes2!r}')
+
+        # (2b) source 目錄存在但缺少必要檔案（如 memory-layout.json）亦視同不完整而安全回退
+        partial_src = fake_storage / 'native-partial-src-loader'
+        partial_src.mkdir()
+        for fname in ('sha256.txt', 'payload.bin', 'boot.img'):
+            (partial_src / fname).write_bytes(b'partial')
+        err2b = io.StringIO()
+        src2b, ref2b = resolve_like_inputs(
+            'native-like-complete-loader',
+            {'source': 'native-partial-src-loader', 'shim_reference': 'native-missing-ref-loader'},
+            SOURCE,
+            None,
+            storage=fake_storage,
+            stderr=err2b,
+        )
+        require(src2b == SOURCE and ref2b == 'native-like-complete-loader',
+                'partial source directory must fall back to SOURCE')
+
+        # (3) 顯式傳入 --source / --shim-reference 不被 --like 或回退邏輯覆寫
+        err3 = io.StringIO()
+        src3, ref3 = resolve_like_inputs(
+            'native-like-complete-loader',
+            {'source': 'native-missing-src-loader', 'shim_reference': 'native-missing-ref-loader'},
+            'native-explicit-src-loader',
+            'native-explicit-ref-loader',
+            storage=fake_storage,
+            stderr=err3,
+        )
+        require(src3 == 'native-explicit-src-loader' and ref3 == 'native-explicit-ref-loader' and err3.getvalue() == '',
+                'explicit --source/--shim-reference must not be overridden by --like')
+
+        # (4) 兩者存在且完整時正常沿用且無回退提示
+        good_src = fake_storage / 'native-good-src-loader'
+        good_src.mkdir()
+        for fname in SOURCE_REQUIRED_FILES:
+            (good_src / fname).write_bytes(b'src')
+        good_ref = fake_storage / 'native-good-ref-loader'
+        good_ref.mkdir()
+        for fname in SHIM_REF_REQUIRED_FILES:
+            (good_ref / fname).write_bytes(b'ref')
+        err4 = io.StringIO()
+        src4, ref4 = resolve_like_inputs(
+            'native-like-complete-loader',
+            {'source': 'native-good-src-loader', 'shim_reference': 'native-good-ref-loader'},
+            SOURCE,
+            None,
+            storage=fake_storage,
+            stderr=err4,
+        )
+        require(src4 == 'native-good-src-loader' and ref4 == 'native-good-ref-loader' and err4.getvalue() == '',
+                'complete --like source/shim_reference must be retained without fallback notes')
     print('PASS W18 and native ath12k host profiles, selector refusals/bounds, board records, ADT round trip, recorded pin/extents/DM and asset hashes')
 
 
@@ -2377,10 +2550,9 @@ def main():
             require(re.fullmatch(r'native-[a-z0-9-]+-loader', args.like), 'invalid --like loader name')
             with open(STORAGE / args.like / 'wlan-ath12k-profile.json', encoding='utf-8') as handle:
                 earlier = json.load(handle)
-            if args.source == SOURCE:
-                args.source = earlier['source']
-            if args.shim_reference is None:
-                args.shim_reference = earlier.get('shim_reference')
+            args.source, args.shim_reference = resolve_like_inputs(
+                args.like, earlier, args.source, args.shim_reference
+            )
             if args.assets_manifest is None and (earlier.get('wlan_assets') or {}).get('manifest'):
                 args.assets_manifest = Path(earlier['wlan_assets']['manifest'])
             args.native_ath12k = args.native_ath12k or bool(earlier.get('native_ath12k'))
