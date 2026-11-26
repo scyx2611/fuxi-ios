@@ -910,6 +910,55 @@
   - **(B) 留待 `B-023`**：`#461` (`M4-3 v3`)、Phase 11/12/12B（`#464`–`#468`）與 `#469` 暴露之 `backboardd` 4096 BO 洩漏均**未併入 `B-022`**；Turnip BO 洩漏根治、Phase 12D-A 與 Maps/Class 1 渲染完修統一交由後續 `B-023` 專線處理。
 - **出處**：`ksrc:shim/fuxi-probe/probe.c`、`ksrc:xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp`、`ksrc:xnu/fuxi-adreno/fuxi_gpu_abi_backend.inc`、`ksrc:xnu/fuxi-adreno/fuxi_gpu_irq.inc`、`ksrc:xnu/fuxi-adreno/fuxi_gpu_scanout.inc`、`ksrc:xnu/fuxi-unixnu/SweetFramebuffer.cpp`、`ksrc:tools/stage-fuxi-metal.py`、`ksrc:tools/test-fuxi-gpu-wave2.py`、`ksrc:tools/test-fuxi-gpu-scanout.py`、`ksrc:tools/test-fuxi-metal-stage.py`、`ksrc:tools/test-fuxi-metal-clientgate.py`、`harness:patches/kernel-gpu120-wave2.patch`、`harness:patches/kernel-m42-probe0x4e.patch`、`harness:patches/kernel-metal-multiclient.patch`、`work/Codex-Xiaomi13-GPU-20261109/run-w2-pure-1125/`、`work/Codex-Xiaomi13-GPU-20261109/run-w2-a2-taps-1125/`、`work/Codex-Xiaomi13-GPU-20261109/run-maps-m42-probe-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-wave2-m42-120hz-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-maps-m43-q100-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-maps-m43v2-q100-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-maps-m43v3-q100-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-120hz-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-120hz-stick14-cool-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-measure-p2-1126/`、`work/statusbar-fix/stage-rollback-stick14-m43v3-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-maps-m43v3-c1bos4096-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-maps-m43v3-c1bos4096-r2-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-maps-p12-fbblend-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-maps-p12b-fbplanes-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-maps-p12b-fbplanes-r2-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-p12-user-accept-1126/`、`work/statusbar-fix/stage-rollback-stick14-b022-1126/`。
 
+### G-053 B-023 GPU 隔離續查：Phase 12D-A 地圖雙層實測（#471）與 0029 BO 洩漏修補 macOS CI 產物（#45838039605）
+
+- **日期**：2026-11-26（台北時間）
+- **狀態**：Phase 12D-A 地圖雙層實測（`boot #471`）完成取證並對稱還原 `Stick-14`（`shot3` 已呈現地圖向量實景但伴隨路網黑線描邊與 `shot3-step-b` 底部 1/4 全黑）；`0029` BO 洩漏修補 macOS CI `#45838039605` 已全綠通過並下載（`19/19` 檔案 SHA-256 驗證一致），尚待後續實機對照驗證；均屬 `B-023` 隔離線（未併入 `B-022` 日常版）
+- **開關**：`fuxi,fb-blend`（`SWEET FB: multilayer SRC_OVER blend enabled (src=fuxi,fb-blend)`）、`fuxi,gpu-c1-bos=4096`、`fuxi,gpu-quantum=100`、`fuxi,tapcmd`；日常 `B-022` 維持 `--gpu-clients none` 與 `Stick-14`
+- **問題／現象**：
+  1. 延續 `G-052`（`#465`–`#469`）Maps Class 1 顯示截斷與 `M4-3 v3` `backboardd` 4096 BO 洩漏問題，須對 Phase 12D-A（Maps 雙層合成）執行自動化實測，並取得 `0029` BO 洩漏修補之正式 macOS CI `NativeMetal` 產物。
+  2. `#471` 實機開啟 Maps 後 `backboardd` 幀率降至 `12.70 Hz`（CPU 雙層合成約 `10.02 ms/frame`），且實機截圖 `shot3-step`／`shot3-step-b` 雖成功繪出地圖向量畫面，仍存在道路／鐵路邊線黑色虛線描邊與 `shot3-step-b` 底部約 1/4 純黑塊瑕疵。
+- **根因**：
+  1. Phase 12D-A 啟用 `fuxi,fb-blend` CPU 雙層合成，每幀須執行 snapshot／composite／writeback 三段 CPU 處理（實測合計約 `10,021 us`），導致進入 Maps 雙層合成後 `backboardd` 更新率自 `78.97 Hz` 降至 `12.70 Hz`，而描邊與局部黑塊仍屬雙層／Turnip 合成邊界待優化項目。
+  2. `#469` 暴露之 4096 BO 洩漏另由 macOS CI `#45838039605`（`0029`）針對 `FuxiNativeMetal`／`libnative_metal_bridge.dylib` 修補建置，尚待後續獨立上機驗證。
+- **做法**：
+  1. **Phase 12D-A 上架與實機實測（`#471`）**：以 `stage-b023-m43v3-p12da-1126` 上架 `m43v3`（`FuxiNativeMetal 3f64a023…`、`libnative_metal_bridge.dylib 0539008e…`），載入 `kernel-local-b023-p12da-9g-artifact`（`81b36002…`）與 `native-b023-p12da-maps-tap-1126-loader` 跑完 Maps 雙層實測，隨即以 `stage-b023-restore-stick14-1126` 完全對稱還原 `Stick-14`（`FuxiNativeMetal 102d52d6…`、`libnative_metal_bridge.dylib 31a4cd97…`）。
+  2. **`0029` BO 洩漏修補 macOS CI（`#45838039605`）**：於 `scyx2611/fuxi-metal-frontend-check-20261108` 分支 `codex/hybrid-lane`（提交 `6cb3f14b7b85337b712de093dd24d3e84caeb9bc`）完成 macOS CI 建置（`17m15s` 全綠 PASS），下載產物 `fuxi-nativemetal-4b8f` 至 `work/Codex-Xiaomi13-GPU-20261109/nativemetal-ci-0029-45838039605/` 並完成 19 檔 SHA-256 校驗。
+- **復現**：
+  - `#471`：`work/Codex-Xiaomi13-GPU-20261109/kernel-local-b023-p12da-9g-artifact/`（`BUILD.txt result ok`、`ram 9g`、`kernel.development.fuxi` `81b36002…`）＋ `native-b023-p12da-maps-tap-1126-loader`（`boot.img 8f941b72…`、`payload.bin e573c57f…`、`private.adt 2fb618ec…` 含 82-byte `fuxi,tapcmd`）暫時開機實測，結束後經 `stage-b023-restore-stick14-1126` 還原 `Stick-14`。
+  - CI `#45838039605`：產物存放於 `work/Codex-Xiaomi13-GPU-20261109/nativemetal-ci-0029-45838039605/`（`logs/build.log` 記載 `Repository: 4b8faded6e76a4730832144fc3cae34c4419fa51`、Xcode `16.4 (16F6)`、`iPhoneOS18.5.sdk`、`MESA_SHA=85fda3b3…`、`UNIXNU_SHA=fb6aad6a…`、`M2V_SHA=720ef1ce…`、`NATIVEMETAL_SHA=a96feced…`）。
+- **主機測試**：
+  - CI `#45838039605` 產物終檢通過：`PASS: native callback entry, replaceable bridge load and nmb imports` 與 `PASS: NativeMetal frontend, replaceable Rust cdylib and corresponding source`；`SHA256SUMS`（`1,781 B`，SHA-256 `95285136411e0017498d5a12fb3043f2cbb1b247ceec982b3d4fa71200e2613c`）內全部 19 個檔案實測 SHA-256 `19/19 OK`（4 個核心二進位：`FuxiNativeMetal.bundle/FuxiNativeMetal` `3f64a023ad2403ee463a7b4fec8bb6c96e97e133d6be1ed172f97ab836ba8753`、`libmetal2vulkan.dylib` `119c410ab1b0eb0d2ecd38ba03e1f2c28272f368429904a56ce47ae5e057351a`、`libnative_metal_bridge.dylib` `c07c1a57cc5620136a01ba5ad488de85327afcf025d02991e8fafcd5c1e17088`、`FuxiMetal.bundle/FuxiMetal` `b21625a799bf61ae5cd6dcc148040cada1895c94ece1e13869f406c04f8b6b16`）。
+- **驗證紀錄**：
+  - **上架與還原對稱實證（`stage-b023-m43v3-p12da-1126` / `stage-b023-restore-stick14-1126`）**：上架寫入 `FuxiNativeMetal`（`102d52d6… -> 3f64a023…`）與 `libnative_metal_bridge.dylib`（`31a4cd97… -> 0539008e…`，`m43v3` 版本，不同於 `0029` CI 的 `c07c1a57…`），`PRE_OK 24 / WRITE_OK 24 / FSCK_before/after/final OK`；實驗後還原 `PRE_OK 21 / WRITE_OK 21 / FSCK_before/after/final OK`，兩檔雜湊精確回寫至 `Stick-14`（`102d52d6ec27e55f75276ed6f16c446d81d416e2943cc2d67260848baecbe657` 與 `31a4cd9718b37bde339101eb9539973628ac8ecc7c709be54d351db478ba9249`）。
+  - **`boot #471` 實測日誌與截圖（`work/Codex-Xiaomi13-GPU-20261109/run-b023-maps-p12da-1126/`）**：`boot.log` `757,012 B`（`\n=10,085`、含 `2` 獨立 `\r`，`splitlines()=10,087` 行；SHA-256 `7389e04254fa427d00e0ac0a4e9b74a290dd379a183b5f5402bcf640750c5a4c`），全程 `panic=0`、`REAL_FAULTS=0`、`DEV_LOST=0`、GPU／ath12k／BT `dropped=0`、`stuck=0`、`present_reading=0/0/0`；`L9430 gate allow Maps`、`L10025 cb=600 rpasses=202 draws=138748 surf_pass=200 resolve_surf_passes=198 turnip_res(nat/sh/dc)=198/0/0`；`L10074 backboardd frames=1402 gpu_ms=3.985 late=277 failures=0 hz=12.70`（開 Maps 前 `78.97 Hz` → 開後 `16.92`/`18.17`/`12.70 Hz`）；`L9922 SWEET FB: blend_stats frames=188 diff=92 hit=1402 miss=108 snap_us=3770 comp_us=2747 wc_us=3504`（三項合計 `10,021 us` ≈ `10.02 ms/frame`）。目錄含 `6` 張 `1080×2400` 截圖，`framebuffer-shot3-step.png`（`1,026,545 B`, `50bfafbb…`）與 `framebuffer-shot3-step-b.png`（`672,211 B`, `546299fc…`）經實地視覺檢視確認已呈現台灣新北真實向量地圖實景，惟路網邊線帶黑色虛線描邊且 `shot3-step-b.png` 底部約 1/4 全黑。
+  - **CI `#45838039605` 實機狀態**：已下載驗簽完畢，本輪尚未上機實測。
+- **參考來源**：`G-052`、`U-026`、`work/localbuild/b023-m2v-bofix-1126/`、`work/localbuild/b023-gpu-scanout-phaseb-1126/`。
+- **結論／未完成**：`#471` 證實 Phase 12D-A 雙層合成可繪出真實 Maps 向量地圖且已對稱還原 `Stick-14` 未影響日常環境，惟存在 `12.70 Hz`（CPU blend ~`10.02 ms/frame`）、路網黑線描邊與底部 1/4 黑塊待改善；macOS CI `#45838039605`（`0029` BO 修補）產物已備妥，待後續獨立隔離測試驗證是否徹底消除 `#469` 之 4096 BO 洩漏。
+- **出處**：`work/Codex-Xiaomi13-GPU-20261109/kernel-local-b023-p12da-9g-artifact/`、`work/Codex-Xiaomi13-GPU-20261109/native-b023-p12da-maps-tap-1126-loader/`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-maps-p12da-1126/`、`work/statusbar-fix/stage-b023-m43v3-p12da-1126/`、`work/statusbar-fix/stage-b023-restore-stick14-1126/`、`work/Codex-Xiaomi13-GPU-20261109/nativemetal-ci-0029-45838039605/`。
+
+### G-054 未解決問題：頁面移動與多工切換器卡片偶發閃現黑色矩形條（#472 實機回報）
+
+- **日期**：2026-11-26（台北時間）
+- **狀態**：未解決（已獨立立案；於 `boot #472` 實機回報，預留隔離工作區 `work/localbuild/b023-gpu-blacktile-1126/` 待專門定位與復現）
+- **開關**：`boot #472`（`native-b023-appstore-proxy-tap-1126-loader` / `kernel-local-b023-appstore-ui-9g-artifact`）測試現場出現；尚待比對是否僅於特定核心／負載／合成路徑復現
+- **問題／現象**：`boot #472`（`B-023` AppStore UI Route 2 手動測試）期間，使用者於桌面／App 頁面移動以及進入多工切換器（App Switcher）滑動卡片時，實機觀察到卡片與畫面邊緣偶發閃現黑色矩形條（實拍留存於對話附件 `media_1795703878037_71d095e2.jpg`）。
+- **根因**：尚未定論（待專門離線剖析與實機二分復現）。經查閱 `boot #472` 完整 `mtd` 日誌（`work/adsp-battery/fuxilog/20261126-224305/console.txt`），雖未見致命 GPU crash／`DeviceLost`，但同期實測存在 4 項與合成／Metal／Scanout 相關的顯著異常壓力線索（詳見「驗證紀錄」）；以上線索是否直接造成黑色矩形條尚不得僅憑日誌臆測因果。
+- **做法**：依鑑識紀錄原則，於 `G-054` 獨立立案登錄實機現象與 `console.txt` 關聯線索，預留隔離工作區 `work/localbuild/b023-gpu-blacktile-1126/` 供後續 GPU 除錯專線進行離線剖析、最小復現與修復驗證，不混入 `U-031`（AppStore 代理驗證）或已定案 `B-022` 紀錄。
+- **復現**：依 `boot #472` 環境（`kernel-local-b023-appstore-ui-9g-artifact`、`native-b023-appstore-proxy-tap-1126-loader`）開機進入桌面／`AppStore` 後快速滑動頁面或上滑開啟多工切換器卡片，觀察卡片與頁面移動期間畫面是否偶發閃現黑色矩形條（同時須與 `B-022` 日常基線比對是否受 `kernel-local-b023-appstore-ui-9g-artifact` 或高負載影響）。
+- **主機測試**：尚未建立針對此黑條現象之專門主機回歸測試（待定位根因後補入）。
+- **驗證紀錄**：
+  - **現象證據**：使用者實機目擊與實拍照片（對話附件 `media_1795703878037_71d095e2.jpg`）確認 `#472` 頁面移動與多工切換器卡片存在偶發黑色矩形條閃現。
+  - **`boot #472` `mtd` 日誌安全基線（`work/adsp-battery/fuxilog/20261126-224305/console.txt`）**：`DeviceLost=0`、`BoAlloc slots refused=0`、`FUXI MTL failures=0`、`FUXI GPU ABI dropped=0`、`stuck=0`、`SWEET FB unshown failed_copy=0 / lost=0 / stale=0`、`FUXI SCANOUT mismatch=0`、`backboardd`/`SpringBoard` `CRASH=0`。
+  - **`boot #472` 同期觀測之 4 項渲染／合成異常壓力線索（僅列實測觀測，待驗證因果）**：
+    1. `FUXI M2V: shadow made new_linear_texture ... ERROR_FORMAT_NOT_SUPPORTED`：於 `backboardd` 大量觸發（L4719–L15766），涵蓋 `VK_FORMAT_R8G8_UNORM`、`A8_UNORM`、`B8G8R8A8_UNORM`、`R8G8B8A8_UNORM`；特別在手勢底部上滑進入桌面／多工切換過場（L15605 `touch 0 down at 559,2353 edge`）時，L15606–L15766 連續觸發多次 `58×74 RGBA8Unorm` shadow texture `ERROR_FORMAT_NOT_SUPPORTED`。
+    2. `FUXI SCANOUT` 大量退回 `CPU` 與複製尖峰：`CPU` fallback 幀數由開機初段 `2`（`L8323`）累升至 `37`，操作 AppStore 期間再暴增至 **`718`**（`L12351–L15892 frames=12000 GPU=11282 CPU=718`）；同期 `SWEET FB: stats` 記錄 `copy_max_us` 達 **`81,979–84,575 us`**（`wait_mode1` 升至 `647`）。
+    3. GPU 提交佇列滿載拒絕：`FUXI GPU ABI` 於 L13220–L15821 出現 `full` 拒絕累計 **`29` 次**（`wired_mb` 峰值 `849 MB`、`peak_bos=2,836`、`ibs max=119`、`queue queued 598 deepest 4 refused present 0 full 29`）。
+    4. `FUXI MTL: gate deny` 與圖層警告：`SpringBoard`（L3627）與 `AppStore`（L9990、L15294、L15599）均按規則 `gate deny`（僅 `backboardd` 走 native Metal）；`AppStore` 日誌另有 `CATransformLayer` `masksToBounds`/`allowsGroupBlending` 警告。
+- **參考來源**：`U-026`、`U-031`、`G-052`、`G-053`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`。
+- **結論／未完成**：已將 `#472` 頁面移動／多工切換器黑色矩形條獨立立案為 `G-054`；目前僅完成日誌線索彙整，尚未定位單一根因，須於隔離目錄 `work/localbuild/b023-gpu-blacktile-1126/` 針對 `M2V shadow texture ERROR_FORMAT_NOT_SUPPORTED`、`SCANOUT CPU fallback` 尖峰、`queue full` 與過場時序進行專門二分除錯與復現驗證。
+- **出處**：`work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-proxy-t1-1126/`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`（待建隔離區：`work/localbuild/b023-gpu-blacktile-1126/`）。
+
 ## 盤點附註（2026-11-18）
 
 > 整理 GPU 紀錄時記下的漏讀與疑點，原文照錄（編號已改成本紀錄庫的編號）。處理後請在對應項目更新，並刪掉這裡的條目。

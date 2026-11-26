@@ -64,7 +64,7 @@
 
 <!-- INDEX:BEGIN -->
 
-共 443 項紀錄；目錄涵蓋 413 筆提交、267 份補丁、286 個開關、226 份測試、746 個檔案。
+共 446 項紀錄；目錄涵蓋 415 筆提交、267 份補丁、286 個開關、226 份測試、746 個檔案。
 
 ### S：上游繼承補丁（iOS 16、XNU 27 與 GPU 建置）（117 項）
 
@@ -242,7 +242,7 @@
 | [E-048](items/E-early.zh-TW.md#e-048-參考方案-raphael-wifi-port-planmdsm8150-wi-fi-移植紀律) | 參考方案 `RAPHAEL-WIFI-PORT-PLAN.md`（SM8150 Wi-Fi 移植紀律） | 結論：記錄 R35–R38 單變數輪次、BDF 選型與 15 項主機回歸檢查紀律 | `fuxi` |
 | [E-049](items/E-early.zh-TW.md#e-049-wcn7850-原廠韌體路線的-m5w17-主機模型) | WCN7850 原廠韌體路線的 M5–W17 主機模型 | 上游主機測試保留，後續實機延伸見 K-041～K-048，日常 ath12k 路線見 K-049 起。 | 早期模型依對應 docs-lanes 文件使用 WLAN 分階段實驗值。W17／P17 記於 wlan-p17.md 的 fuxiwlanmlo 選項。 |
 
-### G：GPU／顯示流暢度線（2026-11-08～11-15）（52 項）
+### G：GPU／顯示流暢度線（2026-11-08～11-15）（54 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -298,6 +298,8 @@
 | [G-050](items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) | 在 1080 寬面板顯示完整 1125 寬畫面並對齊觸控 | 兩種模式皆通過主機驗證；實機結果見下方。 | loader 的 `--display-fit uniform\|fill` 設定 ADT `/chosen fuxi,fit` 為 1 或 2。缺省值 0 沿用置中裁切。 |
 | [G-051](items/G-gpu.zh-TW.md#g-051-gpu-class-0-1280-mib-配額120-hz-te-鎖定backboardd-恢復與多用戶端閘門) | GPU Class 0 1280 MiB 配額、120 Hz TE 鎖定、backboardd 恢復與多用戶端閘門 | Class 0（1280 MiB）＋120 Hz TE 鎖定＋相機重進防掉 GPU 已通過並納入 B-021；Class 1（Apple Maps）因仍觸發 `ERROR_DEVICE_LOST`，依指示暫緩排除於 B-021 | ADT `/chosen fuxi,gpu-bb-recover=3`、`fuxi,gpu-ncimport=606385736`、`fuxi,gpu-clients=none`（B-021 日常版安全關閉 Class 1 Maps；實驗開放時另有其他 client 位元） |
 | [G-052](items/G-gpu.zh-TW.md#g-052-wave-2-120hz-純化整合m4-2-probe_0x4eposter-硬防護冷機-120hz-promotion-定論與-maps-phase-111212b469-隔離實驗實證) | Wave 2 120Hz 純化整合、M4-2 `probe_0x4e`、`*poster*` 硬防護、冷機 120Hz ProMotion 定論與 Maps Phase 11/12/12B／`#469` 隔離實驗實證 | **(A) 已併入 `B-022`**：Wave 2 三開關、`M4-2 probe_0x4e`、`stage-fuxi-metal.py` `*poster*` 硬防護、`Maps Class 1 quantum=100` 架構（日常預設 `--gpu-clients none` 關閉）、`#454` vs `#456` 冷機 120Hz 定論與 `Measure (P2-AR)`（`#457`）；**(B) 未併入 `B-022` 隔離實驗**：`#461` (`M4-3 v3`)、Phase 11 (`#464`/`#465`)、Phase 12 (`#466`)、Phase 12B (`#467`/`#468`) 與 `#469` 手動驗收暴露 `backboardd` 4096 BO 洩漏並經 `stage-rollback-stick14-b022-1126` 回退 `Stick-14`，交由 `B-023` 處理 | 開機參數 `fuxigpuquantum`（預設 `40`，實驗設 `100`）、`fuxigpuirqslice`（預設 `8000`）、`fuxigpulocksplit`（`1`）、`fuxinopoll`（`1`）；ADT `/chosen` 屬性 `fuxi,gpu-irqslice`、`fuxi,gpu-locksplit`、`fuxi,nopoll`、`fuxi,gpu-clients`（`none` / `minimal` / `core` / `maps-extended`，`B-022` 日常維持 `none`）、沿用 `fuxi,atx-fix=1`（`U-026`）；*[註：隔離實驗開關 `fuxi,gpu-c1-bos`（`B-022` `prepare-aio-loader.py` 僅以預設關閉 opt-in `0\|1024..4096` 支援）與 `fuxi,fb-blend`（屬獨立實驗線）未納入 `B-022` 日常開啟]* |
+| [G-053](items/G-gpu.zh-TW.md#g-053-b-023-gpu-隔離續查phase-12d-a-地圖雙層實測471與-0029-bo-洩漏修補-macos-ci-產物45838039605) | B-023 GPU 隔離續查：Phase 12D-A 地圖雙層實測（#471）與 0029 BO 洩漏修補 macOS CI 產物（#45838039605） | Phase 12D-A 地圖雙層實測（`boot #471`）完成取證並對稱還原 `Stick-14`（`shot3` 已呈現地圖向量實景但伴隨路網黑線描邊與 `shot3-step-b` 底部 1/4 全黑）；`0029` BO 洩漏修補 macOS CI `#45838039605` 已全綠通過並下載（`19/19` 檔案 SHA-256 驗證一致），尚待後續實機對照驗證；均屬 `B-023` 隔離線（未併入 `B-022` 日常版） | `fuxi,fb-blend`（`SWEET FB: multilayer SRC_OVER blend enabled (src=fuxi,fb-blend)`）、`fuxi,gpu-c1-bos=4096`、`fuxi,gpu-quantum=100`、`fuxi,tapcmd`；日常 `B-022` 維持 `--gpu-clients none` 與 `Stick-14` |
+| [G-054](items/G-gpu.zh-TW.md#g-054-未解決問題頁面移動與多工切換器卡片偶發閃現黑色矩形條472-實機回報) | 未解決問題：頁面移動與多工切換器卡片偶發閃現黑色矩形條（#472 實機回報） | 未解決（已獨立立案；於 `boot #472` 實機回報，預留隔離工作區 `work/localbuild/b023-gpu-blacktile-1126/` 待專門定位與復現） | `boot #472`（`native-b023-appstore-proxy-tap-1126-loader` / `kernel-local-b023-appstore-ui-9g-artifact`）測試現場出現；尚待比對是否僅於特定核心／負載／合成路徑復現 |
 
 ### K：核心硬體適配（000 線，2026-11-14 起）（84 項）
 
@@ -388,7 +390,7 @@
 | [K-083](items/K-kernel.zh-TW.md#k-083-wi-fi-掃描快取與連線加速ath12k-join-speed) | Wi-Fi 掃描快取與連線加速（ath12k join speed） | 實機掃描與快速連線驗證通過，已合併主分支並納入日常版 B-021 | ADT `/chosen fuxi,wifi-ux=8191`、開機參數 `fuxiwlancache=1` |
 | [K-084](items/K-kernel.zh-TW.md#k-084-option-b-核心基礎aks-sel-8233240160slot-7-der-entitlements容器去平台化與網路追蹤過濾0080) | Option B 核心基礎（AKS sel 8/23/32/40/160、Slot 7 DER Entitlements、容器去平台化）與網路追蹤過濾（0080） | 已正式合併至主分支（`ksrc 251339c`/`a00205b`、`harness 2ce4028`，納入 Scheme A `B-022` 29 補丁／63 主機測試）；`test-fuxi-net-trace.py` 測試位址已改為 RFC 5737 `192.0.2.10`，Option B `B-1` 合規 `0xB0` 純 Slot 7 DER 雙端實機驗證（`#462`/`#463`）與對稱安全卸載閉環（`stage-b1-remove-slot7der-b0-1126`）全數通過 | 開機參數 `fuxiuserappnoplat=0\|1`（預設 `0`）、`sweetnettrace=0\|1\|2`（預設 `0`）、`sweet_amfi_debug=0\|1`（預設 `0`，非 `PE_parse_boot_arg`）；ADT `/chosen` 屬性 `fuxi,user-app-noplatform`（u32，預設 `0`）、`fuxi,net-trace-filter`（u32，預設 `0`） |
 
-### U：iOS root 與使用者空間（30 項）
+### U：iOS root 與使用者空間（31 項）
 
 | 編號 | 項目 | 狀態 | 開關 |
 |---|---|---|---|
@@ -422,6 +424,7 @@
 | [U-028](items/U-userland.zh-TW.md#u-028-libfuxi-cameradylib-使用者態原生相機-isp2-stream-前後雙攝與自動化-e2e-交付iq8k-080-iq8b-核心) | `libfuxi-camera.dylib` 使用者態原生相機 ISP、2-stream 前後雙攝與自動化 E2E 交付（`iq8`＋`K-080` `iq8b` 核心） | 自動化主機測試與前後雙攝 E2E 實機驗證已通過（`Auto-Run 2`＋`Auto-Run 5d` `l5`/`auto_e2e` 均 PASS）；已備妥乾淨交付版 `native-cam1122-iq8b-user-loader`（基於 **`local-wsl (not a CI artifact)`** 核心 `K-080` 與 `iq8` HFS dylib 映像，未改動常駐 `boot_a`／`boot_b`），僅留必須人工實景驗收項目。 | ADT `/chosen` 屬性：`fuxi,camera=7`、`fuxi,camera-pll=1`、`fuxi,camera-dylib=1`、`fuxi,camera-back-sensor=3`、`fuxi,sb-ext=1`、`fuxi,atx-fix=1`（系統模糊防發紫）、`fuxi,rtc-persist=1`、`fuxi,rtc-user=1`、`fuxi,camera-tab`／`-ultra`／`-tele`；使用者交付 loader 命令列共 **605 B**（含 `fuxiperfidle=1000`、`fuxiwlan=1`，不含 `fuxitaps=`／`fuxi,tapcmd`／`fuxi,camera-multicam`／`fuxi,camera-mmnoc`）。 |
 | [U-029](items/U-userland.zh-TW.md#u-029-控制中心手電筒模組權限過濾與設定清單保護) | 控制中心手電筒模組權限過濾與設定清單保護 | 主機測試與實機驗證通過，已合併主分支並納入日常版 B-021（乾淨版 `sb-local-daily-b021-clean-artifact`） | 併入 `libfuxi-sb.dylib` 常駐載入（隨 SpringBoard 啟動生效） |
 | [U-030](items/U-userland.zh-TW.md#u-030-系統應用-class-1-相容矩陣實證與座標定址mobilenoteswebkitgpu三攝拍照錄影photosp1v2-與-measure-進介面全數實機驗證) | 系統應用 Class 1 相容矩陣實證與座標定址（`MobileNotes`、`WebKit.GPU`、三攝拍照錄影、`Photos`、`P1v2` 與 `Measure` 進介面全數實機驗證） | `P0-Core`（`#449` `MobileNotes`）、`P0-Cam`（`#450` 後置三攝＋錄影＋`Photos`）、`B0` / `B0-Folder`（`#451`/`#453` 座標定址）、`B-022 P1`（`#452` `WebKit.GPU`）、`P1v2`（`#458` `Stocks`/`Weather`/`MobileTimer` 純 UIKit 0 crash，不含背景既有系統／extension 項目）與 `Measure (P2-AR)`（`#457` 進介面 `admit(Class1)`×3 / `Measure` 0 crash，不含背景既有系統／extension 項目，取景黑背景受 Metal 特性限制）實機驗證全部結案；註：`#469` 暴露之 `M4-3 v3` `backboardd` 4096 BO 洩漏未入 `B-022` 日常配置 | `--gpu-clients core`（`105 B` 含 8 token：`Maps,com.apple.MapKit.SnapshotService,Weather,Stocks,MobileNotes,MobileTimer,Measure,com.apple.WebKit.GPU`）、`--gpu-quantum 100`、`--display-gamut sRGB`、`--atx-fix 1`、`--display-fit aspect`（`1080×2400` 1:1 座標對應）；`U-026` 永久封鎖 `SpringBoard`、`mediaserverd`、`backboardd` 與 `*poster*`（註：`B-022` 日常配置維持 `--gpu-clients none` 與 `Stick-14`） |
+| [U-031](items/U-userland.zh-TW.md#u-031-b-023-appstore-ui-route-2libfuxi-appstoredylib實機驗證與唯讀基線檢查t0boot-472) | B-023 AppStore UI Route 2（libfuxi-appstore.dylib）實機驗證與唯讀基線檢查（T0／boot #472） | `B-023` AppStore UI Route 2 唯讀基線（`T0`）與實機 `T1/T2`（`boot #472`）使用者手動進入商店瀏覽／搜尋／登入介面成功、`APSD` 雙口徑全通；`/usr/local/lib/fuxi/libfuxi-appstore.dylib`（`4d0f5473…`）暫留測試機待後續推進或清理；同步發現頁面移動／多工切換器卡片偶發閃現黑色矩形條新問題（已獨立立案 **`G-054`**） | `launch-loader-check.ps1` 唯讀基線檢查與 `-AppStoreDylib` 部署（將 `libfuxi-appstore.dylib` 安裝至 `/usr/local/lib/fuxi/libfuxi-appstore.dylib`）；Loader `native-b023-appstore-proxy-tap-1126-loader` 沿用隔離核心 `kernel-local-b023-appstore-ui-9g-artifact` 與 ADT `fuxi,tapcmd`；屬 `B-023` 隔離線（未併入 `B-022` 常駐日常 `boot_a`） |
 
 ### B：開機鏈、部署與雙系統選單（22 項）
 

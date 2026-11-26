@@ -869,3 +869,38 @@
 - **參考來源**：`U-026`、`U-028`、`K-081`、`G-051`、`G-052`、`B-022`、`work/localbuild/maps-canvas-1125/SYSAPPS_MATRIX_1126.md`。
 - **結論／未完成**：`MobileNotes`、`WebKit.GPU`（Safari）、`Camera` 後置三攝／錄影、`Photos` 與 `P1v2`（`Stocks`/`Weather`/`MobileTimer` 純 UIKit 顯示）皆已實機過關，`Measure` 已消除 `SIGTRAP` 進介面 0 crash（不含背景既有系統／extension 項目；AR 取景待後續 `FuxiNativeMetal` 補齊 `LibraryKind(1)` 與深度 resolve）；且 `#469` 暴露之 `M4-3 v3` 洩漏明確排除於 `B-022` 日常配置，待 `B-023` 解決 Class 1/Turnip 洩漏後再行檢討擴大開放前景 Class 1。
 - **出處**：`work/localbuild/maps-canvas-1125/SYSAPPS_MATRIX_1126.md`、`work/Codex-Xiaomi13-GPU-20261109/run-sysapps-p0-core-notes-timer-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-sysapps-p0-cam-photos-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-sysapps-b0-scout-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-sysapps-p1-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-b0-folder-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-measure-p2-1126/`、`work/Codex-Xiaomi13-GPU-20261109/run-b022-sysapps-p1v2-1126/`、`work/adsp-battery/fuxilog/20261126-091024/`、`work/adsp-battery/fuxilog/20261126-092354/`。
+
+### U-031 B-023 AppStore UI Route 2（libfuxi-appstore.dylib）實機驗證與唯讀基線檢查（T0／boot #472）
+
+- **日期**：2026-11-26（台北時間）
+- **狀態**：`B-023` AppStore UI Route 2 唯讀基線（`T0`）與實機 `T1/T2`（`boot #472`）使用者手動進入商店瀏覽／搜尋／登入介面成功、`APSD` 雙口徑全通；`/usr/local/lib/fuxi/libfuxi-appstore.dylib`（`4d0f5473…`）暫留測試機待後續推進或清理；同步發現頁面移動／多工切換器卡片偶發閃現黑色矩形條新問題（已獨立立案 **`G-054`**）
+- **開關**：`launch-loader-check.ps1` 唯讀基線檢查與 `-AppStoreDylib` 部署（將 `libfuxi-appstore.dylib` 安裝至 `/usr/local/lib/fuxi/libfuxi-appstore.dylib`）；Loader `native-b023-appstore-proxy-tap-1126-loader` 沿用隔離核心 `kernel-local-b023-appstore-ui-9g-artifact` 與 ADT `fuxi,tapcmd`；屬 `B-023` 隔離線（未併入 `B-022` 常駐日常 `boot_a`）
+- **問題／現象**：
+  1. 推進 `B-023` AppStore UI Route 2（`libfuxi-appstore.dylib`）實機驗證前，須先唯讀確認手機目前 `launchd`、`fairplayd.H2`、FairPlay／Accounts／timed 目錄與既有 crash 狀態，確保無預寫入風險。
+  2. 實機 `boot #472` 自動點擊 `t912,865` 因桌面圖示位變動命中 `Podcasts`；使用者隨後手動點擊開啟 `AppStore` 並操作瀏覽、搜尋與登入介面。
+  3. 雖 `AppStore` 商店頁面瀏覽與 `APSD` 代理請求皆成功，但 USB console 於 `t=129006 ms` 截斷（須由 `mtd` `console.txt` 補齊完整軌跡），且使用者於操作期間回報「頁面移動／多工切換器卡片偶發閃現黑色矩形條」新問題（立案 **`G-054`**）。
+- **根因**：
+  1. `T0` 證實目前測試機 `/System/Library/xpc/launchd.plist` 中 `com.apple.fairplayd.H2` 為 `Disabled=true`，且 `/private/var/mobile/Library/FairPlay` 尚不存在，其餘 `appstored`/`amsaccountsd`/`akd` 等 8 個 daemon 未被全域停用，符合 AppStore UI Route 2（proxy 路徑）之預期基線。
+  2. 自動化 `fuxi,tapcmd` 的 `t912,865` 座標已與桌面實際 `Podcasts` 圖示重疊；手動操作驗證 `libfuxi-appstore.dylib` 注入與 `APSD` 代理層可在真實商店互動下穩定運作（頁面移動／多工黑條原因另見 `G-054` 續查）。
+- **做法**：
+  1. **T0 唯讀基線查驗（`inspect-b023-appstore-baseline-1126`）**：透過鎖定唯讀手機 NBD（`hfs_readonly=true`、`block_readonly=true`、`guest_root_overlay_writes=0`、`phone_read_blocks=47`）掃描 `xpc_launchd.plist`（530 項）、`disabled.plist`、相關目錄與 crash 清單，並產生 `provenance.json` 與 `powerlog-state.json`（`summary_sha256=85f75872…`）。
+  2. **Route 2 部署與 `boot #472` 實機驗證（`run-b023-appstore-proxy-t1-1126`）**：透過 `inspect-precheck-run-b023-appstore-proxy-t1-1126` 與 `run-run-b023-appstore-proxy-t1-1126-appstore-stage` 將 `libfuxi-appstore.dylib`（`88,448 B`，SHA-256 `4d0f5473d5d1fa2699a0c8c16dc8ae6e5d8afd7862ea93319b9e2e61603839d2`）部署至 `/usr/local/lib/fuxi/libfuxi-appstore.dylib`，再以 `native-b023-appstore-proxy-tap-1126-loader`（對應 `kernel-local-b023-appstore-ui-9g-artifact` `6a0efbbf…`）暫時 RAM 開機進行 `T1/T2` 驗證，並於回 Android 後拉回 `mtd` `console.txt`。
+- **復現**：
+  - `T0` 唯讀檢查目錄：`work/statusbar-fix/inspect-b023-appstore-baseline-1126/`（不動分區與 rootfs）。
+  - 實機 `boot #472` 對應產物：`work/localbuild/b023-appstore-ui-1126/artifact/libfuxi-appstore.dylib`、`work/Codex-Xiaomi13-GPU-20261109/kernel-local-b023-appstore-ui-9g-artifact/`、`work/Codex-Xiaomi13-GPU-20261109/native-b023-appstore-proxy-tap-1126-loader/`（`boot.img` `12092fad…`、`payload.bin` `27206600…`、`private.adt` `72,044 B`），暫時開機（不更動常駐 `boot_a`/`boot_b`）。
+- **主機測試**：
+  - `work/localbuild/b023-appstore-ui-1126/tests/`（`test_prepare_aio_loader.py`、`test_launch_loader_check.ps1`、`test_phone_readthrough_appstore.py`）與 `work/localbuild/verify-sb-shape.py` 驗簽（含 `--forbid-interpose`）於工具鏈整合（`T-062`）確認通過。
+  - `T0` 現場雜湊校驗：`powerlog-state.json` 實測 SHA-256 `85f75872021d6e6143035cebcf203d6c9fa59f053967a5568e5acea03c1691f4` 與 `provenance.json` `summary_sha256` 完全一致；`libfuxi-appstore.dylib` 實測 `88,448 B`（`4d0f5473d5d1fa2699a0c8c16dc8ae6e5d8afd7862ea93319b9e2e61603839d2`）與 `SHA256SUMS` 一致。
+- **驗證紀錄**：
+  - **`T0` 唯讀基線（`work/statusbar-fix/inspect-b023-appstore-baseline-1126/`）**：`provenance.json` (`360 B`, `dc12e9c1…`) 實測 `method="locked read-only phone NBD; HFS and guest block read-only"`、`guest_root_overlay_writes=0`、`phone_read_blocks=47`、`appstore_baseline=true`；`powerlog-state.json` (`13,336 B`, `85f75872…`) 實測 `hfs_readonly=true`、`block_readonly=true`、`database_contents_read=false`、`root_writes=0`、`/System/Library/xpc/launchd.plist` 內 `com.apple.fairplayd.H2 Disabled=true`（其餘 8 個 job 為 `missing`）、`/private/var/mobile/Library/FairPlay` `exists=false`、`/private/var/mobile/Library/Accounts` 存在（`6` 項含 `Accounts3.sqlite`）、`/private/var/db/timed` 存在（含 `fuxi-rtc-offset.bin` `64 B`）、`crash_reporter` 前 20 筆均 `appstore_related=false`。
+  - **`boot #472` USB 截斷前日誌與截圖（`work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-proxy-t1-1126/`）**：`boot.log` `697,487 B`（`\n=9,476`、含 `6` 獨立 `\r`，`splitlines()=9,482` 行；SHA-256 `89199515426198d9d7235d7964a0e4e2759655481388503264bae423fc3db8a2`），至 `t=129006 ms` 截斷；`L9005 tap 912,865` → `L9016 exec Podcasts`（`shot1`–`shot2-step-b` 實景為 Podcast 瀏覽頁）；使用者手動切換至 `AppStore` 後，`framebuffer-shot3-step.png`（`587,122 B`）呈現 AppStore「時下熱門遊戲」與「取得」介面、`framebuffer-shot3-step-b.png`（`735,309 B`）呈現 AppStore「搜尋」與頂部「取消 / 登入」介面。
+  - **`boot #472` 完整 `mtd` 日誌（`work/adsp-battery/fuxilog/20261126-224305/console.txt`）**：`1,287,480 B`（`\n=15,924`、含 `538` 個 `\r\n` 與 `6` 獨立 `\r`，`splitlines()=15,930` 行；SHA-256 `1433cd58553f3908d0fd340eb9cd499b771a7fa3012372b26dc49a386aa3ab98`；前 `697,487 B` 與 `boot.log` 逐位元組一致），覆蓋至 `t≈295012 ms`；全程 `panic=0`、`REAL_FAULTS=0`、`DEV_LOST=0`、`AppStore`/`SpringBoard`/`backboardd`/`appstored` `CRASH=0`（另有 5 筆無關系統背景 timeout／`driverkitd sig 9`）。
+  - **`APSD` 代理實測統計（全數 `|AppStore|`，`exec AppStore` 共啟動 3 次）**：
+    - 事件主行口徑（`|AppStore| APSD `）：`INIT=3`、`INST=15`、`AMS_DONE=80`（實測 **`http=200: 80`、`non200=0`**）、`PROXY_TOK=44`、`PROXY_RW=42`、`PROXY_IMG=66`。
+    - 含 `APSD+` 續行總行數口徑：`AMS_DONE=156` 行（80 主行 + 76 續行）、`PROXY_RW=153` 行（42 主行 + 111 續行）、`PROXY_IMG=67` 行（66 主行 + 1 續行）。
+  - **新發現待查問題**：實機操作期間使用者回報頁面移動／多工切換器卡片偶發閃現黑色矩形條（實拍存於對話附件 `media_1795703878037_71d095e2.jpg`），已獨立立案於 **`G-054`**。
+- **參考來源**：`B-022`、`U-026`、`G-054`、`T-062`、`work/adsp-battery/prepare-aio-loader.py`、`work/statusbar-fix/launch-loader-check.ps1`、`work/statusbar-fix/phone-readthrough.py`、`work/localbuild/verify-sb-shape.py`。
+- **結論／未完成**：
+  - `T0` 唯讀基線與 `boot #472` `AppStore` UI Route 2 瀏覽／搜尋／登入及 `APSD` 代理請求（`http=200` 零非 200 錯誤）已於實機驗證通過；`/usr/local/lib/fuxi/libfuxi-appstore.dylib`（`4d0f5473…`）暫留測試機待後續推進或清理。
+  - 後續待辦：① 修正自動化點擊座標避開 `Podcasts`（不影響手動實證）；② 續推原生/完整 `T4` 安裝／登入鏈路（`b023-appstore-t4-1126` 隔離線）；③ 針對 `#472` 回報之頁動／多工黑塊依 **`G-054`** 專門定位。
+- **出處**：`work/statusbar-fix/inspect-b023-appstore-baseline-1126/`、`work/statusbar-fix/inspect-precheck-run-b023-appstore-proxy-t1-1126/`、`work/statusbar-fix/run-run-b023-appstore-proxy-t1-1126-appstore-stage/`、`work/Codex-Xiaomi13-GPU-20261109/kernel-local-b023-appstore-ui-9g-artifact/`、`work/Codex-Xiaomi13-GPU-20261109/native-b023-appstore-proxy-tap-1126-loader/`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-appstore-proxy-t1-1126/`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`、`work/localbuild/b023-appstore-ui-1126/artifact/libfuxi-appstore.dylib`。
