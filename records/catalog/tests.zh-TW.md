@@ -208,6 +208,7 @@
 | `harness:tests/test-perf-governor.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `harness:tests/test-surface-plane-result.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml、kernel-surface-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `harness:tests/test-surfrow-mode2.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:tools/test-appstore-proxy.c` |  | [U-033](../items/U-userland.zh-TW.md#u-033-b-023-appstore-t5-混合探針建置補丁整合與共存實機驗證boot-474fxinj1406-與-fairplaydh2store-daemon-300s-共存) |
 | `harness:tools/test-atx-fix.c` | sb-shape.yml | [U-026](../items/U-userland.zh-TW.md#u-026-springboardpreferences-偽-pre-twiddled-astc-atx-cpu-解碼改走線性解碼修復系統模糊背景區域發紫fuxiatx-fix) |
 | `harness:tools/test-audio-mic-dsp.c` | sb-shape.yml | [U-027](../items/U-userland.zh-TW.md#u-027-麥克風錄音品質與鍵盤聽寫修復fuxiaudio-mic-dsp-旁路fuxiaudio-啟動預緩衝4-hz-hpf0x0c08-增益與-fuxibluetoothlog-防崩潰) |
 | `harness:tools/test-bluetooth-patch.c` | sb-shape.yml | [U-023](../items/U-userland.zh-TW.md#u-023-bluetoothd-相容修補關藍牙閃退與單實例-ble-廣播fuxibt-fix) |
@@ -219,7 +220,7 @@
 | `harness:tools/test-vibe-worker.py` | sb-shape.yml | [U-004](../items/U-userland.zh-TW.md#u-004-ios-震動交給核心-hap525-執行期mediaserverdfigvibratormediaexperience) |
 | `harness:tools/test-volhud-layout.c` | sb-shape.yml | [U-001](../items/U-userland.zh-TW.md#u-001-springboard-形狀函式庫-libfuxi-sbdylib狀態欄打孔區) |
 | `ws:dualboot/tests/host.c` |  | [B-004](../items/B-boot.zh-TW.md#b-004-雙系統開機選單boot_a-常駐)、[B-011](../items/B-boot.zh-TW.md#b-011-a-槽選單顯示倒數10-秒後自動進-android) |
-| `ws:dualboot/tests/test-remove-ksu.py` |  | [B-005](../items/B-boot.zh-TW.md#b-005-移除-ksu-模組檢查移到主機) |
+| `ws:dualboot/tests/test-remove-ksu.py` |  | [B-005](../items/B-boot.zh-TW.md#b-005-移除-ksu-模組檢查移到主機)、[U-033](../items/U-userland.zh-TW.md#u-033-b-023-appstore-t5-混合探針建置補丁整合與共存實機驗證boot-474fxinj1406-與-fairplaydh2store-daemon-300s-共存) |
 | `ws:work/adsp-battery/test-amp-run-cs35l41.py` |  | [K-078](../items/K-kernel.zh-TW.md#k-078-用目前-adsp-驗證-fuxi-喇叭與播放圖) |
 | `ws:work/adsp-battery/test-amp-tone-cs35l41.py` |  | [K-078](../items/K-kernel.zh-TW.md#k-078-用目前-adsp-驗證-fuxi-喇叭與播放圖) |
 | `ws:work/adsp-battery/test-haptic-apid.py` |  | [K-033](../items/K-kernel.zh-TW.md#k-033-hap525-direct_play-震動執行期) |
