@@ -1,0 +1,3024 @@
+diff --git a/tools/test-fuxi-adreno-abi-perf.py b/tools/test-fuxi-adreno-abi-perf.py
+index 7cc04fd..1da3d0a 100644
+--- a/tools/test-fuxi-adreno-abi-perf.py
++++ b/tools/test-fuxi-adreno-abi-perf.py
+@@ -124,7 +124,7 @@ int main() {
+ 
+ def main():
+     src = (ROOT/'xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp').read_text()
+-    stats = src[src.index('static IOLock *statLock;'):src.index('static bool connected;')]
++    stats = src[src.index('static IOLock *statLock;'):src.index('/* Multi-client M9:')]
+     step = src[src.index('static const char *abiStep('):src.index('class FuxiAdrenoUserClient :')]
+     log = src[src.index('extern "C" void fuxi_gpu_abi_stats_log(void)'):src.index('extern "C" void fuxi_gpu_abi_publish(void)')]
+     with tempfile.TemporaryDirectory() as tmp:
+diff --git a/tools/test-fuxi-gpu-irq.py b/tools/test-fuxi-gpu-irq.py
+index 8d22796..7e8ce79 100644
+--- a/tools/test-fuxi-gpu-irq.py
++++ b/tools/test-fuxi-gpu-irq.py
+@@ -182,8 +182,11 @@ typedef int IOReturn;
+ enum { kIOReturnSuccess = 0, kIOReturnTimeout = 1, kIOReturnIOError = 2 };
+ enum { FG_ABI_STAT_SLEEP = 19 };
+ static uint64_t now;
++static uint32_t irqSliceUs = 1000;
++static unsigned lastSleepUs;
+ static uint64_t mach_absolute_time() { return now; }
+ static void nanoseconds_to_absolutetime(uint64_t ns, uint64_t *t) { *t = ns; }
++static void absolutetime_to_nanoseconds(uint64_t t, uint64_t *n) { *n = t; }
+ static int polls[64], npoll, pollAt, irqArmed, sleepRet[64], nsleep, sleepAt, pauses, stats, setups;
+ static uint32_t seqNow, sleepSeq[64];
+ struct fuxi_gpu_vm;
+@@ -191,7 +194,7 @@ static int fuxi_gpu_abi_poll(uint64_t) { now += 1000; return pollAt < npoll ? po
+ static int fuxi_gpu_abi_vm_poll(struct fuxi_gpu_vm *, uint64_t f) { return fuxi_gpu_abi_poll(f); }
+ static int fuxi_gpu_irq_setup() { setups++; return irqArmed; }
+ static uint32_t fuxi_gpu_irq_seq() { return seqNow; }
+-static int fuxi_gpu_irq_sleep(uint32_t seq, uint64_t fence, unsigned us) { assert(fence == 9 && us == 1000); sleepSeq[sleepAt] = seq; now += 50000; return sleepRet[sleepAt++]; }
++static int fuxi_gpu_irq_sleep(uint32_t seq, uint64_t fence, unsigned us) { assert(fence == 9 && us >= 1 && us <= irqSliceUs); lastSleepUs = us; sleepSeq[sleepAt] = seq; now += 50000; return sleepRet[sleepAt++]; }
+ static int fuxi_gpu_irq_sleep_vm(struct fuxi_gpu_vm *, uint32_t seq, uint64_t fence, unsigned us) { return fuxi_gpu_irq_sleep(seq, fence, us); }
+ static void abiPause() { pauses++; now += 100000; }
+ static void abiStat(unsigned slot, uint64_t) { assert(slot == FG_ABI_STAT_SLEEP); stats++; }
+@@ -219,8 +222,18 @@ int main() {
+  reset(1); for (int i = 0; i < 64; i++) { polls[i] = 1; sleepRet[i] = 0; } npoll = 64; assert(c.spin(9, 200000, &retired, &first) == kIOReturnTimeout && sleepAt < 8);
+  c.vm_ = (struct fuxi_gpu_vm *)0x1;
+  reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
+- assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnSuccess && setups == 1 && sleepAt == 1);
+- puts("PASS: actual WaitFence spin: interrupt sleep while unwritten, poll when written/unarmed/off, one setup, retire stamp, errors and deadline");
++ assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnSuccess && setups == 1 && sleepAt == 1 && lastSleepUs == 1000);
++ /* Wave 2 irqSliceUs=8000: uses 8000 us on long waits, clamps to remaining deadline on short waits (<=2000 us). */
++ irqSliceUs = 8000;
++ reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
++ assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnSuccess && lastSleepUs == 8000);
++ reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
++ assert(c.spin(9, 2000000, &retired, &first) == kIOReturnSuccess && lastSleepUs >= 1 && lastSleepUs <= 2000);
++ irqSliceUs = 16000;
++ reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
++ assert(c.spin(9, 500000, &retired, &first) == kIOReturnSuccess && lastSleepUs >= 1 && lastSleepUs <= 500);
++ irqSliceUs = 1000;
++ puts("PASS: actual WaitFence spin: interrupt sleep while unwritten, poll when written/unarmed/off, one setup, retire stamp, errors, deadline and irqSliceUs clamping");
+ }
+ '''
+ 
+diff --git a/tools/test-fuxi-gpu-k1.py b/tools/test-fuxi-gpu-k1.py
+index d5972d2..d108ac5 100644
+--- a/tools/test-fuxi-gpu-k1.py
++++ b/tools/test-fuxi-gpu-k1.py
+@@ -37,14 +37,15 @@ struct IOBufferMemoryDescriptor: IOMemoryDescriptor {
+   *n=length-off;return (UINT64_C(1)<<36)-16384+off;                 // ends at/after 2^36
+  }
+ };
++static void (*bindHook)();
+ struct FuxiAdrenoBoView {
+  IOBufferMemoryDescriptor *backing=nullptr;
+- bool bind(IOBufferMemoryDescriptor *m) {backing=m;m->retain();return true;}
++ bool bind(IOBufferMemoryDescriptor *m) {if(bindHook)bindHook();backing=m;m->retain();return true;}
+  void release() {if(backing){backing->complete();backing->release();}delete this;}
+ };
+ '''
+ EXTRA = r'''
+-constexpr int kIOReturnNotReady=6,kIOReturnTimeout=7,kIOReturnUnsupported=8,kIOReturnNotOpen=9;
++constexpr int kIOReturnNotReady=7,kIOReturnTimeout=8,kIOReturnUnsupported=9;
+ static bool available=true;
+ static int timeRc,statusRc;
+ static uint64_t gpuTicks=0xabcdef0123456789ULL,gpuFaults=7,gpuSuspends=3;
+@@ -374,6 +375,33 @@ int main() {
+   assert(!call(a2,2,&al,&o3));
+   assert(!call(a2,4,&fr2,nullptr) && !a1.clientClose() && !a2.clientClose());
+  }
++ // Wave 2 lockSplitEnabled=1: BoAlloc/BoImport/BoFree/Submit/clientClose and regression test for valid==true && !live_ (no double complete)
++ {
++  lockSplitEnabled=1;
++  Client w; w.live_=true;
++  NativeAdrenoAbiBoAlloc wa{65536,12,0}; NativeAdrenoAbiBoAllocReply wOut{};
++  assert(!call(w,2,&wa,&wOut) && w.wired_==65536 && !w.inflightUnlocked_ && lockDepth==0);
++  Client::Bo *wb=w.find(wOut.handle); assert(wb && !wb->pendingAlloc && !wb->dropping);
++  wb->iova=0x20100000;
++  NativeAdrenoAbiSubmit sub{}; sub.buffer_count=1; sub.buffers[0]={wOut.handle,0x20100000,4096};
++  NativeAdrenoAbiSubmitReply sr{}; submitRc=0; submitBusy=1; eventWaits=0; eventWoke=true;
++  assert(!call(w,5,&sub,&sr) && eventWaits==1 && lastWaitDepth==0 && !w.inflightUnlocked_ && lockDepth==0);
++  submitBusy=0;
++  NativeAdrenoAbiBoImport wimp{0x100000,16384}; NativeAdrenoAbiBoAllocReply wiOut{};
++  assert(!call(w,16,&wimp,&wiOut) && w.liveImports_==1 && !w.inflightUnlocked_ && lockDepth==0);
++  NativeAdrenoAbiBoFree wf1{wOut.handle}, wf2{wiOut.handle};
++  assert(!call(w,4,&wf1,nullptr) && !call(w,4,&wf2,nullptr) && !w.wired_ && !w.liveImports_ && !w.inflightUnlocked_);
++  // Regression test: allocate() succeeds view->bind() (valid==true), but clientClose kills live_ while unlocked -> single complete() only!
++  static Client *gKillClient = nullptr;
++  gKillClient = &w;
++  bindHook = []() { gKillClient->live_ = false; };
++  unsigned cBefore = completes;
++  assert(call(w,2,&wa,&wOut) == kIOReturnNotOpen);
++  bindHook = nullptr; gKillClient = nullptr;
++  assert(completes == cBefore + 1 && !descriptors && !w.wired_ && !w.liveBos_ && !w.inflightUnlocked_ && lockDepth==0);
++  w.live_=true; assert(!w.clientClose() && !w.vm_);
++  lockSplitEnabled=0;
++ }
+  assert(bbWaits==0 && bbWaitPeaks>=1);
+  puts("PASS: actual methods 7/8 dispatch/errors/lengths, 1024 BO allocation/refusal/reuse/close, handle index after churn, 128-IB and legacy 416-byte submit records, shared wired quota, metadata refusal and CPU leases, cached-coherent BOs, M9 lazy VM & Class 1 quotas");
+ }
+@@ -425,7 +453,7 @@ def main():
+  task_t task_=7;struct fuxi_gpu_vm *vm_=nullptr;char procName_[32]={};
+  uint64_t nextHandle_=1,wired_=0,lastFence_=0,firstFence_=0,submitAt_[16]={};
+  uint32_t nextToken_=1;bool queues_[8]={true};
+- int *lock_=&clientLock;bool live_=true;int pid_=0;
++ int *lock_=&clientLock;unsigned inflightUnlocked_=0;bool live_=true,closing_=false;int pid_=0;
+  void terminate(){} void result(){}
+  '''+set_class+ensure_vm+find+wait+''.join(host.method(source, n) for n in ('allocate', 'importHost', 'drop', 'run'))+memory+close+external+TEST
+     with tempfile.TemporaryDirectory() as tmp:
+diff --git a/tools/test-fuxi-gpu-scanout.py b/tools/test-fuxi-gpu-scanout.py
+index 1c721f2..a29eef5 100644
+--- a/tools/test-fuxi-gpu-scanout.py
++++ b/tools/test-fuxi-gpu-scanout.py
+@@ -1921,7 +1921,7 @@ static int IOLog(const char *format,...) {va_list args;va_start(args,format);vsn
+         declaration = source[source.index('class AppleCLCD :'):source.index('OSDefineMetaClassAndStructors(AppleCLCD')]
+         declaration = declaration.replace(': public IOMobileFramebuffer', '').replace('OSDeclareDefaultStructors(AppleCLCD);', 'public:')
+         methods = ''.join(display.function(source, n) for n in (
+-            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
++            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'sweet_fb_nopoll_mode', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
+             'AppleCLCD::presentWantedLocked', 'AppleCLCD::wakePresentLocked', 'sweet_fb_rearm',
+             'AppleCLCD::vsyncFired', 'AppleCLCD::scanoutLog', 'get32', 'AppleCLCD::observeRecord', 'AppleCLCD::recordDone', 'AppleCLCD::consumeRecord', 'AppleCLCD::retireEarly', 'AppleCLCD::releaseRecord',
+             'AppleCLCD::swapWait', 'AppleCLCD::stopRecords',
+diff --git a/tools/test-fuxi-gpu-wave2.py b/tools/test-fuxi-gpu-wave2.py
+new file mode 100644
+index 0000000..d009b48
+--- /dev/null
++++ b/tools/test-fuxi-gpu-wave2.py
+@@ -0,0 +1,1259 @@
++#!/usr/bin/env python3
++"""Wave 2 GPU host ASan/UBSan/LSan adversarial & simulation test suite.
++
++Covers:
++1. FuxiAdrenoUserClient lock split (fuxigpulocksplit / fuxi,gpu-locksplit):
++   - Concurrent close vs unlocked BoAlloc/BoImport/BoFree rollback
++   - BoFree waitUnlocked + Submit vs clientClose UAF barrier (inflightUnlocked_)
++   - b->dropping busy refusal on Submit and BoCpuMap
++   - Concurrent clientClose reentrancy serialization (closing_ flag)
++   - Two-segment wrap-around freeSlot() scan when free_hint_ > 0
++   - Regression test: BoAlloc valid==true && unlocked && !live_ single complete() only
++   - A/B lock_ contention p95/p99/max benchmark
++2. SweetFramebuffer TE observer & idle poll suppression (fuxinopoll / fuxi,nopoll):
++   - Mode clamping (2..7 -> 8, 8..16 preserved, >16 -> 0)
++   - Faithful fuxi_gpu_scanout_te() + teVsyncTick() + sweet_fb_rearm() simulation
++     under normal and extreme 420..500 us jitter + rapid toggle (0 TE losses, 0 past deadlines)
++3. WaitFence IRQ slice clamping (fuxigpuirqslice / fuxi,gpu-irqslice):
++   - Short deadline (2000 us) never oversleeps when irqSliceUs=8000/16000
++"""
++import argparse
++from pathlib import Path
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++
++CPP_SOURCE = r'''
++#include <algorithm>
++#include <atomic>
++#include <cassert>
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <thread>
++#include <utility>
++#include <vector>
++
++namespace {
++
++using Clock = std::chrono::steady_clock;
++
++uint64_t now_us() {
++  return static_cast<uint64_t>(
++      std::chrono::duration_cast<std::chrono::microseconds>(
++          Clock::now().time_since_epoch())
++          .count());
++}
++
++void busy_or_sleep_us(uint64_t us) {
++  if (us == 0) return;
++  std::this_thread::sleep_for(std::chrono::microseconds(us));
++}
++
++struct SimVm {
++  std::atomic<uint64_t> retired_fence{0};
++  std::atomic<uint32_t> magic{0x564D4F4Bu};
++  std::atomic<uint64_t> irq_sleep_calls{0};
++
++  int poll(uint64_t fence) const {
++    assert(magic.load(std::memory_order_acquire) == 0x564D4F4Bu);
++    return retired_fence.load(std::memory_order_acquire) >= fence ? 0 : 1;
++  }
++};
++
++struct SimBackingMemory {
++  std::vector<uint8_t> pages;
++  std::atomic<uint32_t> refs{1};
++  std::atomic<bool> prepared{false};
++  std::atomic<bool> wired{false};
++  std::atomic<unsigned> complete_calls{0};
++  bool fail_unwire = false;
++
++  explicit SimBackingMemory(size_t bytes, bool fail_unwire_ = false)
++      : pages(bytes, 0xA5), fail_unwire(fail_unwire_) {}
++  void retain() { refs.fetch_add(1, std::memory_order_relaxed); }
++  void release() {
++    uint32_t prev = refs.fetch_sub(1, std::memory_order_acq_rel);
++    assert(prev > 0);
++    if (prev == 1) {
++      assert(!prepared.load(std::memory_order_acquire));
++      delete this;
++    }
++  }
++  void prepare() {
++    assert(!prepared.exchange(true, std::memory_order_acq_rel));
++  }
++  void zero_pages() { std::memset(pages.data(), 0, pages.size()); }
++  void wire() { wired.store(true, std::memory_order_release); }
++  bool unwire() {
++    if (fail_unwire) return false;
++    wired.store(false, std::memory_order_release);
++    return true;
++  }
++  void complete() {
++    bool was_prepared = prepared.exchange(false, std::memory_order_acq_rel);
++    assert(was_prepared && "double complete() detected!");
++    complete_calls.fetch_add(1, std::memory_order_relaxed);
++  }
++};
++
++struct SimBoView {
++  SimBackingMemory *backing = nullptr;
++  bool bind(SimBackingMemory *m, bool fail_bind = false) {
++    if (fail_bind) return false;
++    backing = m;
++    backing->retain();
++    return true;
++  }
++  void release() {
++    if (backing) {
++      backing->complete();
++      backing->release();
++    }
++    delete this;
++  }
++};
++
++struct SimBo {
++  uint64_t handle = 0;
++  uint64_t bytes = 0;
++  uint64_t allocated = 0;
++  uint64_t iova = 0;
++  bool is_import = false;
++  bool pending_alloc = false;
++  bool dropping = false;
++  uint32_t leases = 0;
++  SimBackingMemory *mem = nullptr;
++  SimBoView *view = nullptr;
++};
++
++class SimUserClient {
++ public:
++  static constexpr size_t kMaxBos = 1024;
++  static constexpr uint32_t kMaxImports = 256;
++  static constexpr uint64_t kMaxWired = 256ULL * 1024 * 1024;
++
++  static constexpr int kOk = 0;
++  static constexpr int kNotOpen = -1;
++  static constexpr int kBadArg = -2;
++  static constexpr int kNoRes = -3;
++  static constexpr int kBusy = -4;
++  static constexpr int kTimeout = -5;
++
++  explicit SimUserClient(bool lock_split, uint32_t irq_slice_us = 1000)
++      : lock_split_(lock_split),
++        irq_slice_us_(std::clamp(irq_slice_us, 1000u, 16000u)),
++        bo_table_(new SimBo[kMaxBos]()),
++        vm_(new SimVm()) {}
++
++  ~SimUserClient() {
++    client_close();
++    delete[] bo_table_;
++    bo_table_ = nullptr;
++  }
++
++  void advance_fence(uint64_t f) {
++    std::lock_guard<std::mutex> lk(lock_);
++    if (vm_) vm_->retired_fence.store(f, std::memory_order_release);
++    ev_cv_.notify_all();
++  }
++
++  int wait_fence(uint64_t fence, uint64_t timeout_us, uint64_t *slept_us_out = nullptr) {
++    std::unique_lock<std::mutex> lk(lock_);
++    if (!live_) return kNotOpen;
++    return wait_unlocked_locked(fence, timeout_us, lk, slept_us_out);
++  }
++
++  int bo_cpu_map(uint64_t handle) {
++    std::unique_lock<std::mutex> lk(lock_);
++    if (!live_) return kNotOpen;
++    SimBo *b = find_locked(handle);
++    if (!b || b->is_import || b->leases == UINT32_MAX) return kBadArg;
++    if (b->dropping) return kBusy;
++    ++b->leases;
++    return kOk;
++  }
++
++  int bo_cpu_unmap(uint64_t handle) {
++    std::unique_lock<std::mutex> lk(lock_);
++    if (!live_) return kNotOpen;
++    SimBo *b = find_locked(handle);
++    if (!b || !b->leases) return kBadArg;
++    --b->leases;
++    return kOk;
++  }
++
++  int submit(uint64_t handle, uint64_t *lock_wait_us, uint64_t *total_us,
++             bool simulate_ring_wait = false, uint64_t ring_wait_us = 0) {
++    uint64_t t0 = now_us();
++    std::unique_lock<std::mutex> lk(lock_);
++    uint64_t t1 = now_us();
++    if (lock_wait_us) *lock_wait_us = t1 - t0;
++
++    if (!live_) {
++      if (total_us) *total_us = now_us() - t0;
++      return kNotOpen;
++    }
++
++    bool dropping = false;
++    auto lookup = [&]() -> SimBo * {
++      dropping = false;
++      SimBo *b = find_locked(handle);
++      if (!b || b->dropping || !b->iova) {
++        if (b && b->dropping) dropping = true;
++        return nullptr;
++      }
++      return b;
++    };
++
++    if (!lookup()) {
++      if (total_us) *total_us = now_us() - t0;
++      return dropping ? kBusy : kBadArg;
++    }
++
++    if (simulate_ring_wait && ring_wait_us > 0) {
++      enter_unlocked();
++      lk.unlock();
++      busy_or_sleep_us(ring_wait_us);
++      lk.lock();
++      leave_unlocked();
++      if (!live_) {
++        if (total_us) *total_us = now_us() - t0;
++        return kNotOpen;
++      }
++      if (!lookup()) {
++        if (total_us) *total_us = now_us() - t0;
++        return dropping ? kBusy : kBadArg;
++      }
++    }
++
++    busy_or_sleep_us(40);
++    if (!first_fence_) first_fence_ = 1;
++    ++last_fence_;
++    if (vm_) vm_->retired_fence.store(last_fence_, std::memory_order_release);
++    if (total_us) *total_us = now_us() - t0;
++    return kOk;
++  }
++
++  int submit_pending_fence(uint64_t handle, uint64_t *out_fence) {
++    std::unique_lock<std::mutex> lk(lock_);
++    if (!live_) return kNotOpen;
++    SimBo *b = find_locked(handle);
++    if (!b || b->dropping || !b->iova) return (b && b->dropping) ? kBusy : kBadArg;
++    if (!first_fence_) first_fence_ = 1;
++    ++last_fence_;
++    if (out_fence) *out_fence = last_fence_;
++    return kOk;
++  }
++
++  // Models allocate() including SimBoView bind + exact FuxiAdrenoUserClient::allocate() cleanup order
++  int bo_alloc(uint64_t bytes, uint64_t sim_work_us, uint64_t *out_handle,
++               bool map_immediately = true, bool fail_bind = false,
++               std::function<void()> after_bind_hook = nullptr,
++               unsigned *observed_complete_calls = nullptr) {
++    uint64_t allocated = (bytes + 16383ULL) & ~16383ULL;
++    std::unique_lock<std::mutex> lk(lock_);
++    if (!live_) return kNotOpen;
++    if (wired_ > kMaxWired || allocated > kMaxWired - wired_) return kNoRes;
++    SimBo *b = free_slot_locked();
++    if (!b) return kNoRes;
++
++    const bool unlocked = lock_split_;
++    if (unlocked) {
++      b->pending_alloc = true;
++      wired_ += allocated;
++      enter_unlocked();
++      lk.unlock();
++    }
++
++    auto *mem = new SimBackingMemory(static_cast<size_t>(allocated));
++    mem->prepare();
++    busy_or_sleep_us(sim_work_us);
++    mem->zero_pages();
++    auto *view = new SimBoView();
++    bool valid = view->bind(mem, fail_bind);
++    if (valid && after_bind_hook) after_bind_hook();
++
++    if (unlocked) {
++      lk.lock();
++      leave_unlocked();
++    }
++    if (!valid || (unlocked && !live_)) {
++      if (unlocked) {
++        wired_ -= allocated;
++        b->pending_alloc = false;
++        update_free_hint_locked(b);
++        lk.unlock();
++      }
++      if (observed_complete_calls) {
++        // Observe complete count safely before mem->release() deletes mem
++        if (view) view->release();
++        if (!valid) mem->complete();
++        *observed_complete_calls = mem->complete_calls.load(std::memory_order_relaxed);
++        mem->release();
++      } else {
++        if (view) view->release();
++        if (!valid) mem->complete();
++        mem->release();
++      }
++      return (unlocked && !live_) ? kNotOpen : kNoRes;
++    }
++
++    b->pending_alloc = false;
++    b->mem = mem;
++    b->view = view;
++    b->bytes = bytes;
++    b->allocated = allocated;
++    b->is_import = false;
++    b->handle = next_handle_++;
++    b->iova = map_immediately ? (0x10000000ULL + b->handle * 0x10000ULL) : 0;
++    if (!unlocked) wired_ += allocated;
++    ++live_bos_;
++    if (out_handle) *out_handle = b->handle;
++    return kOk;
++  }
++
++  int bo_import(uint64_t bytes, uint64_t sim_work_us, uint64_t *out_handle,
++                bool fail_unwire = false) {
++    std::unique_lock<std::mutex> lk(lock_);
++    if (!live_) return kNotOpen;
++    if (wired_ > kMaxWired || bytes > kMaxWired - wired_ || live_imports_ >= kMaxImports) {
++      return kNoRes;
++    }
++    SimBo *b = free_slot_locked();
++    if (!b) return kNoRes;
++
++    if (lock_split_) {
++      b->pending_alloc = true;
++      wired_ += bytes;
++      ++live_imports_;
++      enter_unlocked();
++      lk.unlock();
++    }
++
++    auto *mem = new SimBackingMemory(static_cast<size_t>(bytes), fail_unwire);
++    mem->prepare();
++    busy_or_sleep_us(sim_work_us);
++    mem->wire();
++
++    if (lock_split_) {
++      lk.lock();
++      leave_unlocked();
++      if (!live_) {
++        wired_ -= bytes;
++        if (live_imports_ > 0) --live_imports_;
++        b->pending_alloc = false;
++        update_free_hint_locked(b);
++        lk.unlock();
++        (void)mem->unwire();
++        mem->complete();
++        mem->release();
++        return kNotOpen;
++      }
++    }
++
++    b->pending_alloc = false;
++    b->mem = mem;
++    b->view = nullptr;
++    b->bytes = bytes;
++    b->allocated = bytes;
++    b->is_import = true;
++    b->handle = next_handle_++;
++    b->iova = 0x40000000ULL + b->handle * 0x10000ULL;
++    if (!lock_split_) {
++      wired_ += bytes;
++      ++live_imports_;
++    }
++    ++live_bos_;
++    if (out_handle) *out_handle = b->handle;
++    return kOk;
++  }
++
++  int bo_free(uint64_t handle, uint64_t sim_busy_wait_us = 0) {
++    std::unique_lock<std::mutex> lk(lock_);
++    if (!live_) return kNotOpen;
++    SimBo *b = find_locked(handle);
++    if (!b) return kBadArg;
++    if (b->leases || b->dropping) return kBusy;
++
++    if (lock_split_) {
++      if (sim_busy_wait_us > 0 && last_fence_) {
++        b->dropping = true;
++        ev_cv_.notify_all();
++        (void)wait_unlocked_locked(last_fence_, sim_busy_wait_us, lk, nullptr);
++        b = find_locked(handle);
++        if (b) b->dropping = false;
++        if (!live_) return kNotOpen;
++        if (!b) return kBadArg;
++        if (b->leases) return kBusy;
++      }
++      return drop_locked(*b, lk, true);
++    }
++    if (sim_busy_wait_us > 0) busy_or_sleep_us(sim_busy_wait_us);
++    return drop_locked(*b, lk, false);
++  }
++
++  void client_close() {
++    std::unique_lock<std::mutex> lk(lock_);
++    if (!bo_table_) return;
++    while (closing_) {
++      close_cv_.wait(lk);
++    }
++    bool do_close = live_;
++    if (do_close) {
++      live_ = false;
++      closing_ = true;
++      close_cv_.notify_all();
++      while (inflight_unlocked_ > 0) {
++        close_cv_.wait(lk);
++      }
++      for (size_t i = 0; i < kMaxBos; ++i) {
++        if (bo_table_[i].handle) {
++          assert(!bo_table_[i].dropping);
++          (void)drop_locked(bo_table_[i], lk, false);
++        }
++      }
++      if (vm_) {
++        vm_->magic.store(0, std::memory_order_release);
++        delete vm_;
++        vm_ = nullptr;
++      }
++      closing_ = false;
++      close_cv_.notify_all();
++    }
++    assert(!closing_);
++    assert(inflight_unlocked_ == 0);
++    assert(wired_ == 0);
++    assert(live_bos_ == 0);
++    assert(live_imports_ == 0);
++    assert(vm_ == nullptr);
++  }
++
++  void wait_until_closing_or_closed() {
++    std::unique_lock<std::mutex> lk(lock_);
++    close_cv_.wait(lk, [&]() { return !live_ || closing_; });
++  }
++  void wait_until_bo_dropping(uint64_t handle) {
++    std::unique_lock<std::mutex> lk(lock_);
++    ev_cv_.wait(lk, [&]() {
++      SimBo *b = find_locked(handle);
++      return !b || b->dropping;
++    });
++  }
++
++  void set_free_hint_for_test(size_t hint) {
++    std::lock_guard<std::mutex> lk(lock_);
++    free_hint_ = hint;
++  }
++  size_t slot_index_of(uint64_t handle) {
++    std::lock_guard<std::mutex> lk(lock_);
++    SimBo *b = find_locked(handle);
++    assert(b != nullptr);
++    return static_cast<size_t>(b - bo_table_);
++  }
++
++  uint64_t wired_bytes() { std::lock_guard<std::mutex> lk(lock_); return wired_; }
++  uint32_t live_bos() { std::lock_guard<std::mutex> lk(lock_); return live_bos_; }
++  uint32_t live_imports() { std::lock_guard<std::mutex> lk(lock_); return live_imports_; }
++  unsigned inflight_unlocked() { std::lock_guard<std::mutex> lk(lock_); return inflight_unlocked_; }
++  bool has_vm() { std::lock_guard<std::mutex> lk(lock_); return vm_ != nullptr; }
++  uint64_t unwire_fail_logs() { std::lock_guard<std::mutex> lk(lock_); return unwire_fail_logs_; }
++  bool is_bo_dropping(uint64_t handle) {
++    std::lock_guard<std::mutex> lk(lock_);
++    SimBo *b = find_locked(handle);
++    return b ? b->dropping : false;
++  }
++
++ private:
++  SimBo *find_locked(uint64_t handle) {
++    if (!handle || !bo_table_) return nullptr;
++    for (size_t i = 0; i < kMaxBos; ++i) {
++      if (bo_table_[i].handle == handle) return &bo_table_[i];
++    }
++    return nullptr;
++  }
++
++  SimBo *free_slot_locked() {
++    for (size_t i = free_hint_; i < kMaxBos; ++i) {
++      if (!bo_table_[i].handle && !bo_table_[i].pending_alloc && !bo_table_[i].dropping) {
++        free_hint_ = i;
++        return &bo_table_[i];
++      }
++    }
++    for (size_t i = 0; i < free_hint_; ++i) {
++      if (!bo_table_[i].handle && !bo_table_[i].pending_alloc && !bo_table_[i].dropping) {
++        free_hint_ = i;
++        return &bo_table_[i];
++      }
++    }
++    return nullptr;
++  }
++
++  void update_free_hint_locked(SimBo *b) {
++    size_t idx = static_cast<size_t>(b - bo_table_);
++    if (idx < free_hint_) free_hint_ = idx;
++  }
++
++  void enter_unlocked() { ++inflight_unlocked_; }
++  void leave_unlocked() {
++    assert(inflight_unlocked_ > 0);
++    if (--inflight_unlocked_ == 0) close_cv_.notify_all();
++  }
++
++  int wait_unlocked_locked(uint64_t fence, uint64_t timeout_us,
++                           std::unique_lock<std::mutex> &lk,
++                           uint64_t *slept_us_out) {
++    if (!fence || !first_fence_ || fence < first_fence_ || fence > last_fence_) {
++      return kBadArg;
++    }
++    enter_unlocked();
++    SimVm *vm = vm_;
++    lk.unlock();
++
++    uint64_t start = now_us();
++    uint64_t deadline = start + std::min<uint64_t>(timeout_us, 1000000ULL);
++    int rc = kTimeout;
++    for (;;) {
++      int s = vm ? vm->poll(fence) : 0;
++      if (s == 0) {
++        rc = kOk;
++        break;
++      }
++      uint64_t t = now_us();
++      if (t >= deadline) {
++        rc = kTimeout;
++        break;
++      }
++      uint64_t rem_us = deadline - t;
++      uint32_t slice = static_cast<uint32_t>(
++          std::min<uint64_t>(irq_slice_us_, std::max<uint64_t>(1ULL, rem_us)));
++      if (vm) vm->irq_sleep_calls.fetch_add(1, std::memory_order_relaxed);
++      busy_or_sleep_us(slice);
++    }
++
++    if (slept_us_out) *slept_us_out = now_us() - start;
++    lk.lock();
++    leave_unlocked();
++    return live_ ? rc : kNotOpen;
++  }
++
++  int drop_locked(SimBo &b, std::unique_lock<std::mutex> &lk, bool allow_unlock_teardown) {
++    SimBackingMemory *mem = b.mem;
++    SimBoView *view = b.view;
++    uint64_t alloc_bytes = b.allocated;
++    bool is_imp = b.is_import;
++    if (!allow_unlock_teardown && is_imp && mem && !mem->unwire()) {
++      return -6;
++    }
++    wired_ -= alloc_bytes;
++    --live_bos_;
++    if (is_imp && live_imports_ > 0) --live_imports_;
++    update_free_hint_locked(&b);
++    b = SimBo{};
++
++    if (allow_unlock_teardown && mem) {
++      enter_unlocked();
++      lk.unlock();
++      if (is_imp) {
++        if (!mem->unwire()) {
++          unwire_fail_count_atomic_.fetch_add(1, std::memory_order_relaxed);
++        }
++        mem->complete();
++        mem->release();
++      } else {
++        if (view) view->release();
++        else mem->complete();
++        mem->release();
++      }
++      lk.lock();
++      leave_unlocked();
++      unwire_fail_logs_ = unwire_fail_count_atomic_.load(std::memory_order_relaxed);
++    } else if (mem) {
++      if (is_imp) {
++        mem->complete();
++        mem->release();
++      } else {
++        if (view) view->release();
++        else mem->complete();
++        mem->release();
++      }
++    }
++    return kOk;
++  }
++
++  bool lock_split_;
++  uint32_t irq_slice_us_;
++  std::mutex lock_;
++  std::condition_variable close_cv_;
++  std::condition_variable ev_cv_;
++  SimBo *bo_table_ = nullptr;
++  SimVm *vm_ = nullptr;
++  size_t free_hint_ = 0;
++  uint64_t next_handle_ = 1;
++  uint64_t wired_ = 0;
++  uint64_t first_fence_ = 0;
++  uint64_t last_fence_ = 0;
++  uint32_t live_bos_ = 0;
++  uint32_t live_imports_ = 0;
++  unsigned inflight_unlocked_ = 0;
++  bool live_ = true;
++  bool closing_ = false;
++  uint64_t unwire_fail_logs_ = 0;
++  std::atomic<uint64_t> unwire_fail_count_atomic_{0};
++};
++
++struct FgTeObserver {
++  uint64_t edge = 0, period = 0, poll = 0, change = 0, raw_edge = 0;
++  unsigned frame = 0, raw_frame = 0, samples = 0, initialized = 0, nominal_us = 0;
++};
++
++struct TeSimResult {
++  uint64_t wakeups = 0;
++  uint64_t vsync_ticks = 0;
++  uint64_t active_polls = 0;
++  uint64_t idle_polls = 0;
++  uint64_t te_losses = 0;
++  uint64_t bracket_over_p4 = 0;
++  uint64_t max_bracket_us = 0;
++  uint64_t past_deadlines = 0;
++  uint64_t max_gpu_blit_detect_us = 0;
++};
++
++uint32_t clamp_nopoll_mode(uint32_t val) {
++  if (val == 1) return 1;
++  if (val >= 2 && val <= 7) return 8;
++  if (val >= 8 && val <= 16) return val;
++  return 0;
++}
++
++TeSimResult run_faithful_sweetfb_sim(uint32_t raw_no_poll_mode, uint64_t te_offset_us,
++                                      uint64_t true_panel_period_us, uint32_t active_frames,
++                                      uint64_t jitter_min_us = 0, uint64_t jitter_max_us = 150,
++                                      bool rapid_toggle = false) {
++  constexpr uint64_t kNominalUs = 8333;
++  constexpr uint64_t kBlitDurUs = 700;
++  constexpr uint64_t kIdleUs = 1500000;
++  const uint32_t no_poll_mode = clamp_nopoll_mode(raw_no_poll_mode);
++
++  FgTeObserver te{};
++  bool te_valid = false;
++  bool te_sent = false;
++  unsigned te_sent_frame = 0;
++  uint64_t te_next = 0;
++  uint64_t te_last_notify = 0;
++  uint64_t next_tick = kNominalUs;
++  uint64_t tick_abs = kNominalUs;
++  TeSimResult res{};
++  bool ever_locked = false;
++
++  uint32_t rng = 0x12345678u;
++  auto next_jitter = [&]() -> uint64_t {
++    rng = rng * 1664525u + 1013904223u;
++    uint64_t span = (jitter_max_us >= jitter_min_us) ? (jitter_max_us - jitter_min_us + 1u) : 1u;
++    return jitter_min_us + ((rng >> 16) % span);
++  };
++
++  auto hw_frame_at = [&](uint64_t t) -> unsigned {
++    return static_cast<unsigned>(t / true_panel_period_us) & 0xffffu;
++  };
++
++  auto fuxi_gpu_scanout_te_sim = [&](uint64_t now) -> int {
++    unsigned frame = hw_frame_at(now);
++    unsigned delta = (frame - te.frame) & 0xffffu;
++    if (!te.initialized || te.nominal_us != kNominalUs || now < te.poll ||
++        (!delta && now - te.change > te.period + te.period / 4)) {
++      te.period = kNominalUs;
++      te.nominal_us = static_cast<unsigned>(kNominalUs);
++      te.frame = frame;
++      te.poll = te.change = now;
++      te.raw_edge = te.edge = 0;
++      te.initialized = 1;
++      te.samples = 0;
++      return 0;
++    }
++    uint64_t previousPoll = te.poll;
++    uint64_t bracket = now - te.poll;
++    uint64_t raw = te.poll + bracket / 2;
++    te.poll = now;
++    if (!delta) return te.samples >= 2 ? 1 : 0;
++    if (ever_locked) {
++      if (bracket > res.max_bracket_us) res.max_bracket_us = bracket;
++      if (bracket > te.period / 4) ++res.bracket_over_p4;
++    }
++    te.frame = frame;
++    te.change = now;
++    if (delta != 1 || bracket > te.period / 4) {
++      uint64_t predicted = te.edge + delta * te.period;
++      uint64_t tolerance = te.period / 16;
++      if (te.samples >= 2 && delta <= 4 &&
++          predicted + tolerance >= previousPoll && predicted <= now + tolerance) {
++        te.edge = predicted < now ? predicted : now;
++        return 1;
++      }
++      te.samples = 0;
++      te.raw_edge = 0;
++      return 0;
++    }
++    if (te.samples) {
++      unsigned frames = (frame - te.raw_frame) & 0xffffu;
++      uint64_t measured = frames ? (raw - te.raw_edge) / frames : 0;
++      if (frames > 8 || measured < te.period * 3 / 4 || measured > te.period * 5 / 4) {
++        te.samples = 0;
++      } else {
++        int64_t error = static_cast<int64_t>(measured) - static_cast<int64_t>(te.period);
++        te.period += static_cast<uint64_t>(error / 8);
++      }
++    }
++    if (te.samples >= 2) {
++      uint64_t predicted = te.edge + te.period;
++      int64_t error = static_cast<int64_t>(raw) - static_cast<int64_t>(predicted);
++      te.edge = predicted + static_cast<uint64_t>(error / 4);
++      if (te.edge > now) te.edge = now;
++    } else {
++      te.edge = raw;
++    }
++    te.raw_edge = raw;
++    te.raw_frame = frame;
++    if (te.samples < 8) te.samples++;
++    return te.samples >= 2 ? 1 : 0;
++  };
++
++  auto te_vsync_tick = [&](uint64_t now, bool fallback) -> bool {
++    bool wasValid = te_valid;
++    te_valid = fuxi_gpu_scanout_te_sim(now) != 0;
++    if (!te_valid) {
++      if (wasValid && te_last_notify) {
++        next_tick = te_last_notify + tick_abs;
++        return now >= next_tick;
++      }
++      return fallback;
++    }
++    if (!wasValid) te_sent = false;
++    uint64_t offset = te_offset_us % te.period;
++    unsigned target = te_sent ? ((te_sent_frame + 1) & 0xffffu) : te.frame;
++    unsigned delta = (te.frame - target) & 0xffffu;
++    if (te_sent && delta > 0x7fffu) {
++      te_next = te.edge + te.period + offset;
++      return false;
++    }
++    if (!te_sent || delta == 0 || delta > 1) {
++      target = te.frame;
++      te_next = te.edge + offset;
++    }
++    if (now < te_next) return false;
++    te_sent = true;
++    te_sent_frame = target;
++    te_next = delta == 1 ? te.edge + offset : te_next + te.period;
++    if (te_last_notify && now - te_last_notify < te.period / 2) return false;
++    return true;
++  };
++
++  auto sweet_fb_rearm = [&](uint64_t now, bool active) -> uint64_t {
++    if (now >= next_tick) {
++      uint64_t step = (now - next_tick) / tick_abs + 1;
++      next_tick += step * tick_abs;
++    }
++    uint64_t deadline = next_tick;
++    uint64_t poll = now + tick_abs / 16;
++    if (te_valid) {
++      deadline = te_next;
++      uint64_t minPoll = te.period / 16;
++      if (!minPoll) minPoll = 1;
++      poll = now + minPoll;
++      if (no_poll_mode && !active && te.samples >= 2) {
++        if (no_poll_mode == 1) {
++          if (te.samples >= 4) {
++            uint64_t margin = te.period / 5;
++            uint64_t bracketStep = te.period / 8;
++            if (!bracketStep) bracketStep = minPoll;
++            uint64_t nextEdge = te.edge + te.period;
++            if (nextEdge > now + margin) {
++              uint64_t preEdge = nextEdge - margin;
++              poll = preEdge > now + minPoll ? preEdge : (now + minPoll);
++            } else if (nextEdge + margin > now) {
++              poll = now + bracketStep;
++            } else {
++              poll = now + minPoll;
++            }
++          }
++        } else {
++          uint64_t divStep = te.period / no_poll_mode;
++          poll = now + (divStep > minPoll ? divStep : minPoll);
++        }
++      }
++    }
++    if (poll < deadline || deadline <= now) deadline = poll;
++    if (deadline <= now) deadline = now + (te_valid && te.period >= 16 ? te.period / 16 : 1);
++    return deadline;
++  };
++
++  uint64_t now = 1000;
++  bool prev_locked = false;
++  uint32_t frames_submitted = 0;
++  bool gpu_pending = false;
++  uint64_t blit_end = 0;
++  uint64_t idle_start = 0;
++
++  while (true) {
++    ++res.wakeups;
++    bool vsync_tick = te_vsync_tick(now, now >= next_tick);
++    if (te_valid) ever_locked = true;
++    if (prev_locked && !te_valid) ++res.te_losses;
++    prev_locked = te_valid;
++
++    if (gpu_pending && now >= blit_end) {
++      uint64_t detect_delay = now - blit_end;
++      if (detect_delay > res.max_gpu_blit_detect_us) res.max_gpu_blit_detect_us = detect_delay;
++      gpu_pending = false;
++    }
++
++    if (vsync_tick) {
++      te_last_notify = now;
++      ++res.vsync_ticks;
++      bool want_submit = frames_submitted < active_frames && !gpu_pending;
++      if (rapid_toggle && (res.vsync_ticks % 5 == 2 || res.vsync_ticks % 5 == 4)) {
++        want_submit = false;
++      }
++      if (want_submit) {
++        gpu_pending = true;
++        blit_end = now + kBlitDurUs;
++        ++frames_submitted;
++        if (frames_submitted == active_frames) idle_start = now;
++      }
++    } else {
++      if (gpu_pending) ++res.active_polls;
++      else if (ever_locked) ++res.idle_polls;
++    }
++
++    if (frames_submitted >= active_frames && !gpu_pending && idle_start && now >= idle_start + kIdleUs) {
++      break;
++    }
++
++    uint64_t dl = sweet_fb_rearm(now, gpu_pending);
++    if (dl <= now) ++res.past_deadlines;
++    now = std::max(now + 1, dl) + next_jitter();
++  }
++
++  te_valid = true;
++  te.samples = 4;
++  te.period = true_panel_period_us;
++  te.edge = now - 2000;
++  te_next = now - 500;
++  uint64_t safe_dl = sweet_fb_rearm(now, false);
++  if (safe_dl <= now) ++res.past_deadlines;
++
++  return res;
++}
++
++struct LatencyStats {
++  size_t samples_count = 0;
++  uint64_t p50_us = 0;
++  uint64_t p95_us = 0;
++  uint64_t p99_us = 0;
++  uint64_t max_us = 0;
++  uint64_t over_budget = 0;
++  double avg_us = 0.0;
++};
++
++LatencyStats compute_stats(std::vector<uint64_t> samples, uint64_t budget_us) {
++  assert(!samples.empty());
++  std::sort(samples.begin(), samples.end());
++  uint64_t sum = 0;
++  uint64_t over = 0;
++  for (uint64_t v : samples) {
++    sum += v;
++    if (v > budget_us) ++over;
++  }
++  auto pct = [&](double p) -> uint64_t {
++    size_t idx = static_cast<size_t>(p * static_cast<double>(samples.size() - 1));
++    return samples[idx];
++  };
++  return LatencyStats{
++      samples.size(), pct(0.50), pct(0.95), pct(0.99), samples.back(), over,
++      static_cast<double>(sum) / static_cast<double>(samples.size()),
++  };
++}
++
++LatencyStats run_ab_contention_workload(bool lock_split) {
++  SimUserClient uc(lock_split);
++  uint64_t persistent_bo = 0;
++  assert(uc.bo_alloc(65536, 0, &persistent_bo) == 0);
++
++  std::atomic<bool> stop{false};
++  std::atomic<bool> bg_started{false};
++  std::vector<uint64_t> wait_samples;
++  wait_samples.reserve(400);
++
++  std::thread bg([&]() {
++    bg_started.store(true, std::memory_order_release);
++    for (int i = 0; i < 24; ++i) {
++      uint64_t h1 = 0, h2 = 0;
++      if (uc.bo_alloc(1024 * 1024, 10000, &h1) == 0) {
++        busy_or_sleep_us(1500);
++        (void)uc.bo_free(h1, 0);
++      }
++      busy_or_sleep_us(1500);
++      if (uc.bo_import(2 * 1024 * 1024, 14000, &h2) == 0) {
++        busy_or_sleep_us(1500);
++        uint64_t f = 0;
++        (void)uc.submit_pending_fence(persistent_bo, &f);
++        std::thread adv([&uc, f]() { busy_or_sleep_us(2000); uc.advance_fence(f); });
++        (void)uc.bo_free(h2, 5000);
++        adv.join();
++      }
++      busy_or_sleep_us(1500);
++    }
++    stop.store(true, std::memory_order_release);
++  });
++
++  while (!bg_started.load(std::memory_order_acquire)) std::this_thread::yield();
++
++  while (!stop.load(std::memory_order_acquire)) {
++    uint64_t lwait = 0, total = 0;
++    int rc = uc.submit(persistent_bo, &lwait, &total);
++    assert(rc == 0);
++    wait_samples.push_back(lwait);
++    busy_or_sleep_us(1500);
++    if (wait_samples.size() >= 600) break;
++  }
++
++  bg.join();
++  uc.client_close();
++  return compute_stats(std::move(wait_samples), 8333);
++}
++
++void test_bo_alloc_valid_close_no_double_complete() {
++  // 1. Regression: valid==true (view->bind succeeded) AND clientClose kills live_ while unlocked.
++  //    Must call memory->complete() EXACTLY ONCE (via view->release()) and return kNotOpen.
++  {
++    SimUserClient uc(true);
++    uint64_t h = 0;
++    unsigned comp_calls = 0;
++    std::thread killer;
++    int rc = uc.bo_alloc(
++        65536, 200, &h, true, /*fail_bind=*/false,
++        [&]() {
++          // Concurrent close sets live_=false and waits on inflightUnlocked_ until bo_alloc drops lock
++          killer = std::thread([&]() { uc.client_close(); });
++          uc.wait_until_closing_or_closed();
++        },
++        &comp_calls);
++    if (killer.joinable()) killer.join();
++    assert(rc == SimUserClient::kNotOpen);
++    assert(comp_calls == 1);
++    assert(uc.wired_bytes() == 0);
++    assert(uc.live_bos() == 0);
++    assert(uc.inflight_unlocked() == 0);
++  }
++  // 2. Also verify valid==false (view->bind failed) calls memory->complete() EXACTLY ONCE.
++  {
++    SimUserClient uc(true);
++    uint64_t h = 0;
++    unsigned comp_calls = 0;
++    int rc = uc.bo_alloc(65536, 0, &h, true, /*fail_bind=*/true, nullptr, &comp_calls);
++    assert(rc == SimUserClient::kNoRes);
++    assert(comp_calls == 1);
++    assert(uc.wired_bytes() == 0);
++    uc.client_close();
++  }
++  std::printf("[PASS] test_bo_alloc_valid_close_no_double_complete (valid==true&&!live_ & fail_bind single complete())\n");
++}
++
++void test_free_slot_wraparound() {
++  SimUserClient uc(true);
++  std::vector<uint64_t> handles(SimUserClient::kMaxBos, 0);
++  for (size_t i = 0; i < SimUserClient::kMaxBos; ++i) {
++    assert(uc.bo_alloc(16384, 0, &handles[i]) == 0);
++  }
++  uint64_t extra = 0;
++  assert(uc.bo_alloc(16384, 0, &extra) == SimUserClient::kNoRes);
++  // Free slot 3 while setting free_hint_ past it; wrap-around scan [0, free_hint_) must reclaim slot 3.
++  assert(uc.bo_free(handles[3], 0) == 0);
++  uc.set_free_hint_for_test(512);
++  uint64_t wrapped = 0;
++  assert(uc.bo_alloc(16384, 0, &wrapped) == 0);
++  assert(uc.slot_index_of(wrapped) == 3);
++  uc.client_close();
++  std::printf("[PASS] test_free_slot_wraparound (two-segment [freeHint, max) + [0, freeHint) scan)\n");
++}
++
++void test_concurrent_close_and_rollback() {
++  for (int trial = 0; trial < 20; ++trial) {
++    SimUserClient uc(true);
++    uint64_t base_bo = 0;
++    assert(uc.bo_alloc(65536, 0, &base_bo) == 0);
++    uint64_t f = 0;
++    assert(uc.submit_pending_fence(base_bo, &f) == 0);
++
++    std::atomic<bool> started{false};
++    std::thread t_alloc([&]() {
++      started.store(true, std::memory_order_release);
++      uint64_t h = 0;
++      (void)uc.bo_alloc(512 * 1024, 4000, &h);
++    });
++    std::thread t_import([&]() {
++      uint64_t h = 0;
++      (void)uc.bo_import(512 * 1024, 4000, &h);
++    });
++    std::thread t_free([&]() { (void)uc.bo_free(base_bo, 4000); });
++
++    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
++    busy_or_sleep_us(1000);
++    uc.client_close();
++
++    t_alloc.join();
++    t_import.join();
++    t_free.join();
++
++    assert(uc.wired_bytes() == 0);
++    assert(uc.live_bos() == 0);
++    assert(uc.live_imports() == 0);
++  }
++
++  {
++    SimUserClient uc(true);
++    uint64_t h1 = 0, h2 = 0, hi = 0;
++    assert(uc.bo_alloc(200ULL * 1024 * 1024, 100, &h1) == 0);
++    assert(uc.bo_alloc(100ULL * 1024 * 1024, 100, &h2) == SimUserClient::kNoRes);
++    assert(uc.wired_bytes() == 200ULL * 1024 * 1024);
++    assert(uc.bo_import(65536, 100, &hi, /*fail_unwire=*/true) == 0);
++    assert(uc.bo_free(hi, 0) == 0);
++    assert(uc.unwire_fail_logs() == 1);
++    uc.client_close();
++  }
++  std::printf("[PASS] test_concurrent_close_and_rollback (20 close-race trials + quota + unwire-log)\n");
++}
++
++void test_bo_free_vs_client_close_uaf() {
++  for (int trial = 0; trial < 30; ++trial) {
++    SimUserClient uc(true);
++    uint64_t bo = 0, f = 0;
++    assert(uc.bo_alloc(65536, 0, &bo) == 0);
++    assert(uc.submit_pending_fence(bo, &f) == 0);
++
++    std::atomic<bool> free_entered{false};
++    int free_rc = 999;
++    int sub_rc = 999;
++
++    std::thread t_free([&]() {
++      free_entered.store(true, std::memory_order_release);
++      free_rc = uc.bo_free(bo, 6000);
++    });
++    std::thread t_sub([&]() {
++      sub_rc = uc.submit(bo, nullptr, nullptr, true, 5000);
++    });
++
++    while (!free_entered.load(std::memory_order_acquire)) std::this_thread::yield();
++    busy_or_sleep_us(800);
++    uc.client_close();
++
++    t_free.join();
++    t_sub.join();
++
++    assert(free_rc == SimUserClient::kNotOpen || free_rc == SimUserClient::kOk);
++    assert(sub_rc == SimUserClient::kNotOpen || sub_rc == SimUserClient::kBusy || sub_rc == SimUserClient::kOk);
++    assert(!uc.is_bo_dropping(bo));
++    assert(!uc.has_vm());
++    assert(uc.live_bos() == 0);
++  }
++  std::printf("[PASS] test_bo_free_vs_client_close_uaf (30 trials BoFree waitUnlocked + Submit vs clientClose, 0 ASan UAF)\n");
++}
++
++void test_dropping_race_submit_and_cpumap() {
++  SimUserClient uc(true);
++  uint64_t bo = 0, f = 0;
++  assert(uc.bo_alloc(65536, 0, &bo) == 0);
++  assert(uc.submit_pending_fence(bo, &f) == 0);
++
++  std::atomic<bool> saw_dropping{false};
++  std::atomic<int> submit_during_drop{999};
++  std::atomic<int> cpumap_during_drop{999};
++
++  std::thread t_free([&]() {
++    int rc = uc.bo_free(bo, 500000);
++    assert(rc == SimUserClient::kOk);
++  });
++
++  uc.wait_until_bo_dropping(bo);
++  if (uc.is_bo_dropping(bo)) {
++    saw_dropping.store(true, std::memory_order_release);
++    submit_during_drop.store(uc.submit(bo, nullptr, nullptr), std::memory_order_release);
++    cpumap_during_drop.store(uc.bo_cpu_map(bo), std::memory_order_release);
++  }
++  uc.advance_fence(f);
++
++  t_free.join();
++  assert(saw_dropping.load(std::memory_order_acquire));
++  assert(submit_during_drop.load(std::memory_order_acquire) == SimUserClient::kBusy);
++  assert(cpumap_during_drop.load(std::memory_order_acquire) == SimUserClient::kBusy);
++  assert(uc.live_bos() == 0);
++  assert(uc.wired_bytes() == 0);
++  uc.client_close();
++  std::printf("[PASS] test_dropping_race_submit_and_cpumap (Submit=-4 Busy, BoCpuMap=-4 Busy while b->dropping=true)\n");
++}
++
++void test_double_client_close_reentrancy() {
++  for (int trial = 0; trial < 15; ++trial) {
++    SimUserClient uc(true);
++    uint64_t bo = 0;
++    assert(uc.bo_alloc(65536, 0, &bo) == 0);
++
++    std::atomic<bool> alloc_started{false};
++    std::thread t_alloc([&]() {
++      alloc_started.store(true, std::memory_order_release);
++      uint64_t h2 = 0;
++      (void)uc.bo_alloc(256 * 1024, 8000, &h2);
++    });
++    while (!alloc_started.load(std::memory_order_acquire)) std::this_thread::yield();
++    busy_or_sleep_us(1000);
++
++    std::atomic<bool> close1_done{false};
++    std::atomic<bool> close2_premature{false};
++    std::thread t_c1([&]() {
++      uc.client_close();
++      close1_done.store(true, std::memory_order_release);
++    });
++    busy_or_sleep_us(1000);
++    std::thread t_c2([&]() {
++      uc.client_close();
++      if (uc.inflight_unlocked() != 0 || uc.live_bos() != 0 || uc.has_vm()) {
++        close2_premature.store(true, std::memory_order_release);
++      }
++    });
++
++    t_alloc.join();
++    t_c1.join();
++    t_c2.join();
++    assert(close1_done.load(std::memory_order_acquire));
++    assert(!close2_premature.load(std::memory_order_acquire));
++  }
++  std::printf("[PASS] test_double_client_close_reentrancy (15 trials: closing_ barrier blocks premature 2nd return)\n");
++}
++
++void test_sweetfb_te_observer_and_past_deadline() {
++  assert(clamp_nopoll_mode(0) == 0);
++  assert(clamp_nopoll_mode(1) == 1);
++  for (uint32_t m = 2; m <= 7; ++m) assert(clamp_nopoll_mode(m) == 8);
++  for (uint32_t m = 8; m <= 16; ++m) assert(clamp_nopoll_mode(m) == m);
++  assert(clamp_nopoll_mode(17) == 0);
++
++  for (uint64_t offset : {6000ULL, 7800ULL}) {
++    TeSimResult leg = run_faithful_sweetfb_sim(0, offset, 8252, 600);
++    TeSimResult opt = run_faithful_sweetfb_sim(1, offset, 8252, 600);
++    TeSimResult div8 = run_faithful_sweetfb_sim(5, offset, 8252, 600);
++    assert(leg.wakeups >= 400 && opt.wakeups >= 400 && div8.wakeups >= 400);
++    assert(leg.te_losses == 0 && leg.bracket_over_p4 == 0);
++    assert(opt.te_losses == 0 && opt.bracket_over_p4 == 0);
++    assert(div8.te_losses == 0 && div8.bracket_over_p4 == 0);
++    assert(opt.past_deadlines == 0 && div8.past_deadlines == 0);
++    assert(opt.vsync_ticks >= leg.vsync_ticks - 1 && opt.vsync_ticks <= leg.vsync_ticks + 1);
++    assert(opt.max_gpu_blit_detect_us <= 8252 / 16 + 200);
++    assert(opt.idle_polls * 4 < leg.idle_polls);
++  }
++
++  for (uint64_t jmin : {420ULL, 0ULL}) {
++    for (uint64_t offset : {4000ULL, 6000ULL, 7800ULL}) {
++      TeSimResult leg = run_faithful_sweetfb_sim(0, offset, 8252, 300, jmin, 500, true);
++      assert(leg.te_losses == 0 && leg.bracket_over_p4 == 0);
++      for (uint32_t mode : {1u, 2u, 5u, 7u, 8u, 16u}) {
++        TeSimResult r = run_faithful_sweetfb_sim(mode, offset, 8252, 300, jmin, 500, true);
++        assert(r.te_losses == 0);
++        assert(r.bracket_over_p4 == 0);
++        assert(r.past_deadlines == 0);
++        assert(r.vsync_ticks >= leg.vsync_ticks - 2 && r.vsync_ticks <= leg.vsync_ticks + 2);
++        if (mode == 1u) {
++          assert(r.idle_polls * 5 < leg.idle_polls * 2);
++        } else if (clamp_nopoll_mode(mode) == 8u) {
++          assert(r.idle_polls * 4 < leg.idle_polls * 3);
++        }
++      }
++    }
++  }
++  std::printf("[PASS] test_sweetfb_te_observer_and_past_deadline (0 TE losses, 0 bracket>P/4, 0 past-dl)\n");
++}
++
++void test_irq_slice_clamping() {
++  for (uint32_t slice : {1000u, 8000u, 16000u}) {
++    SimUserClient uc(true, slice);
++    uint64_t bo = 0, f = 0, slept = 0;
++    assert(uc.bo_alloc(65536, 0, &bo) == 0);
++    assert(uc.submit_pending_fence(bo, &f) == 0);
++    int rc = uc.wait_fence(f, 2000, &slept);
++    assert(rc == SimUserClient::kTimeout);
++    assert(slept <= 4000ULL);
++    uc.client_close();
++  }
++  std::printf("[PASS] test_irq_slice_clamping (2000 us wait bounded under irqSliceUs=1000/8000/16000)\n");
++}
++
++}  // namespace
++
++int main() {
++  test_bo_alloc_valid_close_no_double_complete();
++  test_free_slot_wraparound();
++  test_concurrent_close_and_rollback();
++  test_bo_free_vs_client_close_uaf();
++  test_dropping_race_submit_and_cpumap();
++  test_double_client_close_reentrancy();
++  test_sweetfb_te_observer_and_past_deadline();
++  test_irq_slice_clamping();
++
++  LatencyStats legacy = run_ab_contention_workload(false);
++  LatencyStats split = run_ab_contention_workload(true);
++  std::printf("[METRIC] lock_ wait legacy p95=%llu max=%llu us | lockSplit=1 p95=%llu max=%llu us\n",
++              static_cast<unsigned long long>(legacy.p95_us),
++              static_cast<unsigned long long>(legacy.max_us),
++              static_cast<unsigned long long>(split.p95_us),
++              static_cast<unsigned long long>(split.max_us));
++  assert(legacy.p95_us >= 8333);
++  assert(legacy.over_budget > 0);
++  assert(split.p95_us < 1000);
++  assert(split.max_us < 2000);
++  assert(split.over_budget == 0);
++  std::printf("PASS: Wave 2 userclient lock split, SweetFB nopoll TE observer & IRQ slice ASan/UBSan suite\n");
++  return 0;
++}
++'''
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__)
++    ap.add_argument('--sanitize', action='store_true', help='Enable ASan+UBSan+LSan (always enabled)')
++    ap.parse_args()
++
++    uc = (ROOT / 'xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp').read_text()
++    fb = (ROOT / 'xnu/fuxi-unixnu/SweetFramebuffer.cpp').read_text()
++    scanout = (ROOT / 'xnu/fuxi-adreno/fuxi_gpu_scanout.inc').read_text()
++
++    for tok in (
++        'fuxigpulocksplit', 'fuxi,gpu-locksplit', 'if (!valid) memory->complete();',
++        'fuxigpuirqslice', 'fuxi,gpu-irqslice', 'FUXI GPU ABI: lock_ split enabled',
++        'FUXI GPU IRQ: WaitFence slice ceiling=',
++    ):
++        assert tok in uc, f'FuxiAdrenoUserClient.cpp missing {tok!r}'
++    for tok in (
++        'fuxinopoll', 'fuxi,nopoll', 'SWEET FB: idle TE poll suppress mode=',
++        'sweet_fb_nopoll_mode',
++    ):
++        assert tok in fb, f'SweetFramebuffer.cpp missing {tok!r}'
++    assert 'if (te->samples < 8) te->samples++;' in scanout
++
++    with tempfile.TemporaryDirectory(prefix='fuxi-gpu-wave2-') as tmp:
++        src = Path(tmp) / 'wave2_sim.cpp'
++        exe = Path(tmp) / 'wave2_sim'
++        src.write_text('#include <functional>\n' + CPP_SOURCE, encoding='utf-8')
++        subprocess.run([
++            'clang++', '-std=c++17', '-O2', '-g', '-Wall', '-Wextra', '-Werror',
++            '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-pthread',
++            str(src), '-o', str(exe),
++        ], check=True)
++        subprocess.run([str(exe)], check=True)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/test-fuxi-hostimport.py b/tools/test-fuxi-hostimport.py
+index 95fa22b..98b5216 100755
+--- a/tools/test-fuxi-hostimport.py
++++ b/tools/test-fuxi-hostimport.py
+@@ -31,9 +31,11 @@ using IOReturn=int;using IOByteCount=uint64_t;using ppnum_t=uint32_t;
+ using task_t=unsigned;using IOOptionBits=unsigned;
+ constexpr task_t kernel_task=99;
+ constexpr int kIOReturnSuccess=0,kIOReturnBadArgument=1,kIOReturnNoResources=2,
+- kIOReturnNoMemory=3,kIOReturnBusy=4,kIOReturnIOError=5;
++ kIOReturnNoMemory=3,kIOReturnBusy=4,kIOReturnIOError=5,kIOReturnNotOpen=6;
+ constexpr unsigned kIODirectionNone=0,kIODirectionIn=1,kIODirectionOut=2,kIODirectionInOut=3,kIOMapReadOnly=4096,kIOMemoryMapperNone=8,kIOMemoryPersistent=16,
+  kIOMapAnywhere=32,kIOMapDefaultCache=0;
++#define THREAD_UNINT 0
++static uint32_t lockSplitEnabled = 0;
+ #define bzero(p,n) memset(p,0,n)
+ static task_t caller=7;
+ static task_t current_task() {return caller;}
+@@ -46,6 +48,8 @@ static bool busy,undrained;
+ static int clientLock;
+ static void IOLockLock(int *){}
+ static void IOLockUnlock(int *){}
++static int IOLockSleep(int *, void *, int){ return 0; }
++static void IOLockWakeup(int *, void *, bool){}
+ static void IOLog(const char *,...){}
+ static void abiTrace(const char *,int,int){}
+ static void cboStat(int,uint64_t){}
+@@ -204,6 +208,16 @@ int main() {
+  assert(c.importHost(request,out)==kIOReturnNoResources);c.wired_=0;
+  c.nextHandle_=UINT64_MAX;assert(c.importHost(request,out)==kIOReturnNoResources);
+  assert(prepares>completes); // prepare failure itself never calls complete
++ // Wave 2 lockSplitEnabled=1: importHost + drop(b, true) teardown & all failure unwinds (1..13)
++ lockSplitEnabled=1;c.live_=true;c.nextHandle_=1;request.bytes=32768;fail=0;
++ assert(!c.importHost(request,out) && out.handle && c.wired_==32768 && c.liveImports_==1 && !c.inflightUnlocked_);
++ assert(!c.drop(c.bos_[0],true) && !c.wired_ && !c.liveImports_ && !c.inflightUnlocked_);empty();
++ for(fail=1;fail<=13;fail++) {
++  unsigned bf=completes;
++  assert(c.importHost(request,out)!=0 && !c.wired_ && !c.liveImports_ && !c.inflightUnlocked_);
++  empty();assert(completes==bf+(fail>=3));
++ }
++ fail=0;lockSplitEnabled=0;
+  puts("PASS: ABI2/16K/overflow/ownership/quota, actual import failure unwind, pin/map refs, busy free, task close, quarantine and idempotent release");
+ }
+ '''
+@@ -233,7 +247,9 @@ def main():
+  ~Client(){index_.release();}
+  task_t task_=7;struct fuxi_gpu_vm *vm_=nullptr;char procName_[32]={};
+  uint64_t nextHandle_=1,wired_=0,lastFence_=1;
+- int *lock_=&clientLock;bool live_=true;int pid_=0;
++ int *lock_=&clientLock;unsigned inflightUnlocked_=0;bool live_=true,closing_=false;int pid_=0;
++ void enterUnlocked() { ++inflightUnlocked_; }
++ void leaveUnlocked() { if (inflightUnlocked_ && --inflightUnlocked_==0) IOLockWakeup(lock_,&inflightUnlocked_,false); }
+  void terminate(){}
+  int wait(uint64_t,uint64_t) {waits++;busy=false;return undrained?kIOReturnIOError:0;}
+ ''' + method(source, 'importHost') + method(source, 'drop') + close + TEST
+diff --git a/tools/test-fuxi-metal2h.py b/tools/test-fuxi-metal2h.py
+index 7e61a44..9043759 100644
+--- a/tools/test-fuxi-metal2h.py
++++ b/tools/test-fuxi-metal2h.py
+@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[1]
+ 
+ def main():
+     client=(ROOT/'xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp').read_text()
+-    view=client[client.index('class FuxiAdrenoBoView'):client.index('\nstatic IOLock')]
++    view=client[client.index('class FuxiAdrenoBoView'):client.index('\nOSDefineMetaClassAndStructors(FuxiAdrenoBoView')] + '\nOSDefineMetaClassAndStructors(FuxiAdrenoBoView,IOSubMemoryDescriptor)\n'
+     drop=client[client.index(' IOReturn drop('):client.index(' IOReturn allocate(')]
+     lookup=client[client.index(' IOReturn clientMemoryForType('):client.index(' IOReturn clientClose(')].replace(' override','')
+     assert 'kIOMemoryTypePhysical' not in client and 'IOAddressRange' not in client
+@@ -23,8 +23,9 @@ def main():
+ #define OSDefineMetaClassAndStructors(x,y)
+ using IOReturn=int;using IOOptionBits=unsigned;using UInt32=unsigned;
+ constexpr int kIOReturnSuccess=0,kIOReturnBusy=1,kIOReturnIOError=2,kIOReturnBadArgument=3,kIOReturnNotFound=4;
+-constexpr unsigned kIODirectionNone=0,kIODirectionInOut=3,kIOMapAnywhere=1,kIOMapWriteCombineCache=2;
++constexpr unsigned kIODirectionNone=0,kIODirectionInOut=3,kIOMapAnywhere=1,kIOMapWriteCombineCache=2,kIOMapDefaultCache=0;
+ static unsigned freed,completed,unmaps;static bool failBind,failDrain;
++struct fuxi_gpu_vm;
+ struct IOMemoryDescriptor {
+  unsigned refs=1;virtual ~IOMemoryDescriptor()=default;
+  void retain() {++refs;} void release() {assert(refs);if(!--refs){free();delete this;}}
+@@ -44,16 +45,26 @@ struct IOSubMemoryDescriptor: IOMemoryDescriptor {
+  }
+  void free() override {if(parent)parent->release();}
+ };
+-static void IOLockLock(int) {} static void IOLockUnlock(int) {}
++static void IOLockLock(int *) {} static void IOLockUnlock(int *) {}
++static void IOLog(const char *,...) {}
+ static void abiTrace(const char *,int,int) {}
++static void cboStat(int,uint64_t) {}
+ static int fuxi_gpu_abi_unmap(uint64_t,uint64_t) {++unmaps;return failDrain?1:0;}
++static int fuxi_gpu_abi_vm_unmap(struct fuxi_gpu_vm *,uint64_t va,uint64_t bytes) {return fuxi_gpu_abi_unmap(va,bytes);}
++static void fuxi_gpu_abi_vm_release_quota(struct fuxi_gpu_vm *,uint32_t,uint64_t,uint32_t) {}
+ struct IOMemoryMap {int wireRange(unsigned,uint64_t,uint64_t){assert(false);return 1;}void release(){assert(false);}};
+ '''+view+r'''
+ struct Client {
+  struct Bo {IOBufferMemoryDescriptor *memory;FuxiAdrenoBoView *view;
+  uint64_t handle,bytes,allocated,iova;unsigned token,leases;
+- IOMemoryDescriptor *importMemory=nullptr;IOMemoryMap *importMap=nullptr;} bos_[1]={};
+- bool live_=true;int lock_=0,pid_=78;uint64_t wired_=65536;
++ IOMemoryDescriptor *importMemory=nullptr;IOMemoryMap *importMap=nullptr;
++ bool cached=false;} bos_[1]={};
++ struct fuxi_gpu_vm *vm_=nullptr;
++ unsigned inflightUnlocked_=0;
++ bool live_=true;int lockStorage_=0;int *lock_=&lockStorage_;int pid_=78;uint64_t wired_=65536;
++ void enterUnlocked() {++inflightUnlocked_;}
++ void leaveUnlocked() {if(inflightUnlocked_)--inflightUnlocked_;}
++ void unbound(Bo &) {}
+ '''+drop+lookup+r'''
+ };
+ int main() {
+@@ -71,7 +82,7 @@ int main() {
+   assert(c.clientMemoryForType(8,&options,&again)==kIOReturnNotFound && !again);
+   failDrain=true;assert(c.drop(c.bos_[0])==kIOReturnBusy && c.wired_==65536 && mem->prepared);failDrain=false;
+   if(!retained)map->release();
+-  assert(c.drop(c.bos_[0])==0 && !c.wired_);
++  assert(c.drop(c.bos_[0],retained==1)==0 && !c.wired_ && !c.inflightUnlocked_);
+   assert(completed==retained+(!retained) && freed==completed);
+   if(retained){assert(mem->prepared && mem->refs==2);map->release();}
+   assert(completed==retained+1 && freed==completed);
+@@ -79,7 +90,7 @@ int main() {
+  failBind=true;auto *mem=new IOBufferMemoryDescriptor;auto *view=new FuxiAdrenoBoView;
+  assert(!view->bind(mem));view->release();assert(mem->refs==1);mem->complete();mem->release();
+  assert(freed==3 && completed==3 && unmaps==4);
+- puts("PASS: real subdescriptor/cpu-map/drop; same pager and unmap identity, NC flags, retained mapping lifetime, failed bind/drain");
++ puts("PASS: real subdescriptor/cpu-map/drop; same pager and unmap identity, NC flags, retained mapping lifetime, failed bind/drain and unlock teardown");
+ }
+ '''
+     with tempfile.TemporaryDirectory() as tmp:
+diff --git a/tools/test-fuxi-unixnu.py b/tools/test-fuxi-unixnu.py
+index bacadc2..0937c7f 100755
+--- a/tools/test-fuxi-unixnu.py
++++ b/tools/test-fuxi-unixnu.py
+@@ -301,8 +301,21 @@ static uint64_t mach_absolute_time(void) {return ticks++;}
+ static void absolutetime_to_nanoseconds(uint64_t n,uint64_t *out) {*out=n;}
+ static unsigned teOption,teOffsetOption=7800,teReads;
+ static bool teOffsetPresent=true;
++static bool noPollBootPresent=false,noPollAdtPresent=false;
++static uint32_t noPollBootValue=0,noPollAdtValue=0;
++typedef void *DTEntry;
++constexpr int kSuccess=0;
++static int SecureDTLookupEntry(void *,const char *path,DTEntry *out) {
++ if(!noPollAdtPresent || strcmp(path,"/chosen"))return -1;
++ *out=(DTEntry)0x1;return kSuccess;
++}
++static int SecureDTGetProperty(DTEntry,const char *key,const void **prop,unsigned *bytes) {
++ if(!noPollAdtPresent || strcmp(key,"fuxi,nopoll"))return -1;
++ *prop=&noPollAdtValue;*bytes=sizeof(noPollAdtValue);return kSuccess;
++}
+ static bool PE_parse_boot_argn(const char *name,void *n,unsigned) {
+  if(!strcmp(name,"fuxivsynctoff") && !teOffsetPresent)return false;
++ if(!strcmp(name,"fuxinopoll")) { if(!noPollBootPresent)return false; *(unsigned *)n=noPollBootValue; return true; }
+  unsigned value=!strcmp(name,"fuxivsyncte")?teOption:!strcmp(name,"fuxivsynctoff")?teOffsetOption:1;
+  *(unsigned *)n=value;return true;
+ }
+@@ -1169,7 +1182,7 @@ def main():
+         declaration = declaration.replace(': public IOMobileFramebuffer', '').replace(
+             'OSDeclareDefaultStructors(AppleCLCD);', 'public:')
+         methods = ''.join(function(display, name) for name in (
+-            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
++            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'sweet_fb_nopoll_mode', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
+             'AppleCLCD::presentWantedLocked', 'AppleCLCD::wakePresentLocked', 'sweet_fb_rearm',
+             'AppleCLCD::vsyncFired', 'AppleCLCD::scanoutLog', 'get32', 'AppleCLCD::observeRecord', 'AppleCLCD::recordDone', 'AppleCLCD::consumeRecord', 'AppleCLCD::retireEarly', 'AppleCLCD::releaseRecord',
+             'AppleCLCD::swapWait', 'AppleCLCD::stopRecords',
+@@ -1182,6 +1195,63 @@ def main():
+                         '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                         '-I', str(SRC), str(cpp), '-o', str(tmp / 'display')], check=True)
+         subprocess.run([str(tmp / 'display')], check=True)
++        # Verify sweet_fb_nopoll_mode() boot-arg priority, /chosen fuxi,nopoll fallback, clamping & non-FUXI guard
++        nopoll_fn = function(display, 'sweet_fb_nopoll_mode')
++        nopoll_test = r'''
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#define FUXI 1
++typedef void *DTEntry;
++constexpr int kSuccess = 0;
++static bool bootPresent, adtPresent;
++static uint32_t bootVal, adtVal;
++static unsigned logs;
++static void IOLog(const char *, ...) { ++logs; }
++static bool PE_parse_boot_argn(const char *k, void *out, unsigned sz) {
++ if (!strcmp(k, "fuxinopoll") && bootPresent && sz == sizeof(uint32_t)) {
++  memcpy(out, &bootVal, sizeof(uint32_t)); return true;
++ }
++ return false;
++}
++static int SecureDTLookupEntry(void *, const char *path, DTEntry *out) {
++ if (!adtPresent || strcmp(path, "/chosen")) return -1;
++ *out = (DTEntry)0x1; return kSuccess;
++}
++static int SecureDTGetProperty(DTEntry, const char *key, const void **prop, unsigned *bytes) {
++ if (!adtPresent || strcmp(key, "fuxi,nopoll")) return -1;
++ *prop = &adtVal; *bytes = sizeof(adtVal); return kSuccess;
++}
++''' + nopoll_fn + r'''
++int main(int argc, char **argv) {
++ assert(argc == 5);
++ bootPresent = atoi(argv[1]) != 0;
++ bootVal = (uint32_t)atoi(argv[2]);
++ adtPresent = atoi(argv[3]) != 0;
++ adtVal = (uint32_t)atoi(argv[4]);
++ uint32_t got = sweet_fb_nopoll_mode();
++ printf("%u:%u\n", got, logs);
++ return 0;
++}
++'''
++        np_cpp = tmp / 'nopoll.cpp'
++        np_cpp.write_text(nopoll_test)
++        np_exe = tmp / 'nopoll'
++        subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
++                        '-fsanitize=address,undefined', str(np_cpp), '-o', str(np_exe)], check=True)
++        for args_in, expected in [
++            (('0', '0', '0', '0'), '0:0'),
++            (('0', '0', '1', '1'), '1:1'),
++            (('1', '0', '1', '1'), '0:0'),   # boot-arg=0 overrides ADT=1
++            (('1', '5', '1', '1'), '8:1'),   # 2..7 clamped to 8
++            (('0', '0', '1', '12'), '12:1'), # 8..16 preserved from ADT
++            (('0', '0', '1', '17'), '0:0'),  # >16 -> 0
++        ]:
++            out = subprocess.check_output([str(np_exe), *args_in], text=True).strip()
++            assert out == expected, (args_in, out, expected)
++        print('PASS: sweet_fb_nopoll_mode boot-arg priority, /chosen fuxi,nopoll fallback, clamping & opt-in log')
+         # Compile our ARM cache primitive as real AArch64 code (never run reference code).
+         arm = tmp / 'cache.c'
+         arm.write_text('typedef __UINTPTR_TYPE__ uintptr_t; typedef unsigned uint32_t;\n'
+diff --git a/xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp b/xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp
+index dac579e..5346157 100644
+--- a/xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp
++++ b/xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp
+@@ -68,7 +68,11 @@ extern "C" void fuxi_gpu_pt_free_kernel(void *handle) {
+ }
+ 
+ #include "FuxiHandleIndex.h"
++#include <pexpert/device_tree.h>
+ static IOLock *openLock;
++/* Wave 2 opt-in (fuxigpulocksplit=1 or /chosen fuxi,gpu-locksplit=1, default 0=off): offload
++ * BoAlloc/BoImport page preparation/zeroing/wiring and BoFree wait/descriptor teardown outside lock_. */
++static uint32_t lockSplitEnabled = 0;
+ /* Most BOs live at once in any client this boot (logged with the stats line; decides whether FG_ABI_MAX_BOS must grow). */
+ static unsigned peakBos;
+ static uint64_t compWiredCur, compWiredPeak;
+@@ -113,6 +117,9 @@ static void abiSplit(unsigned slot, uint64_t v) {
+ /* fuxigpuwaitus: WaitFence poll period in us (default 100; 0 = IOSleep(1)).
+  * A 1 ms sleep delays every frame's retirement by up to a timer period. */
+ static uint32_t waitPollUs __attribute__((unused)) = 100;
++/* Wave 2 opt-in (fuxigpuirqslice=<us> or /chosen fuxi,gpu-irqslice, default 1000, allowed 1000..16000):
++ * per-slice IRQ sleep ceiling in WaitFence clamped to remaining timeout so short waits never oversleep. */
++static uint32_t irqSliceUs __attribute__((unused)) = 1000;
+ static uint64_t waitCount __attribute__((unused)), waitPolls __attribute__((unused)),
+     waitNs __attribute__((unused)), waitMaxNs __attribute__((unused));
+ /* Every wait/busy-retry sleep, timed as the "sleep" phase. */
+@@ -198,7 +205,7 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   IOBufferMemoryDescriptor *memory;
+   IOMemoryDescriptor *importMemory;
+   IOMemoryMap *importMap;
+-  bool importRo, cached;
++  bool importRo, cached, pendingAlloc, dropping;
+   FuxiAdrenoBoView *view;
+   uint64_t handle, bytes, allocated, iova;
+   uint32_t token, leases, metadataBytes;
+@@ -220,7 +227,8 @@ class FuxiAdrenoUserClient : public IOUserClient {
+  uint64_t maxWired_ = FG_ABI_COMPOSITOR_MAX_WIRED_BYTES;
+  unsigned clientClass_ = FG_CLASS_COMPOSITOR;
+  Bo *freeSlot() {
+-  for (unsigned i=freeHint_;i<maxBos_;i++) if (!bos_[i].handle) { freeHint_=i; return &bos_[i]; }
++  for (unsigned i=freeHint_;i<maxBos_;i++) if (!bos_[i].handle && !bos_[i].pendingAlloc && !bos_[i].dropping) { freeHint_=i; return &bos_[i]; }
++  for (unsigned i=0;i<freeHint_;i++) if (!bos_[i].handle && !bos_[i].pendingAlloc && !bos_[i].dropping) { freeHint_=i; return &bos_[i]; }
+   return nullptr;
+  }
+  void bound(Bo &b) {
+@@ -240,7 +248,8 @@ class FuxiAdrenoUserClient : public IOUserClient {
+  struct fuxi_gpu_vm *vm_ = nullptr;
+  char procName_[32] = {};
+  IOLock *lock_ = nullptr;
+- bool live_ = false, diagnostic_ = false, resultChecked_ = false;
++ unsigned inflightUnlocked_ = 0;
++ bool live_ = false, closing_ = false, diagnostic_ = false, resultChecked_ = false;
+  int pid_ = 0;
+  void result() {
+   if (!diagnostic_ || resultChecked_) return;
+@@ -275,20 +284,24 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   uint64_t retired; bool first;
+   return spin(fence,ns,&retired,&first);
+  }
++ void enterUnlocked() { ++inflightUnlocked_; }
++ void leaveUnlocked() { if (inflightUnlocked_ && --inflightUnlocked_==0) IOLockWakeup(lock_,&inflightUnlocked_,false); }
+  /* Sleeps without lock_, so other threads can submit or allocate meanwhile;
+   * only the fence number is used until the lock is retaken. */
+  IOReturn waitUnlocked(uint64_t fence, uint64_t ns) {
+   if (!fence || !firstFence_ || fence<firstFence_ || fence>lastFence_) return kIOReturnBadArgument;
+   uint64_t at=lastFence_-fence<16 ? submitAt_[fence&15] : 0, retired=0; bool first=false;
++  enterUnlocked();
+   IOLockUnlock(lock_);
+   IOReturn rc=spin(fence,ns,&retired,&first);
+   if (rc==kIOReturnSuccess) pendStat(at,retired,first);
+   IOLockLock(lock_);
++  leaveUnlocked();
+   return live_ ? rc : kIOReturnNotOpen;
+  }
+- /* fuxigpuncimport bit 26: while the fence value is unwritten, sleep on the GPU fence interrupt (at most 1 ms a slice, as
+-  * UniXNU-sheng's waiters) instead of a waitPollUs poll; the interrupt count is read before each poll so one landing in between is
+-  * not slept through. Written but not yet retired (ring draining), not armed or masked: poll as before. */
++ /* fuxigpuncimport bit 26: while the fence value is unwritten, sleep on the GPU fence interrupt (at most irqSliceUs a slice,
++  * clamped to remaining timeout) instead of a waitPollUs poll; the interrupt count is read before each poll so one landing in
++  * between is not slept through. Written but not yet retired (ring draining), not armed or masked: poll as before. */
+  IOReturn spin(uint64_t fence, uint64_t ns, uint64_t *retired, bool *first) {
+   /* The hardware watchdog is independent and always bounds ownership at
+    * 100 ms. A shorter user timeout does not itself lose the context. */
+@@ -304,7 +317,15 @@ class FuxiAdrenoUserClient : public IOUserClient {
+    if (mach_absolute_time()>=deadline) return kIOReturnTimeout;
+    if (irq<0) { irq=fuxi_gpu_irq_setup(); if (irq>0) { ++polls; continue; } }
+    int w=-1;
+-   if (irq>0) { uint64_t t=mach_absolute_time(); w=vm_ ? fuxi_gpu_irq_sleep_vm(vm_,seq,fence,1000) : fuxi_gpu_irq_sleep(seq,fence,1000); if (w>=0) abiStat(FG_ABI_STAT_SLEEP,mach_absolute_time()-t); else if (w==-1) irq=0; }
++   if (irq>0) {
++    uint64_t t=mach_absolute_time();
++    if (t>=deadline) return kIOReturnTimeout;
++    uint64_t remNs=0; absolutetime_to_nanoseconds(deadline-t,&remNs);
++    uint64_t remUs64=remNs/1000ULL;
++    unsigned sliceUs=(remUs64<(uint64_t)irqSliceUs) ? (remUs64 ? (unsigned)remUs64 : 1u) : irqSliceUs;
++    w=vm_ ? fuxi_gpu_irq_sleep_vm(vm_,seq,fence,sliceUs) : fuxi_gpu_irq_sleep(seq,fence,sliceUs);
++    if (w>=0) abiStat(FG_ABI_STAT_SLEEP,mach_absolute_time()-t); else if (w==-1) irq=0;
++   }
+    if (w<0) abiPause();
+    ++polls;
+   }
+@@ -326,26 +347,46 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   if (fuxi_gpu_abi_vm_create(clientClass_,pid_,procName_,&vm_) || !vm_) return kIOReturnNoResources;
+   return kIOReturnSuccess;
+  }
+- IOReturn drop(Bo &b) {
++ IOReturn drop(Bo &b, bool allowUnlockTeardown = false) {
+   if (b.iova) {
+    int s=vm_ ? fuxi_gpu_abi_vm_unmap(vm_,b.iova,b.bytes) : fuxi_gpu_abi_unmap(b.iova,b.bytes);
+    if (s) return s==1 ? kIOReturnBusy : kIOReturnIOError;
+    b.iova=0;
+   }
+-  if (b.importMemory && b.importMap->wireRange(kIODirectionNone,0,b.bytes)!=kIOReturnSuccess)
++  IOMemoryDescriptor *impMem=b.importMemory;
++  IOMemoryMap *impMap=b.importMap;
++  FuxiAdrenoBoView *view=b.view;
++  IOBufferMemoryDescriptor *mem=b.memory;
++  uint64_t bytes=b.bytes, allocBytes=b.allocated;
++  bool cached=b.cached;
++  if (!allowUnlockTeardown && impMem && impMap->wireRange(kIODirectionNone,0,bytes)!=kIOReturnSuccess)
+    return kIOReturnIOError;
+-  wired_-=b.allocated;
+-  if (b.cached) cboStat(0,b.allocated);
+-  fuxi_gpu_abi_vm_release_quota(vm_,1u,b.allocated,b.importMemory ? 1u : 0u);
+-  if (b.importMemory) {
+-   b.importMap->release();
+-   b.importMemory->complete(); b.importMemory->release();
+-  } else {
+-   b.view->release(); /* view owns the matched prepare + backing retain */
+-   b.memory->release();
+-  }
++  wired_-=allocBytes;
++  if (cached) cboStat(0,allocBytes);
++  fuxi_gpu_abi_vm_release_quota(vm_,1u,allocBytes,impMem ? 1u : 0u);
+   unbound(b);
+   bzero(&b,sizeof(b));
++  if (allowUnlockTeardown) {
++   enterUnlocked();
++   IOLockUnlock(lock_);
++   if (impMem) {
++    IOReturn wrc=impMap->wireRange(kIODirectionNone,0,bytes);
++    if (wrc!=kIOReturnSuccess)
++     IOLog("FUXI GPU ABI: drop unwire failed rc 0x%08x bytes %llu\n",(unsigned)wrc,(unsigned long long)bytes);
++    impMap->release(); impMem->complete(); impMem->release();
++   } else {
++    view->release(); mem->release();
++   }
++   IOLockLock(lock_);
++   leaveUnlocked();
++  } else {
++   if (impMem) {
++    impMap->release(); impMem->complete(); impMem->release();
++   } else {
++    view->release(); /* view owns the matched prepare + backing retain */
++    mem->release();
++   }
++  }
+   return kIOReturnSuccess;
+  }
+  IOReturn allocate(const NativeAdrenoAbiBoAlloc &r, NativeAdrenoAbiBoAllocReply &out) {
+@@ -359,6 +400,8 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   Bo *b=freeSlot();
+   if (!b) return kIOReturnNoResources;
+   if (fuxi_gpu_abi_vm_reserve_quota(vm_,1u,allocated,0u)) { static unsigned bql=0; if (bql<16) { ++bql; IOLog("FUXI GPU ABI: BoAlloc quota refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); } return kIOReturnNoResources; }
++  const bool unlocked=lockSplitEnabled==1;
++  if (unlocked) { b->pendingAlloc=true; wired_+=allocated; enterUnlocked(); IOLockUnlock(lock_); }
+   uint64_t mask=((UINT64_C(1)<<FG_ABI_PA_BITS)-1)&~((UINT64_C(1)<<r.align_log2)-1);
+   IOOptionBits options=kIODirectionInOut|kIOMemoryMapperNone|kIOMemoryKernelUserShared|(cached ? 0 : kIOMapWriteCombineCache);
+   /* Contiguous-first only when required or at most 1 MiB: a failed large contiguous search scans all
+@@ -367,8 +410,21 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   IOBufferMemoryDescriptor *memory=contiguous || allocated<=FG_ABI_CONTIG_TRY_BYTES ?
+       IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,options|kIOMemoryPhysicallyContiguous,allocated,mask) : NULL;
+   if (!memory && !contiguous) memory=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,options,allocated,mask);
+-  if (!memory) { static unsigned bnl=0; if (bnl<16) { ++bnl; IOLog("FUXI GPU ABI: BoAlloc nomem refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); } fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u); return kIOReturnNoMemory; }
+-  if (memory->prepare()!=kIOReturnSuccess) { static unsigned bpl=0; if (bpl<16) { ++bpl; IOLog("FUXI GPU ABI: BoAlloc prepare refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); } memory->release(); fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u); return kIOReturnNoMemory; }
++  if (!memory) {
++   bool lost=false;
++   if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=allocated; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); lost=!live_; }
++   static unsigned bnl=0; if (bnl<16) { ++bnl; IOLog("FUXI GPU ABI: BoAlloc nomem refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); }
++   fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u);
++   return lost ? kIOReturnNotOpen : kIOReturnNoMemory;
++  }
++  if (memory->prepare()!=kIOReturnSuccess) {
++   memory->release();
++   bool lost=false;
++   if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=allocated; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); lost=!live_; }
++   static unsigned bpl=0; if (bpl<16) { ++bpl; IOLog("FUXI GPU ABI: BoAlloc prepare refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); }
++   fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u);
++   return lost ? kIOReturnNotOpen : kIOReturnNoMemory;
++  }
+   abiStat(FG_ABI_STAT_ALLOCMEM,mach_absolute_time()-tMem);
+   FuxiAdrenoBoView *view=new FuxiAdrenoBoView;
+   bool valid=view && memory->getBytesNoCopy() && memory->getLength()==allocated;
+@@ -397,14 +453,19 @@ class FuxiAdrenoUserClient : public IOUserClient {
+    valid=view->bind(memory);
+    abiStat(FG_ABI_STAT_BIND,mach_absolute_time()-tBind);
+   }
+-  if (!valid) {
++  if (unlocked) { IOLockLock(lock_); leaveUnlocked(); }
++  if (!valid || (unlocked && !live_)) {
++   if (unlocked) { wired_-=allocated; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); }
+    if (view) view->release();
+-   memory->complete(); memory->release();
++   if (!valid) memory->complete();
++   memory->release();
+    fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u);
+-   return kIOReturnNoMemory;
++   return (unlocked && !live_) ? kIOReturnNotOpen : kIOReturnNoMemory;
+   }
++  b->pendingAlloc=false;
+   b->memory=memory; b->view=view; b->bytes=r.bytes; b->allocated=allocated; b->cached=cached;
+-  b->handle=nextHandle_++; b->token=nextToken_++; wired_+=allocated;
++  b->handle=nextHandle_++; b->token=nextToken_++;
++  if (!unlocked) wired_+=allocated;
+   if (cached) cboStat(1,allocated);
+   bound(*b);
+   out.handle=b->handle;
+@@ -431,6 +492,8 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   Bo *b=freeSlot();
+   if (!b) return refuse(3,kIOReturnNoResources,0);
+   if (fuxi_gpu_abi_vm_reserve_quota(vm_,1u,r.bytes,1u)) return refuse(2,kIOReturnNoResources,wired_);
++  const bool unlocked=lockSplitEnabled==1;
++  if (unlocked) { b->pendingAlloc=true; wired_+=r.bytes; ++liveImports_; enterUnlocked(); IOLockUnlock(lock_); }
+   IOMemoryDescriptor *memory=IOMemoryDescriptor::withAddressRange(r.address,r.bytes,
+       kIODirectionInOut|kIOMemoryMapperNone|kIOMemoryPersistent,task_);
+   bool ro=false;
+@@ -445,10 +508,10 @@ class FuxiAdrenoUserClient : public IOUserClient {
+    if (p) { detail|=2; p->release(); }
+    if (fuxi_gpu_abi_roimport()) memory=IOMemoryDescriptor::withAddressRange(r.address,r.bytes,kIODirectionOut|flags,task_);
+    else { p=IOMemoryDescriptor::withAddressRange(r.address,r.bytes,kIODirectionOut|flags,task_); if (p) { detail|=4; p->release(); } }
+-   if (!memory) { fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u); return refuse(4,kIOReturnNoMemory,detail); }
++   if (!memory) { if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=r.bytes; if (liveImports_) --liveImports_; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); } fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u); return refuse(4,kIOReturnNoMemory,detail); }
+    ro=true; probe=detail|8;
+   }
+-  if (memory->prepare(ro ? kIODirectionOut : kIODirectionInOut)!=kIOReturnSuccess) { memory->release(); fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u); return refuse(5,kIOReturnBadArgument,probe); }
++  if (memory->prepare(ro ? kIODirectionOut : kIODirectionInOut)!=kIOReturnSuccess) { memory->release(); if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=r.bytes; if (liveImports_) --liveImports_; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); } fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u); return refuse(5,kIOReturnBadArgument,probe); }
+   bool valid=memory->getLength()==r.bytes;
+   uint64_t why=valid ? 0 : (6ULL<<56);
+   /* One segment lookup per physical run (UniXNU Adreno740 pattern); the cache-class predicate stays per 16K page. */
+@@ -467,6 +530,7 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   if (!mapping || !mapping->getVirtualAddress() || mapping->getLength()!=r.bytes) {
+    if (mapping) mapping->release();
+    memory->complete(); memory->release();
++   if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=r.bytes; if (liveImports_) --liveImports_; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); }
+    fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u);
+    return refuse(valid ? 8 : (why>>56),kIOReturnBadArgument,(why&((1ULL<<56)-1))|(valid ? probe<<48 : 0));
+   }
+@@ -475,13 +539,19 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   /* wireRange passes (options&3) as vm_prot_t: kIODirectionIn=READ, kIODirectionOut=WRITE. A read-only alias
+    * must wire READ only; asking for WRITE (the old kIODirectionOut) is a protection failure. */
+   IOReturn wired=mapping->wireRange(ro ? kIODirectionIn : kIODirectionInOut,0,r.bytes);
+-  if (wired!=kIOReturnSuccess) {
++  if (unlocked) { IOLockLock(lock_); leaveUnlocked(); }
++  if (wired!=kIOReturnSuccess || (unlocked && !live_)) {
++   if (unlocked) { wired_-=r.bytes; if (liveImports_) --liveImports_; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); }
+    mapping->release(); memory->complete(); memory->release();
+    fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u);
+-   return refuse(9,kIOReturnNoMemory,(uint64_t)(uint32_t)wired|(probe<<32));
++   return (unlocked && !live_) ? kIOReturnNotOpen : refuse(9,kIOReturnNoMemory,(uint64_t)(uint32_t)wired|(probe<<32));
+   }
++  b->pendingAlloc=false;
+   b->importMemory=memory; b->importMap=mapping; b->importRo=ro; b->bytes=b->allocated=r.bytes;
+-  b->handle=nextHandle_++; wired_+=r.bytes; out.handle=b->handle;
++  b->handle=nextHandle_++;
++  if (!unlocked) wired_+=r.bytes;
++  out.handle=b->handle;
++  if (unlocked && liveImports_) --liveImports_; /* bound(*b) increments liveImports_ once for importMemory */
+   bound(*b);
+   return kIOReturnSuccess;
+  }
+@@ -518,14 +588,30 @@ class FuxiAdrenoUserClient : public IOUserClient {
+    --b->leases; return kIOReturnSuccess;
+   }
+   if (method==NativeAdrenoMethodBoFree) {
+-   Bo *b=find(static_cast<const NativeAdrenoAbiBoFree *>(in)->handle);
++   uint64_t h=static_cast<const NativeAdrenoAbiBoFree *>(in)->handle;
++   Bo *b=find(h);
+    if (!b) return kIOReturnBadArgument;
+-   if (b->leases) return kIOReturnBusy;
++   if (b->leases || b->dropping) return kIOReturnBusy;
++   if (lockSplitEnabled==1) {
++    IOReturn drc=drop(*b,true);
++    if (drc==kIOReturnBusy && lastFence_) {
++     b->dropping=true;
++     (void)waitUnlocked(lastFence_,50000000ULL);
++     b=find(h);
++     if (b) b->dropping=false;
++     if (!live_) return kIOReturnNotOpen;
++     if (!b) return kIOReturnBadArgument;
++     if (b->leases) return kIOReturnBusy;
++     return drop(*b,true);
++    }
++    return drc;
++   }
+    return drop(*b);
+   }
+   if (method==NativeAdrenoMethodSetMetadata || method==NativeAdrenoMethodGetMetadata) {
+    const auto &r=*static_cast<const NativeAdrenoAbiMetadata *>(in); Bo *b=find(r.handle);
+    if (!b || r.reserved || r.bytes>64) return kIOReturnBadArgument;
++   if (b->dropping) return kIOReturnBusy;
+    if (method==NativeAdrenoMethodSetMetadata) { bcopy(r.text,b->metadata,r.bytes); b->metadataBytes=r.bytes; }
+    else {
+     if (r.bytes<b->metadataBytes) return kIOReturnBadArgument;
+@@ -556,6 +642,7 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   if (method==NativeAdrenoMethodBoMap) {
+    const auto &r=*static_cast<const NativeAdrenoAbiBoMap *>(in);
+    Bo *b=find(r.handle);
++   if (b && b->dropping) return kIOReturnBusy;
+    if (!b || b->iova || (b->importMemory && (r.writeback || r.shareability!=2)) || (b->cached && (r.writeback!=1 || r.shareability!=3)) ||
+        (r.reserved & ~(uint32_t)NativeAdrenoMapGpuOnly) ||
+        !fg_abi_map_valid(r.iova,b->bytes,r.permissions,r.writeback,r.shareability,0))
+@@ -582,6 +669,7 @@ class FuxiAdrenoUserClient : public IOUserClient {
+   if (method==NativeAdrenoMethodBoCpuMap) {
+    Bo *b=find(static_cast<const NativeAdrenoAbiBoCpuMap *>(in)->handle);
+    if (!b || b->importMemory || b->leases==UINT32_MAX) return kIOReturnBadArgument;
++   if (b->dropping) return kIOReturnBusy;
+    ++b->leases;
+    *static_cast<NativeAdrenoAbiBoCpuMapReply *>(out)={b->token,0,b->allocated}; return kIOReturnSuccess;
+   }
+@@ -596,15 +684,20 @@ class FuxiAdrenoUserClient : public IOUserClient {
+    uint64_t iova[NativeAdrenoAbiMaxBuffers], bytes[NativeAdrenoAbiMaxBuffers];
+    uint64_t spLook=mach_absolute_time();
+    /* Also run again after every wait: lock_ is dropped while a refused submit sleeps, so a BO may have gone. */
++   bool dropping=false;
+    auto lookup=[&]() -> bool {
++    dropping=false;
+     for (unsigned i=0;i<r.buffer_count;i++) {
+      const auto &ib=r.buffers[i]; Bo *b=find(ib.handle);
+-     if (!b || !b->iova || !fg_abi_ib_valid(b->iova,b->bytes,ib.iova,ib.bytes)) return false;
++     if (!b || b->dropping || !b->iova || !fg_abi_ib_valid(b->iova,b->bytes,ib.iova,ib.bytes)) {
++      if (b && b->dropping) dropping=true;
++      return false;
++     }
+      iova[i]=ib.iova; bytes[i]=ib.bytes;
+     }
+     return true;
+    };
+-   if (!lookup()) return kIOReturnBadArgument;
++   if (!lookup()) return dropping ? kIOReturnBusy : kIOReturnBadArgument;
+    uint64_t deadline; clock_interval_to_deadline(150,NSEC_PER_MSEC,&deadline);
+    uint64_t spBack=0, spSleep=0, spStart=mach_absolute_time();
+    unsigned spAtt=0, spWaits=0, spEvents=0, spWn[3]={}; uint64_t spWt[3]={};
+@@ -630,13 +723,15 @@ class FuxiAdrenoUserClient : public IOUserClient {
+     if (clientClass_==FG_CLASS_COMPOSITOR && !bbWaiting) { fuxi_gpu_abi_vm_bb_wait(1); bbWaiting=true; }
+     uint64_t p0=mach_absolute_time();
+     unsigned kind=2, us=fuxi_gpu_abi_submit_wait_us(&kind);
++    enterUnlocked();
+     IOLockUnlock(lock_); /* Never hold the ring mutex during scheduler waits, and let the other calls of this client run. */
+     bool woke=abiEventWait(seq0,us);
+     IOLockLock(lock_);
++    leaveUnlocked();
+     uint64_t slept=mach_absolute_time()-p0;
+     spSleep+=slept; ++spWaits; if (woke) ++spEvents; abiStat(FG_ABI_STAT_SLEEP,slept); spWn[kind]++; spWt[kind]+=slept;
+     if (!live_) { if (bbWaiting) fuxi_gpu_abi_vm_bb_wait(-1); return kIOReturnNotOpen; }
+-    if (!lookup()) { if (bbWaiting) fuxi_gpu_abi_vm_bb_wait(-1); return kIOReturnBadArgument; }
++    if (!lookup()) { if (bbWaiting) fuxi_gpu_abi_vm_bb_wait(-1); return dropping ? kIOReturnBusy : kIOReturnBadArgument; }
+    }
+   }
+   if (method==NativeAdrenoMethodCreateQueue) {
+@@ -724,8 +819,12 @@ public:
+  IOReturn clientClose() override {
+   if (!lock_) return kIOReturnSuccess;
+   IOLockLock(lock_);
+-  bool wasLive=live_;
+-  if (live_) {
++  while (closing_) (void)IOLockSleep(lock_,&closing_,THREAD_UNINT);
++  bool doClose=live_;
++  if (doClose) {
++   live_=false;
++   closing_=true;
++   while (inflightUnlocked_>0) (void)IOLockSleep(lock_,&inflightUnlocked_,THREAD_UNINT);
+    if (lastFence_) (void)wait(lastFence_,200000000);
+    bool quarantined=false;
+    unsigned qLogged=0, qSuppressed=0;
+@@ -740,10 +839,11 @@ public:
+    }
+    if (qSuppressed) IOLog("FUXI GPU ABI: quarantined %u more BOs until reset (suppressed)\n", qSuppressed);
+    if (vm_ && !quarantined) { fuxi_gpu_abi_vm_destroy(vm_); vm_=nullptr; }
+-   live_=false;
++   closing_=false;
++   IOLockWakeup(lock_,&closing_,false);
+   }
+   IOLockUnlock(lock_);
+-  if (wasLive) { abiTrace("close",pid_,kIOReturnSuccess); terminate(); }
++  if (doClose) { abiTrace("close",pid_,kIOReturnSuccess); terminate(); }
+   return kIOReturnSuccess;
+  }
+  void free() override {
+@@ -873,6 +973,20 @@ extern "C" void fuxi_gpu_abi_publish(void)
+      abiExecswapTest(swap);
+  PE_parse_boot_argn("fuxigpuwaitus",&waitPollUs,sizeof(waitPollUs));
+  if (waitPollUs>1000) waitPollUs=1000;
++ {
++  uint32_t sliceArg=1000;
++  if (!PE_parse_boot_argn("fuxigpuirqslice",&sliceArg,sizeof(sliceArg))) {
++   DTEntry chosen; const void *prop=nullptr; unsigned bytes=0;
++   if (SecureDTLookupEntry(nullptr,"/chosen",&chosen)==kSuccess &&
++       SecureDTGetProperty(chosen,"fuxi,gpu-irqslice",&prop,&bytes)==kSuccess &&
++       prop && bytes==sizeof(uint32_t)) {
++    memcpy(&sliceArg,prop,sizeof(uint32_t));
++   }
++  }
++  if (sliceArg<1000) sliceArg=1000;
++  else if (sliceArg>16000) sliceArg=16000;
++  irqSliceUs=sliceArg;
++ }
+  openLock=IOLockAlloc(); statLock=IOLockAlloc(); evLock=IOLockAlloc();
+  if (evLock) fuxi_gpu_abi_wake_hook=abiWake;
+  auto *service=new NativeAdrenoGpuPublished;
+@@ -881,6 +995,18 @@ extern "C" void fuxi_gpu_abi_publish(void)
+   service->release(); return;
+  }
+  service->setName("NativeAdrenoGpu");
++ {
++  uint32_t splitArg=0;
++  if (!PE_parse_boot_argn("fuxigpulocksplit",&splitArg,sizeof(splitArg))) {
++   DTEntry chosen; const void *prop=nullptr; unsigned bytes=0;
++   if (SecureDTLookupEntry(nullptr,"/chosen",&chosen)==kSuccess &&
++       SecureDTGetProperty(chosen,"fuxi,gpu-locksplit",&prop,&bytes)==kSuccess &&
++       prop && bytes==sizeof(uint32_t)) {
++    memcpy(&splitArg,prop,sizeof(uint32_t));
++   }
++  }
++  lockSplitEnabled=(splitArg==1) ? 1u : 0u;
++ }
+  service->setProperty("NativeAdrenoABI",(uint64_t)NativeAdrenoAbiVersion,32);
+  service->setProperty("MetalPluginName","FuxiMetal");
+  service->setProperty("MetalPluginClassName","FuxiMTLDevice");
+@@ -894,6 +1020,8 @@ extern "C" void fuxi_gpu_abi_publish(void)
+  IOLog("FUXI MTL: IOAcceleratorES metaclass match PASS plugin FuxiMetal/FuxiMTLDevice\n");
+  service->registerService(); /* retained for boot lifetime */
+  IOLog("FUXI GPU ABI: NativeAdrenoGpuPublished v2 HostImport 16K, open 0x4147, multi-VM isolated (Class0 100ms / Class1 40ms)\n");
++ if (lockSplitEnabled==1) IOLog("FUXI GPU ABI: lock_ split enabled (fuxigpulocksplit=1)\n");
++ if (irqSliceUs!=1000) IOLog("FUXI GPU IRQ: WaitFence slice ceiling=%u us (fuxigpuirqslice)\n",irqSliceUs);
+ }
+ /* The scheduling counters of the backend, once per stats window: IBs per submission (the 128-IB record is working when over16 grows),
+  * the most BOs live at once, fenced WPTR writes (fuxigpuncimport bit 1) and the stall recovery stages (bit 2). Silent without a submit. */
+diff --git a/xnu/fuxi-adreno/fuxi_gpu_scanout.inc b/xnu/fuxi-adreno/fuxi_gpu_scanout.inc
+index 95986ec..5a78bb9 100644
+--- a/xnu/fuxi-adreno/fuxi_gpu_scanout.inc
++++ b/xnu/fuxi-adreno/fuxi_gpu_scanout.inc
+@@ -837,7 +837,7 @@ int fuxi_gpu_scanout_te(struct fg_te_observer *te)
+  } else te->edge = raw;
+  te->raw_edge = raw;
+  te->raw_frame = frame;
+- if (te->samples < 2) te->samples++;
++ if (te->samples < 8) te->samples++;
+  return te->samples >= 2;
+ }
+ /* Arm the per-START gates. Called with the current read pointer value. */
+diff --git a/xnu/fuxi-unixnu/SweetFramebuffer.cpp b/xnu/fuxi-unixnu/SweetFramebuffer.cpp
+index 116a170..890fc3c 100644
+--- a/xnu/fuxi-unixnu/SweetFramebuffer.cpp
++++ b/xnu/fuxi-unixnu/SweetFramebuffer.cpp
+@@ -69,6 +69,9 @@ extern "C" { int sweet_fb_display_off; }        /* read by bsd/dev/fuxi_touch.c
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
++#if defined(FUXI)
++#include <pexpert/device_tree.h>
++#endif
+ #include <kern/clock.h>
+ #include <kern/thread_call.h>
+ #include <sys/proc.h>
+@@ -530,6 +533,36 @@ static void sweet_fb_te_configure(AppleCLCD *fb)
+  IOLog("SWEET FB: vsync TE requested offset_us=%u\n", offset);
+ }
+ 
++/* Wave 2 opt-in (fuxinopoll=0 default off, or ADT /chosen u32 "fuxi,nopoll"):
++ * - 0: legacy continuous ~515 us (period/16) polling.
++ * - 1: smart idle TE-bracket suppression (keep period/16 during any active/pending present
++ *      or unlocked/converging TE (samples < 4) so 0.7 ms GPU copy completePresent() has zero
++ *      added delay and IIR period converges first; when idle and TE-locked with samples >= 4,
++ *      jump between TE edges while bracketing each edge within <= period/5 via period/8 step).
++ * - 8..16 (2..7 clamped to 8): explicit safe idle divisor <= period/8 (< period/4 limit). */
++static uint32_t sweet_fb_nopoll_mode(void)
++{
++ static uint32_t cached = ~0u;
++ if (cached != ~0u) return cached;
++ uint32_t val = 0;
++ if (!PE_parse_boot_argn("fuxinopoll", &val, sizeof(val))) {
++  DTEntry chosen;
++  const void *prop = NULL;
++  unsigned bytes = 0;
++  if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++      SecureDTGetProperty(chosen, "fuxi,nopoll", &prop, &bytes) == kSuccess &&
++      prop && bytes == sizeof(val)) {
++   memcpy(&val, prop, sizeof(val));
++  }
++ }
++ if (val == 1) cached = 1;
++ else if (val >= 2 && val <= 7) cached = 8;
++ else if (val >= 8 && val <= 16) cached = val;
++ else cached = 0;
++ if (cached) IOLog("SWEET FB: idle TE poll suppress mode=%u (fuxinopoll)\n", cached);
++ return cached;
++}
++
+ bool AppleCLCD::teVsyncTick(uint64_t &now, bool fallback)
+ {
+  bool wasValid = fTeValid;
+@@ -668,6 +701,7 @@ AppleCLCD::start(IOService *provider)
+ 		    fFit, fuxi_fit_h(fFit), fuxi_fit_y0(fFit), fLogicalW, fLogicalH);
+ 	}
+ 	sweet_fb_te_configure(this);
++	if (fVsyncTE) (void)sweet_fb_nopoll_mode();
+ #endif
+ 	uint32_t timerOptions = sweet_fb_timer_options();
+ 	if (timerOptions == kIOTimerEventSourceOptionsPriorityHigh)
+@@ -818,13 +852,38 @@ sweet_fb_rearm(AppleCLCD *fb, IOTimerEventSource *sender)
+       (fb->fPowerOff ? fb->fFadeStep == 0 : fb->fDirty));
+   /* fuxigpuncimport bit 2048: poll the in-flight scanout copy at 1/64 tick so its surface lease is released at retire. */
+   uint64_t poll = now + fb->fTickAbs/((fb->fGpuPending && fuxi_gpu_abi_pace()) || ((fb->fPublicationPending || fuxi_gpu_scanout_pending()) && fuxi_gpu_abi_start()) ? 64 : 16);
++  uint32_t noPollMode = sweet_fb_nopoll_mode();
+   if (fb->fVsyncTE) {
+    if (fb->fTeValid) {
+     deadline = fb->fTeNext;
+-    poll = now + fb->fTe.period/16;
++    uint64_t minPoll = fb->fTe.period / 16;
++    if (!minPoll) minPoll = 1;
++    poll = now + minPoll;
++    if (noPollMode && !active && fb->fTe.samples >= 2) {
++     if (noPollMode == 1) {
++      if (fb->fTe.samples >= 4) {
++       uint64_t margin = fb->fTe.period / 5;
++       uint64_t bracketStep = fb->fTe.period / 8;
++       if (!bracketStep) bracketStep = minPoll;
++       uint64_t nextEdge = fb->fTe.edge + fb->fTe.period;
++       if (nextEdge > now + margin) {
++        uint64_t preEdge = nextEdge - margin;
++        poll = preEdge > now + minPoll ? preEdge : (now + minPoll);
++       } else if (nextEdge + margin > now) {
++        poll = now + bracketStep;
++       } else {
++        poll = now + minPoll;
++       }
++      }
++     } else {
++      uint64_t divStep = fb->fTe.period / noPollMode;
++      poll = now + (divStep > minPoll ? divStep : minPoll);
++     }
++    }
+    }
+-   /* Keep observing TE even with subscribers but no dirty swap. */
++   /* Keep observing TE even with subscribers but no dirty swap; never arm a past deadline. */
+    if (poll < deadline || deadline <= now) deadline = poll;
++   if (deadline <= now) deadline = now + (fb->fTeValid && fb->fTe.period >= 16 ? fb->fTe.period / 16 : 1);
+   } else if (active && poll < deadline) deadline = poll;
+   fb->fTickArmed = true;
+   sender->wakeAtTime(kIOTimeOptionsWithLeeway, deadline, 0);
+diff --git a/xnu/patches/0098-fuxi-native-adreno-abi.patch b/xnu/patches/0098-fuxi-native-adreno-abi.patch
+index 3b7170f..13e7814 100644
+--- a/xnu/patches/0098-fuxi-native-adreno-abi.patch
++++ b/xnu/patches/0098-fuxi-native-adreno-abi.patch
+@@ -2572,7 +2572,7 @@
+ + } else te->edge = raw;
+ + te->raw_edge = raw;
+ + te->raw_frame = frame;
+-+ if (te->samples < 2) te->samples++;
+++ if (te->samples < 8) te->samples++;
+ + return te->samples >= 2;
+ +}
+ +/* Arm the per-START gates. Called with the current read pointer value. */
+diff --git a/xnu/patches/0100-sweet-execswap-gpu-abi-trace.patch b/xnu/patches/0100-sweet-execswap-gpu-abi-trace.patch
+index b7ba4b8..09f9f37 100644
+--- a/xnu/patches/0100-sweet-execswap-gpu-abi-trace.patch
++++ b/xnu/patches/0100-sweet-execswap-gpu-abi-trace.patch
+@@ -181,7 +181,7 @@
+   * ABI and framing credit: UniXNU NativeAdreno contributors (MIT).
+   * See NativeAdrenoABI.h and LICENSE.NativeAdreno for copied material.
+   */
+-@@ -8,84 +8,335 @@
++@@ -8,135 +8,466 @@
+  #include <IOKit/IOPlatformExpert.h>
+  #include <IOKit/IOUserClient.h>
+  #include <IOKit/IOBufferMemoryDescriptor.h>
+@@ -257,8 +257,12 @@
+ +}
+ +
+ +#include "FuxiHandleIndex.h"
+++#include <pexpert/device_tree.h>
+  static IOLock *openLock;
+ -static bool connected;
+++/* Wave 2 opt-in (fuxigpulocksplit=1 or /chosen fuxi,gpu-locksplit=1, default 0=off): offload
+++ * BoAlloc/BoImport page preparation/zeroing/wiring and BoFree wait/descriptor teardown outside lock_. */
+++static uint32_t lockSplitEnabled = 0;
+ +/* Most BOs live at once in any client this boot (logged with the stats line; decides whether FG_ABI_MAX_BOS must grow). */
+ +static unsigned peakBos;
+ +static uint64_t compWiredCur, compWiredPeak;
+@@ -303,6 +307,9 @@
+ +/* fuxigpuwaitus: WaitFence poll period in us (default 100; 0 = IOSleep(1)).
+ + * A 1 ms sleep delays every frame's retirement by up to a timer period. */
+ +static uint32_t waitPollUs __attribute__((unused)) = 100;
+++/* Wave 2 opt-in (fuxigpuirqslice=<us> or /chosen fuxi,gpu-irqslice, default 1000, allowed 1000..16000):
+++ * per-slice IRQ sleep ceiling in WaitFence clamped to remaining timeout so short waits never oversleep. */
+++static uint32_t irqSliceUs __attribute__((unused)) = 1000;
+ +static uint64_t waitCount __attribute__((unused)), waitPolls __attribute__((unused)),
+ +    waitNs __attribute__((unused)), waitMaxNs __attribute__((unused));
+ +/* Every wait/busy-retry sleep, timed as the "sleep" phase. */
+@@ -389,7 +396,7 @@
+    IOBufferMemoryDescriptor *memory;
+    IOMemoryDescriptor *importMemory;
+    IOMemoryMap *importMap;
+-+  bool importRo, cached;
+++  bool importRo, cached, pendingAlloc, dropping;
+    FuxiAdrenoBoView *view;
+    uint64_t handle, bytes, allocated, iova;
+    uint32_t token, leases, metadataBytes;
+@@ -412,7 +419,8 @@
+ + uint64_t maxWired_ = FG_ABI_COMPOSITOR_MAX_WIRED_BYTES;
+ + unsigned clientClass_ = FG_CLASS_COMPOSITOR;
+ + Bo *freeSlot() {
+-+  for (unsigned i=freeHint_;i<maxBos_;i++) if (!bos_[i].handle) { freeHint_=i; return &bos_[i]; }
+++  for (unsigned i=freeHint_;i<maxBos_;i++) if (!bos_[i].handle && !bos_[i].pendingAlloc && !bos_[i].dropping) { freeHint_=i; return &bos_[i]; }
+++  for (unsigned i=0;i<freeHint_;i++) if (!bos_[i].handle && !bos_[i].pendingAlloc && !bos_[i].dropping) { freeHint_=i; return &bos_[i]; }
+ +  return nullptr;
+ + }
+ + void bound(Bo &b) {
+@@ -434,7 +442,8 @@
+   IOLock *lock_ = nullptr;
+ - bool live_ = false;
+ - uint64_t nextHandle_ = 1, wired_ = 0, lastFence_ = 0, firstFence_ = 0;
+-+ bool live_ = false, diagnostic_ = false, resultChecked_ = false;
+++ unsigned inflightUnlocked_ = 0;
+++ bool live_ = false, closing_ = false, diagnostic_ = false, resultChecked_ = false;
+ + int pid_ = 0;
+ + void result() {
+ +  if (!diagnostic_ || resultChecked_) return;
+@@ -471,20 +480,24 @@
+ +  uint64_t retired; bool first;
+ +  return spin(fence,ns,&retired,&first);
+ + }
+++ void enterUnlocked() { ++inflightUnlocked_; }
+++ void leaveUnlocked() { if (inflightUnlocked_ && --inflightUnlocked_==0) IOLockWakeup(lock_,&inflightUnlocked_,false); }
+ + /* Sleeps without lock_, so other threads can submit or allocate meanwhile;
+ +  * only the fence number is used until the lock is retaken. */
+ + IOReturn waitUnlocked(uint64_t fence, uint64_t ns) {
+ +  if (!fence || !firstFence_ || fence<firstFence_ || fence>lastFence_) return kIOReturnBadArgument;
+ +  uint64_t at=lastFence_-fence<16 ? submitAt_[fence&15] : 0, retired=0; bool first=false;
+++  enterUnlocked();
+ +  IOLockUnlock(lock_);
+ +  IOReturn rc=spin(fence,ns,&retired,&first);
+ +  if (rc==kIOReturnSuccess) pendStat(at,retired,first);
+ +  IOLockLock(lock_);
+++  leaveUnlocked();
+ +  return live_ ? rc : kIOReturnNotOpen;
+ + }
+-+ /* fuxigpuncimport bit 26: while the fence value is unwritten, sleep on the GPU fence interrupt (at most 1 ms a slice, as
+-+  * UniXNU-sheng's waiters) instead of a waitPollUs poll; the interrupt count is read before each poll so one landing in between is
+-+  * not slept through. Written but not yet retired (ring draining), not armed or masked: poll as before. */
+++ /* fuxigpuncimport bit 26: while the fence value is unwritten, sleep on the GPU fence interrupt (at most irqSliceUs a slice,
+++  * clamped to remaining timeout) instead of a waitPollUs poll; the interrupt count is read before each poll so one landing in
+++  * between is not slept through. Written but not yet retired (ring draining), not armed or masked: poll as before. */
+ + IOReturn spin(uint64_t fence, uint64_t ns, uint64_t *retired, bool *first) {
+    /* The hardware watchdog is independent and always bounds ownership at
+     * 100 ms. A shorter user timeout does not itself lose the context. */
+@@ -503,9 +516,19 @@
+     if (mach_absolute_time()>=deadline) return kIOReturnTimeout;
+ -   IOSleep(1);
+ -  }
++- }
++- IOReturn drop(Bo &b) {
+ +   if (irq<0) { irq=fuxi_gpu_irq_setup(); if (irq>0) { ++polls; continue; } }
+ +   int w=-1;
+-+   if (irq>0) { uint64_t t=mach_absolute_time(); w=vm_ ? fuxi_gpu_irq_sleep_vm(vm_,seq,fence,1000) : fuxi_gpu_irq_sleep(seq,fence,1000); if (w>=0) abiStat(FG_ABI_STAT_SLEEP,mach_absolute_time()-t); else if (w==-1) irq=0; }
+++   if (irq>0) {
+++    uint64_t t=mach_absolute_time();
+++    if (t>=deadline) return kIOReturnTimeout;
+++    uint64_t remNs=0; absolutetime_to_nanoseconds(deadline-t,&remNs);
+++    uint64_t remUs64=remNs/1000ULL;
+++    unsigned sliceUs=(remUs64<(uint64_t)irqSliceUs) ? (remUs64 ? (unsigned)remUs64 : 1u) : irqSliceUs;
+++    w=vm_ ? fuxi_gpu_irq_sleep_vm(vm_,seq,fence,sliceUs) : fuxi_gpu_irq_sleep(seq,fence,sliceUs);
+++    if (w>=0) abiStat(FG_ABI_STAT_SLEEP,mach_absolute_time()-t); else if (w==-1) irq=0;
+++   }
+ +   if (w<0) abiPause();
+ +   ++polls;
+ +  }
+@@ -526,28 +549,57 @@
+ +  if (!fuxi_gpu_abi_available()) return kIOReturnNotReady;
+ +  if (fuxi_gpu_abi_vm_create(clientClass_,pid_,procName_,&vm_) || !vm_) return kIOReturnNoResources;
+ +  return kIOReturnSuccess;
+-  }
+-  IOReturn drop(Bo &b) {
+++ }
+++ IOReturn drop(Bo &b, bool allowUnlockTeardown = false) {
+    if (b.iova) {
+ -   int s=fuxi_gpu_abi_unmap(b.iova,b.bytes);
+ +   int s=vm_ ? fuxi_gpu_abi_vm_unmap(vm_,b.iova,b.bytes) : fuxi_gpu_abi_unmap(b.iova,b.bytes);
+     if (s) return s==1 ? kIOReturnBusy : kIOReturnIOError;
+     b.iova=0;
+    }
+-   if (b.importMemory && b.importMap->wireRange(kIODirectionNone,0,b.bytes)!=kIOReturnSuccess)
++-  if (b.importMemory && b.importMap->wireRange(kIODirectionNone,0,b.bytes)!=kIOReturnSuccess)
+++  IOMemoryDescriptor *impMem=b.importMemory;
+++  IOMemoryMap *impMap=b.importMap;
+++  FuxiAdrenoBoView *view=b.view;
+++  IOBufferMemoryDescriptor *mem=b.memory;
+++  uint64_t bytes=b.bytes, allocBytes=b.allocated;
+++  bool cached=b.cached;
+++  if (!allowUnlockTeardown && impMem && impMap->wireRange(kIODirectionNone,0,bytes)!=kIOReturnSuccess)
+     return kIOReturnIOError;
+-   wired_-=b.allocated;
+-+  if (b.cached) cboStat(0,b.allocated);
+-+  fuxi_gpu_abi_vm_release_quota(vm_,1u,b.allocated,b.importMemory ? 1u : 0u);
+-   if (b.importMemory) {
+-    b.importMap->release();
+-    b.importMemory->complete(); b.importMemory->release();
+-@@ -93,50 +344,69 @@
+-    b.view->release(); /* view owns the matched prepare + backing retain */
+-    b.memory->release();
+-   }
++-  wired_-=b.allocated;
++-  if (b.importMemory) {
++-   b.importMap->release();
++-   b.importMemory->complete(); b.importMemory->release();
+++  wired_-=allocBytes;
+++  if (cached) cboStat(0,allocBytes);
+++  fuxi_gpu_abi_vm_release_quota(vm_,1u,allocBytes,impMem ? 1u : 0u);
+ +  unbound(b);
+-   bzero(&b,sizeof(b));
+++  bzero(&b,sizeof(b));
+++  if (allowUnlockTeardown) {
+++   enterUnlocked();
+++   IOLockUnlock(lock_);
+++   if (impMem) {
+++    IOReturn wrc=impMap->wireRange(kIODirectionNone,0,bytes);
+++    if (wrc!=kIOReturnSuccess)
+++     IOLog("FUXI GPU ABI: drop unwire failed rc 0x%08x bytes %llu\n",(unsigned)wrc,(unsigned long long)bytes);
+++    impMap->release(); impMem->complete(); impMem->release();
+++   } else {
+++    view->release(); mem->release();
+++   }
+++   IOLockLock(lock_);
+++   leaveUnlocked();
++   } else {
++-   b.view->release(); /* view owns the matched prepare + backing retain */
++-   b.memory->release();
++-  }
++-  bzero(&b,sizeof(b));
+++   if (impMem) {
+++    impMap->release(); impMem->complete(); impMem->release();
+++   } else {
+++    view->release(); /* view owns the matched prepare + backing retain */
+++    mem->release();
+++   }
+++  }
+    return kIOReturnSuccess;
+   }
+   IOReturn allocate(const NativeAdrenoAbiBoAlloc &r, NativeAdrenoAbiBoAllocReply &out) {
+@@ -564,6 +616,8 @@
+ +  Bo *b=freeSlot();
+    if (!b) return kIOReturnNoResources;
+ +  if (fuxi_gpu_abi_vm_reserve_quota(vm_,1u,allocated,0u)) { static unsigned bql=0; if (bql<16) { ++bql; IOLog("FUXI GPU ABI: BoAlloc quota refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); } return kIOReturnNoResources; }
+++  const bool unlocked=lockSplitEnabled==1;
+++  if (unlocked) { b->pendingAlloc=true; wired_+=allocated; enterUnlocked(); IOLockUnlock(lock_); }
+    uint64_t mask=((UINT64_C(1)<<FG_ABI_PA_BITS)-1)&~((UINT64_C(1)<<r.align_log2)-1);
+ -  IOOptionBits options=kIODirectionInOut|kIOMemoryMapperNone|kIOMemoryKernelUserShared|kIOMapWriteCombineCache;
+ -  /* Contiguous-first, with a wired scattered fallback unless required. */
+@@ -581,8 +635,21 @@
+ +  IOBufferMemoryDescriptor *memory=contiguous || allocated<=FG_ABI_CONTIG_TRY_BYTES ?
+ +      IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,options|kIOMemoryPhysicallyContiguous,allocated,mask) : NULL;
+ +  if (!memory && !contiguous) memory=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,options,allocated,mask);
+-+  if (!memory) { static unsigned bnl=0; if (bnl<16) { ++bnl; IOLog("FUXI GPU ABI: BoAlloc nomem refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); } fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u); return kIOReturnNoMemory; }
+-+  if (memory->prepare()!=kIOReturnSuccess) { static unsigned bpl=0; if (bpl<16) { ++bpl; IOLog("FUXI GPU ABI: BoAlloc prepare refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); } memory->release(); fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u); return kIOReturnNoMemory; }
+++  if (!memory) {
+++   bool lost=false;
+++   if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=allocated; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); lost=!live_; }
+++   static unsigned bnl=0; if (bnl<16) { ++bnl; IOLog("FUXI GPU ABI: BoAlloc nomem refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); }
+++   fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u);
+++   return lost ? kIOReturnNotOpen : kIOReturnNoMemory;
+++  }
+++  if (memory->prepare()!=kIOReturnSuccess) {
+++   memory->release();
+++   bool lost=false;
+++   if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=allocated; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); lost=!live_; }
+++   static unsigned bpl=0; if (bpl<16) { ++bpl; IOLog("FUXI GPU ABI: BoAlloc prepare refused class=%u pid=%d proc=%s req=%llu wired_mb=%llu/%llu bos=%u\n",clientClass_,pid_,procName_,(unsigned long long)allocated,(unsigned long long)(wired_>>20),(unsigned long long)(maxWired_>>20),liveBos_); }
+++   fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u);
+++   return lost ? kIOReturnNotOpen : kIOReturnNoMemory;
+++  }
+ +  abiStat(FG_ABI_STAT_ALLOCMEM,mach_absolute_time()-tMem);
+    FuxiAdrenoBoView *view=new FuxiAdrenoBoView;
+ -  bool valid=ranges && view && memory->getBytesNoCopy() && memory->getLength()==allocated;
+@@ -617,28 +684,35 @@
+ -   valid=view->bind(memory,ranges,count);
+ -  }
+ -  if (ranges) IODeleteData(ranges,IOAddressRange,capacity);
++-  if (!valid) {
+ +   abiStat(FG_ABI_STAT_ZERO,mach_absolute_time()-tZero);
+ +   uint64_t tBind=mach_absolute_time();
+ +   valid=view->bind(memory);
+ +   abiStat(FG_ABI_STAT_BIND,mach_absolute_time()-tBind);
+ +  }
+-   if (!valid) {
+++  if (unlocked) { IOLockLock(lock_); leaveUnlocked(); }
+++  if (!valid || (unlocked && !live_)) {
+++   if (unlocked) { wired_-=allocated; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); }
+     if (view) view->release();
+ -   memory->complete(); memory->release(); return kIOReturnNoMemory;
+ -  }
+ -  b->memory=memory; b->view=view; b->bytes=r.bytes; b->allocated=allocated;
+-+   memory->complete(); memory->release();
++-  b->handle=nextHandle_++; b->token=nextToken_++; wired_+=allocated;
+++   if (!valid) memory->complete();
+++   memory->release();
+ +   fuxi_gpu_abi_vm_release_quota(vm_,1u,allocated,0u);
+-+   return kIOReturnNoMemory;
+++   return (unlocked && !live_) ? kIOReturnNotOpen : kIOReturnNoMemory;
+ +  }
+++  b->pendingAlloc=false;
+ +  b->memory=memory; b->view=view; b->bytes=r.bytes; b->allocated=allocated; b->cached=cached;
+-   b->handle=nextHandle_++; b->token=nextToken_++; wired_+=allocated;
+++  b->handle=nextHandle_++; b->token=nextToken_++;
+++  if (!unlocked) wired_+=allocated;
+ +  if (cached) cboStat(1,allocated);
+ +  bound(*b);
+    out.handle=b->handle;
+    return kIOReturnSuccess;
+   }
+-@@ -144,51 +414,102 @@
++@@ -144,51 +475,111 @@
+    * COW resolution, before wiring. Never translate a user VA with kernel_pmap,
+    * change its WIMG/cache mode, or manufacture a physical descriptor alias. */
+   IOReturn importHost(const NativeAdrenoAbiBoImport &r, NativeAdrenoAbiBoAllocReply &out) {
+@@ -664,6 +738,8 @@
+ +  Bo *b=freeSlot();
+ +  if (!b) return refuse(3,kIOReturnNoResources,0);
+ +  if (fuxi_gpu_abi_vm_reserve_quota(vm_,1u,r.bytes,1u)) return refuse(2,kIOReturnNoResources,wired_);
+++  const bool unlocked=lockSplitEnabled==1;
+++  if (unlocked) { b->pendingAlloc=true; wired_+=r.bytes; ++liveImports_; enterUnlocked(); IOLockUnlock(lock_); }
+    IOMemoryDescriptor *memory=IOMemoryDescriptor::withAddressRange(r.address,r.bytes,
+        kIODirectionInOut|kIOMemoryMapperNone|kIOMemoryPersistent,task_);
+ -  if (!memory) return kIOReturnNoMemory;
+@@ -680,10 +756,10 @@
+ +   if (p) { detail|=2; p->release(); }
+ +   if (fuxi_gpu_abi_roimport()) memory=IOMemoryDescriptor::withAddressRange(r.address,r.bytes,kIODirectionOut|flags,task_);
+ +   else { p=IOMemoryDescriptor::withAddressRange(r.address,r.bytes,kIODirectionOut|flags,task_); if (p) { detail|=4; p->release(); } }
+-+   if (!memory) { fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u); return refuse(4,kIOReturnNoMemory,detail); }
+++   if (!memory) { if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=r.bytes; if (liveImports_) --liveImports_; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); } fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u); return refuse(4,kIOReturnNoMemory,detail); }
+ +   ro=true; probe=detail|8;
+ +  }
+-+  if (memory->prepare(ro ? kIODirectionOut : kIODirectionInOut)!=kIOReturnSuccess) { memory->release(); fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u); return refuse(5,kIOReturnBadArgument,probe); }
+++  if (memory->prepare(ro ? kIODirectionOut : kIODirectionInOut)!=kIOReturnSuccess) { memory->release(); if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=r.bytes; if (liveImports_) --liveImports_; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); } fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u); return refuse(5,kIOReturnBadArgument,probe); }
+    bool valid=memory->getLength()==r.bytes;
+ -  for (uint64_t off=0;valid && off<r.bytes;off+=NativeAdrenoAbiHostPageBytes) {
+ +  uint64_t why=valid ? 0 : (6ULL<<56);
+@@ -707,6 +783,7 @@
+     if (mapping) mapping->release();
+ -   memory->complete(); memory->release(); return kIOReturnBadArgument;
+ +   memory->complete(); memory->release();
+++   if (unlocked) { IOLockLock(lock_); leaveUnlocked(); wired_-=r.bytes; if (liveImports_) --liveImports_; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); }
+ +   fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u);
+ +   return refuse(valid ? 8 : (why>>56),kIOReturnBadArgument,(why&((1ULL<<56)-1))|(valid ? probe<<48 : 0));
+    }
+@@ -716,16 +793,23 @@
+ -   mapping->release(); memory->complete(); memory->release(); return kIOReturnNoMemory;
+ -  }
+ -  b->importMemory=memory; b->importMap=mapping; b->bytes=b->allocated=r.bytes;
++-  b->handle=nextHandle_++; wired_+=r.bytes; out.handle=b->handle;
+ +  /* wireRange passes (options&3) as vm_prot_t: kIODirectionIn=READ, kIODirectionOut=WRITE. A read-only alias
+ +   * must wire READ only; asking for WRITE (the old kIODirectionOut) is a protection failure. */
+ +  IOReturn wired=mapping->wireRange(ro ? kIODirectionIn : kIODirectionInOut,0,r.bytes);
+-+  if (wired!=kIOReturnSuccess) {
+++  if (unlocked) { IOLockLock(lock_); leaveUnlocked(); }
+++  if (wired!=kIOReturnSuccess || (unlocked && !live_)) {
+++   if (unlocked) { wired_-=r.bytes; if (liveImports_) --liveImports_; b->pendingAlloc=false; if ((unsigned)(b-bos_.first)<freeHint_) freeHint_=(unsigned)(b-bos_.first); }
+ +   mapping->release(); memory->complete(); memory->release();
+ +   fuxi_gpu_abi_vm_release_quota(vm_,1u,r.bytes,1u);
+-+   return refuse(9,kIOReturnNoMemory,(uint64_t)(uint32_t)wired|(probe<<32));
+++   return (unlocked && !live_) ? kIOReturnNotOpen : refuse(9,kIOReturnNoMemory,(uint64_t)(uint32_t)wired|(probe<<32));
+ +  }
+++  b->pendingAlloc=false;
+ +  b->importMemory=memory; b->importMap=mapping; b->importRo=ro; b->bytes=b->allocated=r.bytes;
+-   b->handle=nextHandle_++; wired_+=r.bytes; out.handle=b->handle;
+++  b->handle=nextHandle_++;
+++  if (!unlocked) wired_+=r.bytes;
+++  out.handle=b->handle;
+++  if (unlocked && liveImports_) --liveImports_; /* bound(*b) increments liveImports_ once for importMemory */
+ +  bound(*b);
+    return kIOReturnSuccess;
+   }
+@@ -760,13 +844,36 @@
+    }
+    if (method==NativeAdrenoMethodBoCpuUnmap) {
+     const auto &r=*static_cast<const NativeAdrenoAbiBoCpuUnmap *>(in);
+-@@ -202,7 +523,32 @@
+-    if (b->leases) return kIOReturnBusy;
++@@ -197,12 +588,53 @@
++    --b->leases; return kIOReturnSuccess;
++   }
++   if (method==NativeAdrenoMethodBoFree) {
++-   Bo *b=find(static_cast<const NativeAdrenoAbiBoFree *>(in)->handle);
+++   uint64_t h=static_cast<const NativeAdrenoAbiBoFree *>(in)->handle;
+++   Bo *b=find(h);
++    if (!b) return kIOReturnBadArgument;
++-   if (b->leases) return kIOReturnBusy;
+++   if (b->leases || b->dropping) return kIOReturnBusy;
+++   if (lockSplitEnabled==1) {
+++    IOReturn drc=drop(*b,true);
+++    if (drc==kIOReturnBusy && lastFence_) {
+++     b->dropping=true;
+++     (void)waitUnlocked(lastFence_,50000000ULL);
+++     b=find(h);
+++     if (b) b->dropping=false;
+++     if (!live_) return kIOReturnNotOpen;
+++     if (!b) return kIOReturnBadArgument;
+++     if (b->leases) return kIOReturnBusy;
+++     return drop(*b,true);
+++    }
+++    return drc;
+++   }
+     return drop(*b);
+    }
+ +  if (method==NativeAdrenoMethodSetMetadata || method==NativeAdrenoMethodGetMetadata) {
+ +   const auto &r=*static_cast<const NativeAdrenoAbiMetadata *>(in); Bo *b=find(r.handle);
+ +   if (!b || r.reserved || r.bytes>64) return kIOReturnBadArgument;
+++   if (b->dropping) return kIOReturnBusy;
+ +   if (method==NativeAdrenoMethodSetMetadata) { bcopy(r.text,b->metadata,r.bytes); b->metadataBytes=r.bytes; }
+ +   else {
+ +    if (r.bytes<b->metadataBytes) return kIOReturnBadArgument;
+@@ -793,11 +900,12 @@
+    if (method==NativeAdrenoMethodBoImport)
+     return importHost(*static_cast<const NativeAdrenoAbiBoImport *>(in),*static_cast<NativeAdrenoAbiBoAllocReply *>(out));
+    if (method==NativeAdrenoMethodBoAlloc)
+-@@ -210,16 +556,26 @@
++@@ -210,135 +642,241 @@
+    if (method==NativeAdrenoMethodBoMap) {
+     const auto &r=*static_cast<const NativeAdrenoAbiBoMap *>(in);
+     Bo *b=find(r.handle);
+ -   if (!b || b->iova || (b->importMemory && (r.writeback || r.shareability!=2)) || !fg_abi_map_valid(r.iova,b->bytes,r.permissions,r.writeback,r.shareability,r.reserved))
+++   if (b && b->dropping) return kIOReturnBusy;
+ +   if (!b || b->iova || (b->importMemory && (r.writeback || r.shareability!=2)) || (b->cached && (r.writeback!=1 || r.shareability!=3)) ||
+ +       (r.reserved & ~(uint32_t)NativeAdrenoMapGpuOnly) ||
+ +       !fg_abi_map_valid(r.iova,b->bytes,r.permissions,r.writeback,r.shareability,0))
+@@ -824,7 +932,12 @@
+     if (s) return s==1 ? kIOReturnBusy : kIOReturnBadArgument;
+     b->iova=r.iova; static_cast<NativeAdrenoAbiBoMapReply *>(out)->iova=r.iova; return kIOReturnSuccess;
+    }
+-@@ -231,80 +587,139 @@
++   if (method==NativeAdrenoMethodBoCpuMap) {
++    Bo *b=find(static_cast<const NativeAdrenoAbiBoCpuMap *>(in)->handle);
++    if (!b || b->importMemory || b->leases==UINT32_MAX) return kIOReturnBadArgument;
+++   if (b->dropping) return kIOReturnBusy;
++    ++b->leases;
++    *static_cast<NativeAdrenoAbiBoCpuMapReply *>(out)={b->token,0,b->allocated}; return kIOReturnSuccess;
+    }
+    if (method==NativeAdrenoMethodSubmit) {
+     const auto &r=*static_cast<const NativeAdrenoAbiSubmit *>(in);
+@@ -844,15 +957,20 @@
+ +   uint64_t iova[NativeAdrenoAbiMaxBuffers], bytes[NativeAdrenoAbiMaxBuffers];
+ +   uint64_t spLook=mach_absolute_time();
+ +   /* Also run again after every wait: lock_ is dropped while a refused submit sleeps, so a BO may have gone. */
+++   bool dropping=false;
+ +   auto lookup=[&]() -> bool {
+++    dropping=false;
+ +    for (unsigned i=0;i<r.buffer_count;i++) {
+ +     const auto &ib=r.buffers[i]; Bo *b=find(ib.handle);
+-+     if (!b || !b->iova || !fg_abi_ib_valid(b->iova,b->bytes,ib.iova,ib.bytes)) return false;
+++     if (!b || b->dropping || !b->iova || !fg_abi_ib_valid(b->iova,b->bytes,ib.iova,ib.bytes)) {
+++      if (b && b->dropping) dropping=true;
+++      return false;
+++     }
+ +     iova[i]=ib.iova; bytes[i]=ib.bytes;
+ +    }
+ +    return true;
+ +   };
+-+   if (!lookup()) return kIOReturnBadArgument;
+++   if (!lookup()) return dropping ? kIOReturnBusy : kIOReturnBadArgument;
+ +   uint64_t deadline; clock_interval_to_deadline(150,NSEC_PER_MSEC,&deadline);
+ +   uint64_t spBack=0, spSleep=0, spStart=mach_absolute_time();
+ +   unsigned spAtt=0, spWaits=0, spEvents=0, spWn[3]={}; uint64_t spWt[3]={};
+@@ -878,13 +996,15 @@
+ +    if (clientClass_==FG_CLASS_COMPOSITOR && !bbWaiting) { fuxi_gpu_abi_vm_bb_wait(1); bbWaiting=true; }
+ +    uint64_t p0=mach_absolute_time();
+ +    unsigned kind=2, us=fuxi_gpu_abi_submit_wait_us(&kind);
+++    enterUnlocked();
+ +    IOLockUnlock(lock_); /* Never hold the ring mutex during scheduler waits, and let the other calls of this client run. */
+ +    bool woke=abiEventWait(seq0,us);
+ +    IOLockLock(lock_);
+++    leaveUnlocked();
+ +    uint64_t slept=mach_absolute_time()-p0;
+ +    spSleep+=slept; ++spWaits; if (woke) ++spEvents; abiStat(FG_ABI_STAT_SLEEP,slept); spWn[kind]++; spWt[kind]+=slept;
+ +    if (!live_) { if (bbWaiting) fuxi_gpu_abi_vm_bb_wait(-1); return kIOReturnNotOpen; }
+-+    if (!lookup()) { if (bbWaiting) fuxi_gpu_abi_vm_bb_wait(-1); return kIOReturnBadArgument; }
+++    if (!lookup()) { if (bbWaiting) fuxi_gpu_abi_vm_bb_wait(-1); return dropping ? kIOReturnBusy : kIOReturnBadArgument; }
+     }
+ -   uint64_t deadline; clock_interval_to_deadline(150,NSEC_PER_MSEC,&deadline);
+ -   for (;;) {
+@@ -1010,9 +1130,15 @@
+   }
+   IOReturn clientClose() override {
+    if (!lock_) return kIOReturnSuccess;
+-@@ -312,33 +727,56 @@
+-   bool wasLive=live_;
+-   if (live_) {
++   IOLockLock(lock_);
++-  bool wasLive=live_;
++-  if (live_) {
+++  while (closing_) (void)IOLockSleep(lock_,&closing_,THREAD_UNINT);
+++  bool doClose=live_;
+++  if (doClose) {
+++   live_=false;
+++   closing_=true;
+++   while (inflightUnlocked_>0) (void)IOLockSleep(lock_,&inflightUnlocked_,THREAD_UNINT);
+     if (lastFence_) (void)wait(lastFence_,200000000);
+ +   bool quarantined=false;
+ +   unsigned qLogged=0, qSuppressed=0;
+@@ -1027,14 +1153,16 @@
+ +     else ++qSuppressed;
+ +    }
+     }
++-   live_=false;
++-   IOLockLock(openLock); connected=false; IOLockUnlock(openLock);
+ +   if (qSuppressed) IOLog("FUXI GPU ABI: quarantined %u more BOs until reset (suppressed)\n", qSuppressed);
+ +   if (vm_ && !quarantined) { fuxi_gpu_abi_vm_destroy(vm_); vm_=nullptr; }
+-    live_=false;
+--   IOLockLock(openLock); connected=false; IOLockUnlock(openLock);
+++   closing_=false;
+++   IOLockWakeup(lock_,&closing_,false);
+    }
+    IOLockUnlock(lock_);
+ -  if (wasLive) terminate(); return kIOReturnSuccess;
+-+  if (wasLive) { abiTrace("close",pid_,kIOReturnSuccess); terminate(); }
+++  if (doClose) { abiTrace("close",pid_,kIOReturnSuccess); terminate(); }
+ +  return kIOReturnSuccess;
+   }
+   void free() override {
+@@ -1073,7 +1201,7 @@
+    if (!handler) return kIOReturnBadArgument;
+    *handler=nullptr;
+    if (type!=0x4147 && type!=0) return kIOReturnUnsupported;
+-@@ -351,10 +789,92 @@
++@@ -351,18 +889,151 @@
+    *handler=uc; return kIOReturnSuccess;
+   }
+  };
+@@ -1163,14 +1291,40 @@
+ +     abiExecswapTest(swap);
+ + PE_parse_boot_argn("fuxigpuwaitus",&waitPollUs,sizeof(waitPollUs));
+ + if (waitPollUs>1000) waitPollUs=1000;
+++ {
+++  uint32_t sliceArg=1000;
+++  if (!PE_parse_boot_argn("fuxigpuirqslice",&sliceArg,sizeof(sliceArg))) {
+++   DTEntry chosen; const void *prop=nullptr; unsigned bytes=0;
+++   if (SecureDTLookupEntry(nullptr,"/chosen",&chosen)==kSuccess &&
+++       SecureDTGetProperty(chosen,"fuxi,gpu-irqslice",&prop,&bytes)==kSuccess &&
+++       prop && bytes==sizeof(uint32_t)) {
+++    memcpy(&sliceArg,prop,sizeof(uint32_t));
+++   }
+++  }
+++  if (sliceArg<1000) sliceArg=1000;
+++  else if (sliceArg>16000) sliceArg=16000;
+++  irqSliceUs=sliceArg;
+++ }
+ + openLock=IOLockAlloc(); statLock=IOLockAlloc(); evLock=IOLockAlloc();
+ + if (evLock) fuxi_gpu_abi_wake_hook=abiWake;
+   auto *service=new NativeAdrenoGpuPublished;
+   if (!openLock || !service) { if (service) service->release(); return; }
+   if (!service->init() || !service->attach(IOService::getPlatform()) || !service->start(IOService::getPlatform())) {
+-@@ -362,7 +882,30 @@
++   service->release(); return;
+   }
+   service->setName("NativeAdrenoGpu");
+++ {
+++  uint32_t splitArg=0;
+++  if (!PE_parse_boot_argn("fuxigpulocksplit",&splitArg,sizeof(splitArg))) {
+++   DTEntry chosen; const void *prop=nullptr; unsigned bytes=0;
+++   if (SecureDTLookupEntry(nullptr,"/chosen",&chosen)==kSuccess &&
+++       SecureDTGetProperty(chosen,"fuxi,gpu-locksplit",&prop,&bytes)==kSuccess &&
+++       prop && bytes==sizeof(uint32_t)) {
+++    memcpy(&splitArg,prop,sizeof(uint32_t));
+++   }
+++  }
+++  lockSplitEnabled=(splitArg==1) ? 1u : 0u;
+++ }
+   service->setProperty("NativeAdrenoABI",(uint64_t)NativeAdrenoAbiVersion,32);
+ + service->setProperty("MetalPluginName","FuxiMetal");
+ + service->setProperty("MetalPluginClassName","FuxiMTLDevice");
+@@ -1185,6 +1339,8 @@
+   service->registerService(); /* retained for boot lifetime */
+ - IOLog("FUXI GPU ABI: NativeAdrenoGpuPublished v2 HostImport 16K, open 0x4147, root only, watchdog 100 ms\n");
+ + IOLog("FUXI GPU ABI: NativeAdrenoGpuPublished v2 HostImport 16K, open 0x4147, multi-VM isolated (Class0 100ms / Class1 40ms)\n");
+++ if (lockSplitEnabled==1) IOLog("FUXI GPU ABI: lock_ split enabled (fuxigpulocksplit=1)\n");
+++ if (irqSliceUs!=1000) IOLog("FUXI GPU IRQ: WaitFence slice ceiling=%u us (fuxigpuirqslice)\n",irqSliceUs);
+ +}
+ +/* The scheduling counters of the backend, once per stats window: IBs per submission (the 128-IB record is working when over16 grows),
+ + * the most BOs live at once, fenced WPTR writes (fuxigpuncimport bit 1) and the stall recovery stages (bit 2). Silent without a submit. */
+diff --git a/xnu/patches/0106-fuxi-unixnu.patch b/xnu/patches/0106-fuxi-unixnu.patch
+index 10455cd..fa55a47 100644
+--- a/xnu/patches/0106-fuxi-unixnu.patch
++++ b/xnu/patches/0106-fuxi-unixnu.patch
+@@ -850,9 +850,13 @@
+  #if defined(FUXI)
+  extern "C" {
+  #include "../../../bsd/dev/fuxi_adreno.h"
+-@@ -65,7 +70,18 @@
++@@ -64,8 +69,22 @@
++ #include <IOKit/IOTimerEventSource.h>
+  #include <IOKit/system.h>
+  #include <pexpert/pexpert.h>
+++#if defined(FUXI)
+++#include <pexpert/device_tree.h>
+++#endif
+  #include <kern/clock.h>
+ +#include <kern/thread_call.h>
+  #include <sys/proc.h>
+@@ -869,7 +873,7 @@
+  
+  enum {
+  	kSweetFBGetLayerDefaultSurface  = 3,
+-@@ -82,6 +98,13 @@
++@@ -82,6 +101,13 @@
+  
+  #define SWEET_FB_SWAP_REC_SIZE          0x46c
+  #define SWEET_FB_LAYERS                 4
+@@ -883,7 +887,7 @@
+  #define SWEET_FB_NOTIFY_TYPES           8
+  #define SWEET_FB_NOTIFY_VSYNC           5
+  #define SWEET_FB_VSYNC_US               16667
+-@@ -127,25 +150,206 @@
++@@ -127,25 +153,206 @@
+  	OSArray      *fClients;
+  	uint32_t      fSwapID;
+  	bool          fConsolePaused;
+@@ -1094,7 +1098,7 @@
+  };
+  
+  OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+-@@ -174,6 +378,222 @@
++@@ -174,6 +381,252 @@
+  OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
+  #if defined(FUXI)
+  extern "C" void fuxi_display_kick(void);
+@@ -1250,6 +1254,36 @@
+ + IOLog("SWEET FB: vsync TE requested offset_us=%u\n", offset);
+ +}
+ +
+++/* Wave 2 opt-in (fuxinopoll=0 default off, or ADT /chosen u32 "fuxi,nopoll"):
+++ * - 0: legacy continuous ~515 us (period/16) polling.
+++ * - 1: smart idle TE-bracket suppression (keep period/16 during any active/pending present
+++ *      or unlocked/converging TE (samples < 4) so 0.7 ms GPU copy completePresent() has zero
+++ *      added delay and IIR period converges first; when idle and TE-locked with samples >= 4,
+++ *      jump between TE edges while bracketing each edge within <= period/5 via period/8 step).
+++ * - 8..16 (2..7 clamped to 8): explicit safe idle divisor <= period/8 (< period/4 limit). */
+++static uint32_t sweet_fb_nopoll_mode(void)
+++{
+++ static uint32_t cached = ~0u;
+++ if (cached != ~0u) return cached;
+++ uint32_t val = 0;
+++ if (!PE_parse_boot_argn("fuxinopoll", &val, sizeof(val))) {
+++  DTEntry chosen;
+++  const void *prop = NULL;
+++  unsigned bytes = 0;
+++  if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+++      SecureDTGetProperty(chosen, "fuxi,nopoll", &prop, &bytes) == kSuccess &&
+++      prop && bytes == sizeof(val)) {
+++   memcpy(&val, prop, sizeof(val));
+++  }
+++ }
+++ if (val == 1) cached = 1;
+++ else if (val >= 2 && val <= 7) cached = 8;
+++ else if (val >= 8 && val <= 16) cached = val;
+++ else cached = 0;
+++ if (cached) IOLog("SWEET FB: idle TE poll suppress mode=%u (fuxinopoll)\n", cached);
+++ return cached;
+++}
+++
+ +bool AppleCLCD::teVsyncTick(uint64_t &now, bool fallback)
+ +{
+ + bool wasValid = fTeValid;
+@@ -1317,7 +1351,7 @@
+  #endif
+  
+  bool
+-@@ -214,7 +634,44 @@
++@@ -214,7 +667,45 @@
+  		OSSafeReleaseNULL(fWorkLoop);
+  		return false;
+  	}
+@@ -1356,6 +1390,7 @@
+ +		    fFit, fuxi_fit_h(fFit), fuxi_fit_y0(fFit), fLogicalW, fLogicalH);
+ +	}
+ +	sweet_fb_te_configure(this);
+++	if (fVsyncTE) (void)sweet_fb_nopoll_mode();
+ +#endif
+ +	uint32_t timerOptions = sweet_fb_timer_options();
+ +	if (timerOptions == kIOTimerEventSourceOptionsPriorityHigh)
+@@ -1363,7 +1398,7 @@
+  	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
+  		IOLog("SWEET FB: no vsync timer\n");
+  		return false;
+-@@ -227,40 +684,174 @@
++@@ -227,40 +718,199 @@
+  	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+  	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+  #if defined(FUXI)
+@@ -1505,13 +1540,38 @@
+ +      (fb->fPowerOff ? fb->fFadeStep == 0 : fb->fDirty));
+ +  /* fuxigpuncimport bit 2048: poll the in-flight scanout copy at 1/64 tick so its surface lease is released at retire. */
+ +  uint64_t poll = now + fb->fTickAbs/((fb->fGpuPending && fuxi_gpu_abi_pace()) || ((fb->fPublicationPending || fuxi_gpu_scanout_pending()) && fuxi_gpu_abi_start()) ? 64 : 16);
+++  uint32_t noPollMode = sweet_fb_nopoll_mode();
+ +  if (fb->fVsyncTE) {
+ +   if (fb->fTeValid) {
+ +    deadline = fb->fTeNext;
+-+    poll = now + fb->fTe.period/16;
+++    uint64_t minPoll = fb->fTe.period / 16;
+++    if (!minPoll) minPoll = 1;
+++    poll = now + minPoll;
+++    if (noPollMode && !active && fb->fTe.samples >= 2) {
+++     if (noPollMode == 1) {
+++      if (fb->fTe.samples >= 4) {
+++       uint64_t margin = fb->fTe.period / 5;
+++       uint64_t bracketStep = fb->fTe.period / 8;
+++       if (!bracketStep) bracketStep = minPoll;
+++       uint64_t nextEdge = fb->fTe.edge + fb->fTe.period;
+++       if (nextEdge > now + margin) {
+++        uint64_t preEdge = nextEdge - margin;
+++        poll = preEdge > now + minPoll ? preEdge : (now + minPoll);
+++       } else if (nextEdge + margin > now) {
+++        poll = now + bracketStep;
+++       } else {
+++        poll = now + minPoll;
+++       }
+++      }
+++     } else {
+++      uint64_t divStep = fb->fTe.period / noPollMode;
+++      poll = now + (divStep > minPoll ? divStep : minPoll);
+++     }
+++    }
+ +   }
+-+   /* Keep observing TE even with subscribers but no dirty swap. */
+++   /* Keep observing TE even with subscribers but no dirty swap; never arm a past deadline. */
+ +   if (poll < deadline || deadline <= now) deadline = poll;
+++   if (deadline <= now) deadline = now + (fb->fTeValid && fb->fTe.period >= 16 ? fb->fTe.period / 16 : 1);
+ +  } else if (active && poll < deadline) deadline = poll;
+ +  fb->fTickArmed = true;
+ +  sender->wakeAtTime(kIOTimeOptionsWithLeeway, deadline, 0);
+@@ -1546,7 +1606,7 @@
+  #else
+  	(void)fb;
+  	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+-@@ -272,44 +863,34 @@
++@@ -272,44 +922,34 @@
+  {
+  	AppleCLCD *fb = (AppleCLCD *)owner;
+  	uint64_t now = mach_absolute_time();
+@@ -1609,7 +1669,7 @@
+  	if (fb->fPowerOff) {
+  		/* Fade out: halve every channel each vsync, then black, then idle. */
+  		uint32_t step = fb->fFadeStep;
+-@@ -319,14 +900,22 @@
++@@ -319,14 +959,22 @@
+  		IOLockUnlock(fb->fLock);
+  #if defined(FUXI)
+  		if (step == 0) {
+@@ -1637,7 +1697,7 @@
+  		}
+  #else
+  		if (step <= 6) {
+-@@ -341,20 +930,13 @@
++@@ -341,20 +989,13 @@
+  		sweet_fb_rearm(fb, sender);
+  		return;
+  	}
+@@ -1665,7 +1725,7 @@
+  	sweet_fb_rearm(fb, sender);
+  }
+  
+-@@ -388,38 +970,356 @@
++@@ -388,38 +1029,356 @@
+  static uint32_t sweet_fb_swaps_logged;
+  static uint64_t sweet_fb_swap_count;
+  
+@@ -2048,7 +2108,7 @@
+  
+  	if (!fConsolePaused) {
+  		int quiet = 0;
+-@@ -442,7 +1342,7 @@
++@@ -442,7 +1401,7 @@
+  		if (!(mask & (1u << layer)) || id == 0) {
+  			continue;
+  		}
+@@ -2057,7 +2117,7 @@
+  		if (sweet_fb_swaps_logged < 16) {
+  			sweet_fb_swaps_logged++;
+  			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
+-@@ -451,6 +1351,7 @@
++@@ -451,6 +1410,7 @@
+  			    get32(a, 12), dx, dy, w, h);
+  		}
+  		if (s == NULL || s == fSurface) {
+@@ -2065,7 +2125,7 @@
+  			OSSafeReleaseNULL(s);
+  			continue;
+  		}
+-@@ -467,8 +1368,18 @@
++@@ -467,8 +1427,18 @@
+  			dx = dy = 0;
+  		}
+  		/* Logical (presented) display coordinates -> panel coordinates. */
+@@ -2086,7 +2146,7 @@
+  		if (dx < 0) {
+  			sx -= dx;
+  			w += dx;
+-@@ -485,11 +1396,11 @@
++@@ -485,11 +1455,11 @@
+  		if (h > (int32_t)s->height - sy) {
+  			h = (int32_t)s->height - sy;
+  		}
+@@ -2103,7 +2163,7 @@
+  		}
+  		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+  		    (uint64_t)(sx + w) * 4;
+-@@ -500,35 +1411,265 @@
++@@ -500,35 +1470,265 @@
+  		if (src != 0 && bpe == 4) {
+  			int copied = 0;
+  #if defined(FUXI)
+@@ -2377,7 +2437,7 @@
+  	fStatCopy += took;
+  	fStatCopyMax = took > fStatCopyMax ? took : fStatCopyMax;
+  	if (++fStatFrames >= 600) {
+-@@ -538,15 +1679,47 @@
++@@ -538,15 +1738,47 @@
+  		absolutetime_to_nanoseconds(t1 - fStatStart, &span_ns);
+  		IOLockLock(fLock);
+  		uint32_t swaps = fStatSwaps, dropped = fStatDropped;
+@@ -2428,7 +2488,7 @@
+  		sweet_surface_gpu_stats(&split);
+  		uint64_t ticks[] = {split.pin, split.lookup, split.map, split.clean,
+  		    split.submit, split.wait, split.unmap, split.cpu};
+-@@ -557,13 +1730,21 @@
++@@ -557,13 +1789,21 @@
+  			absolutetime_to_nanoseconds(ticks[i], &ns);
+  			us[i] = attempts ? ns / 1000 / attempts : 0;
+  		}
+@@ -2453,7 +2513,7 @@
+  		fGpuBusyTicks = fGpuFailed = 0;
+  		fGpuFrames = fCpuFrames = 0;
+  		fGpuTime = fCpuTime = 0;
+-@@ -571,6 +1752,33 @@
++@@ -571,6 +1811,33 @@
+  		fStatCopy = fStatCopyMax = 0;
+  		fStatStart = t1;
+  	}
+@@ -2487,7 +2547,7 @@
+  #endif
+  }
+  
+-@@ -620,6 +1828,7 @@
++@@ -620,6 +1887,7 @@
+  	IOLockLock(fFB->fLock);
+  	old = fPort;
+  	fPort = port;
+@@ -2495,7 +2555,7 @@
+  	IOLockUnlock(fFB->fLock);
+  	if (old != MACH_PORT_NULL) {
+  		releaseNotificationPort(old);
+-@@ -643,6 +1852,40 @@
++@@ -643,6 +1911,40 @@
+  }
+  
+  static uint64_t sweet_fb_logged;        /* selectors already logged (< 64) */
+@@ -2536,7 +2596,7 @@
+  
+  IOReturn
+  IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
+-@@ -660,7 +1903,7 @@
++@@ -660,7 +1962,7 @@
+  		break;
+  	case kSweetFBSwapBegin:
+  		IOLockLock(fFB->fLock);
+@@ -2545,7 +2605,7 @@
+  		IOLockUnlock(fFB->fLock);
+  		outCount = 1;
+  		break;
+-@@ -672,7 +1915,7 @@
++@@ -672,7 +1974,7 @@
+  			break;
+  		}
+  		memcpy(rec, args->structureInput, sizeof(rec));
+@@ -2554,7 +2614,7 @@
+  		break;
+  	}
+  	case kSweetFBGetID:
+-@@ -698,6 +1941,7 @@
++@@ -698,6 +2000,7 @@
+  			IOLockLock(fFB->fLock);
+  			fFunc[type] = args->scalarInput[0];
+  			fRefcon[type] = args->scalarInput[1];
+@@ -2562,7 +2622,7 @@
+  			IOLockUnlock(fFB->fLock);
+  			char name[32];
+  			proc_selfname(name, sizeof(name));
+-@@ -707,19 +1951,13 @@
++@@ -707,19 +2010,13 @@
+  		break;
+  	case kSweetFBRequestPowerChange:
+  		if (args->scalarInputCount >= 1) {

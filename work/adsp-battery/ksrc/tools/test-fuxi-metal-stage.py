@@ -2,6 +2,9 @@
 """Validate Metal staging on a temporary root with real signed artifacts."""
 import argparse
 import os
+import sys
+sys.dont_write_bytecode=True
+os.environ.setdefault('PYTHONDONTWRITEBYTECODE','1')
 import subprocess
 import importlib.util
 from pathlib import Path
@@ -21,8 +24,12 @@ def policy_storage_tests():
         assert m.validate_clients(clients,True)==b'fuxi-ca-smoke\nbackboardd\n'
         clients.write_bytes(b'backboardd\n')
         assert m.validate_clients(clients,True)==b'backboardd\n'
-        for data in (b'backboardd\n',b'SpringBoard\n',b'census backboardd\n',b'census SpringBoard\n',
-                     b'mediaserverd\n',b'census mediaserverd\n'):
+        for data in (b'backboardd\n',b'SpringBoard\n',b'springboard\n',b'census backboardd\n',b'census SpringBoard\n',
+                     b'mediaserverd\n',b'MEDIASERVERD\n',b'census mediaserverd\n',
+                     b'PosterBoard\n',b'census PosterBoard\n',
+                     b'CollectionsPoster\n',b'census CollectionsPoster\n',
+                     b'WeatherPoster\n',b'census WeatherPoster\n',
+                     b'WALLPAPERPOSTER\n',b'mywallpaperposterapp\n'):
             clients.write_bytes(data)
             try:m.validate_clients(clients);raise AssertionError('default compositor accepted')
             except ValueError:pass
@@ -152,7 +159,10 @@ def main():
             for maximum in range(6):
                 ca_conf.write_bytes(str(maximum).encode());stage()
             ca_conf.write_bytes(b'4\n')
-            for raw in (b'x\0',b'census x y',b'census backboardd\nbackboardd',b'x'*8193,b'../bad',b'backboardd',b'SpringBoard',b'census backboardd',b'census SpringBoard'):
+            for raw in (b'x\0',b'census x y',b'census backboardd\nbackboardd',b'x'*8193,b'../bad',b'backboardd',
+                        b'SpringBoard',b'springboard',b'census backboardd',b'census SpringBoard',
+                        b'mediaserverd',b'MEDIASERVERD',b'PosterBoard',b'census PosterBoard',
+                        b'CollectionsPoster',b'census CollectionsPoster',b'WeatherPoster',b'WALLPAPERPOSTER'):
                 clients.write_bytes(raw)
                 try:stage();raise AssertionError('bad clients accepted')
                 except ValueError:pass

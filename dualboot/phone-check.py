@@ -61,7 +61,15 @@ def command(*argv, timeout=60):
 
 
 def adb(*args, timeout=60):
-    return command("adb", "-s", SERIAL, *args, timeout=timeout)
+    for attempt in range(3):
+        try:
+            return command("adb", "-s", SERIAL, *args, timeout=timeout)
+        except RuntimeError as error:
+            text = str(error)
+            if attempt < 2 and ("cannot connect to daemon" in text or "could not read ok from ADB Server" in text):
+                time.sleep(1.5)
+                continue
+            raise
 
 
 def rooted(script, timeout=60):
@@ -192,7 +200,9 @@ INSTALLED_BOOT_A_REPORTS = ("persistent-slot-a-20261118", "persistent-slot-a-upg
                             "persistent-slot-a-upgrade-daily-atxfix-20261123",
                             "persistent-slot-a-upgrade-daily-cell-hotspot-ap7-20261123",
                             "persistent-slot-a-upgrade-daily-b020-v2-20261124",
-                            "persistent-slot-a-upgrade-daily-b021-20261125")
+                            "persistent-slot-a-upgrade-daily-b021-20261125",
+                            "persistent-slot-a-upgrade-daily-b022-20261126",
+                            "persistent-slot-a-upgrade-daily-b022-20261126-r2")
 
 
 def installed_boot_a_shas():

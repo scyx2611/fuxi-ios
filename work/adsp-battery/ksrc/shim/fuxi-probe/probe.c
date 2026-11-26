@@ -1173,15 +1173,32 @@ ud_setup(void)
         if (off > FG_RAM_SIZE || n > FG_RAM_SIZE-off) ok=false;
         else memcpy(data, (const void *)(uintptr_t)(0x8c0000000ULL+off), n);
     } else if (type == 0xc0 && req == 0x4e) {
-        uint32_t index=(uint32_t)st[4] | ((uint32_t)st[5]<<8);
-        uint64_t off=(uint64_t)value | ((uint64_t)index<<16);
-        const uint64_t size=1080ULL*2400*4;
-        n=length > 512 ? 512 : length;
-        uint32_t base=usb_rd(0xae05000,0x14);
-        if (off>size || n>size-off || (base!=0xb8000000 && base!=0xb8a00000 && base!=0xb9400000) ||
-            usb_rd(0xae05000,0x24)!=4320 || usb_rd(0xae05000,0x30)!=0x237ff)
-            ok=false;
-        else memcpy(data,(const void *)(uintptr_t)((uint64_t)base+off),n);
+        static uint32_t latched_base = 0;
+        uint32_t index = (uint32_t)st[4] | ((uint32_t)st[5] << 8);
+        uint64_t off = (uint64_t)value | ((uint64_t)index << 16);
+        const uint64_t size = 1080ULL * 2400 * 4;
+        uint32_t stride = usb_rd(0xae05000, 0x24);
+        uint32_t fmt = usb_rd(0xae05000, 0x30);
+        uint32_t base = 0;
+        n = length > 512 ? 512 : length;
+        if (off == 0) {
+            base = usb_rd(0xae05000, 0x14);
+            if ((base != 0xb8000000 && base != 0xb8a00000 && base != 0xb9400000) ||
+                stride != 4320 || fmt != 0x237ff) {
+                latched_base = 0;
+                ok = false;
+            } else if (n > 0) {
+                latched_base = base;
+            }
+        } else {
+            base = latched_base;
+            if (base != 0xb8000000 && base != 0xb8a00000 && base != 0xb9400000)
+                ok = false;
+        }
+        if (ok && (off > size || n > size - off || stride != 4320 || fmt != 0x237ff))
+            ok = false;
+        if (ok)
+            memcpy(data, (const void *)(uintptr_t)((uint64_t)base + off), n);
     } else if (type == 0xc0 && req == 0x4f) {
         /* Read-only display pipeline windows from live FDT: MDP top, CTL0,
          * INTF1 (+tear irq), DSC0 enc/ctl, PP0/PP1, DSI0 controller. MDSS top

@@ -1,0 +1,173 @@
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -31,6 +31,7 @@
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <libkern/c++/OSString.h>
+ #include <sys/proc.h>
++#include <pexpert/device_tree.h>
+ 
+ extern "C" {
+ #include <corecrypto/cc.h>
+@@ -47,6 +48,7 @@ enum {
+ 	kAKSSetSystem        = 5,
+ 	kAKSLoadBag          = 6,
+ 	kAKSGetLockState     = 7,
++	kAKSLockDevice       = 8,
+ 	kAKSUnlockDevice     = 9,
+ 	kAKSWrapKey          = 10,
+ 	kAKSUnwrapKey        = 11,
+@@ -54,13 +56,17 @@ enum {
+ 	kAKSLockBag          = 13,
+ 	kAKSGetSystem        = 14,
+ 	kAKSGetDeviceState   = 17,
++	kAKSBagUUID          = 23,
++	kAKSLockDeviceForce  = 32,
+ 	kAKSGetExtDeviceState = 35,     /* aks_get_extended_device_state */
++	kAKSGeneration       = 40,
+ 	kAKSAssertHold       = 26,
+ 	kAKSAssertDrop       = 27,
+ 	kAKSUnloadSessionBags = 55,
+ 	kAKSNotifyStateSet   = 102,
+ 	kAKSNotifyStateIsSet = 103,
+ 	kAKSAssertConsume    = 101,     /* aks_assert_consume */
++	kAKSEnableCacheFlow  = 160,
+ };
+ 
+ /* The system (device) bag handle. */
+@@ -214,7 +220,7 @@ sweet_aks_wrap(IOExternalMethodArguments *args, bool wrap)
+ 	uint32_t key_class;
+ 	IOReturn ret;
+ 
+-	if (args->scalarInputCount < 2) {
++	if (args->scalarInputCount < 2 || args->scalarInput == NULL) {
+ 		return kIOReturnBadArgument;
+ 	}
+ 	key_class = (uint32_t)args->scalarInput[1];
+@@ -247,9 +253,11 @@ sweet_aks_wrap(IOExternalMethodArguments *args, bool wrap)
+ 		    sweet_aks_struct_out(args, out, SWEET_AKS_KEY_BYTES) : kIOReturnNotPermitted;
+ 	}
+ 	if (ret == kIOReturnSuccess) {
+-		if (args->scalarOutputCount >= 1) {
++		if (args->scalarOutputCount >= 1 && args->scalarOutput != NULL) {
+ 			args->scalarOutput[0] = key_class;
+ 			args->scalarOutputCount = 1;
++		} else {
++			args->scalarOutputCount = 0;
+ 		}
+ 	}
+ 	cc_clear(sizeof(in), in);
+@@ -258,6 +266,35 @@ sweet_aks_wrap(IOExternalMethodArguments *args, bool wrap)
+ 	return ret;
+ }
+ 
++static const char sweet_aks_bag_uuid_key[] = "SWEET AKS fuxi bag uuid, v1";
++
++/* Selector 23 (kAKSBagUUID): deterministic 16-byte UUID from /chosen/unique-chip-id. */
++static IOReturn
++sweet_aks_bag_uuid(IOExternalMethodArguments *args)
++{
++	DTEntry chosen;
++	void const *prop = NULL;
++	unsigned int bytes = 0;
++
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, "unique-chip-id", &prop, &bytes) != kSuccess ||
++	    prop == NULL || bytes == 0) {
++		return kIOReturnError;
++	}
++
++	uint8_t chip_id[32];
++	uint32_t chip_len = bytes > sizeof(chip_id) ? (uint32_t)sizeof(chip_id) : bytes;
++	memcpy(chip_id, prop, chip_len);
++
++	uint8_t digest[CCSHA256_OUTPUT_SIZE];
++	cchmac(ccsha256_di(), sizeof(sweet_aks_bag_uuid_key) - 1,
++	    sweet_aks_bag_uuid_key, chip_len, chip_id, digest);
++	IOReturn ret = sweet_aks_struct_out(args, digest, 16);
++	cc_clear(sizeof(chip_id), chip_id);
++	cc_clear(sizeof(digest), digest);
++	return ret;
++}
++
+ static uint32_t
+ sweet_aks_struct_out_size(IOExternalMethodArguments *args)
+ {
+@@ -270,13 +307,17 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
+     __unused void *reference)
+ {
++	if (args == NULL) {
++		return kIOReturnBadArgument;
++	}
++
+ 	IOReturn ret = kIOReturnSuccess;
+ 	uint32_t in_scalars = args->scalarInputCount;
+ 	uint32_t in_struct = args->structureInputDescriptor != NULL ?
+ 	    (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
+ 	uint32_t out_scalars = args->scalarOutputCount;
+ 	uint32_t out_struct = sweet_aks_struct_out_size(args);
+-	uint64_t arg0 = in_scalars > 0 ? args->scalarInput[0] : 0;
++	uint64_t arg0 = (in_scalars > 0 && args->scalarInput != NULL) ? args->scalarInput[0] : 0;
+ 
+ 	switch (selector) {
+ 	case kAKSOpen:
+@@ -292,8 +333,40 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 	case kAKSNotifyStateSet:
+ 		args->scalarOutputCount = 0;
+ 		break;
++	case kAKSLockDevice:
++	case kAKSLockDeviceForce:
++		if (in_scalars != 1 || out_scalars != 0 || in_struct != 0 || out_struct != 0) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		args->scalarOutputCount = 0;
++		break;
++	case kAKSBagUUID:
++		if (in_scalars != 1 || out_scalars != 0 || in_struct != 0) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		args->scalarOutputCount = 0;
++		ret = sweet_aks_bag_uuid(args);
++		break;
++	case kAKSGeneration:
++		if (in_scalars != 2 || out_scalars != 1 || args->scalarOutput == NULL ||
++		    in_struct != 0 || out_struct != 0) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		args->scalarOutput[0] = 0;
++		args->scalarOutputCount = 1;
++		break;
++	case kAKSEnableCacheFlow:
++		if (in_scalars > 1 || out_scalars != 0 || in_struct != 0 || out_struct != 0) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		args->scalarOutputCount = 0;
++		break;
+ 	case kAKSGetSystem:
+-		if (out_scalars < 1) {
++		if (out_scalars < 1 || args->scalarOutput == NULL) {
+ 			ret = kIOReturnBadArgument;
+ 			break;
+ 		}
+@@ -301,7 +374,7 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		args->scalarOutputCount = 1;
+ 		break;
+ 	case kAKSGetLockState:
+-		if (out_scalars < 1) {
++		if (out_scalars < 1 || args->scalarOutput == NULL) {
+ 			ret = kIOReturnBadArgument;
+ 			break;
+ 		}
+@@ -310,7 +383,7 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		break;
+ 	case kAKSNotifyStateIsSet:
+ 		/* Nothing was ever set: answer "not set". */
+-		if (out_scalars < 1) {
++		if (out_scalars < 1 || args->scalarOutput == NULL) {
+ 			ret = kIOReturnBadArgument;
+ 			break;
+ 		}

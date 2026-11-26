@@ -11,6 +11,7 @@
 | `ksrc:tools/test-fuxi-adreno-mapping.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu)、[S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow) |
 | `ksrc:tools/test-fuxi-adreno.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu)、[G-050](../items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
 | `ksrc:tools/test-fuxi-adt-args.py` |  | [K-067](../items/K-kernel.zh-TW.md#k-067-國家碼相同電源狀態不重做計時adt-fuxiargsbit-34補丁-0121) |
+| `ksrc:tools/test-fuxi-aks.py` | kernel-adsp-battery.yml | [K-084](../items/K-kernel.zh-TW.md#k-084-option-b-核心基礎aks-sel-8233240160slot-7-der-entitlements容器去平台化與網路追蹤過濾0080)、[B-022](../items/B-boot.zh-TW.md#b-022-雙系統日常常駐-boot_a-升級scheme-a-29-補丁主分支wave-2-pure-120hzm4-2-probe_0x4eoption-b-013101330080poster-硬防護與系統-app-矩陣maps-class-1-預設關閉並排除隔離實驗) |
 | `ksrc:tools/test-fuxi-arm64e.py` |  | [S-115](../items/S-upstream.zh-TW.md#s-115-實作實驗性原生-arm64e-核心建置與開機金鑰初始化fuxi_arm64e1)、[S-116](../items/S-upstream.zh-TW.md#s-116-調整-arm64e-核心下-fat-binary-評分以停用-user-jop-避免-fpac-panicfuxiarm64e) |
 | `ksrc:tools/test-fuxi-ath12k-link.py` | kernel-adsp-battery.yml | [K-074](../items/K-kernel.zh-TW.md#k-074-ath12k-接受韌體配置的-peer-id-0)、[K-050](../items/K-kernel.zh-TW.md#k-050-ath12k-模組連結與-ci)、[K-075](../items/K-kernel.zh-TW.md#k-075-ath12k-wmi-掃描優先級與首輪掃描時間) |
 | `ksrc:tools/test-fuxi-audio-prep.py` | kernel-adsp-battery.yml | [K-015](../items/K-kernel.zh-TW.md#k-015-gpr-音訊準備主機模型) |
@@ -30,6 +31,7 @@
 | `ksrc:tools/test-fuxi-camera.py` | kernel-adsp-battery.yml | [K-080](../items/K-kernel.zh-TW.md#k-080-sm8550-titan-gen3-原生相機核心驅動devfuxi-camera前-ov32c後廣角-ov13b10長焦-s5k3k1-三組-i2c-tab-與-16-byte-vfe-wm0-步幅256-kib-dma-guard)、[U-028](../items/U-userland.zh-TW.md#u-028-libfuxi-cameradylib-使用者態原生相機-isp2-stream-前後雙攝與自動化-e2e-交付iq8k-080-iq8b-核心)、[B-020](../items/B-boot.zh-TW.md#b-020-大一統整合日常版震動交響樂斷音修復錄音聽寫原生相機感測器指南針wda-時序與關熱點-wi-fi-穩定性修復) |
 | `ksrc:tools/test-fuxi-charge-evidence.py` | hw000-preparation.yml | [K-010](../items/K-kernel.zh-TW.md#k-010-充電證據工具) |
 | `ksrc:tools/test-fuxi-compile-sched.py` |  | [S-097](../items/S-upstream.zh-TW.md#s-097-實作-fuxi-觸控編譯-cpu-加速推薦核心遮罩與熱壓力橋接fuxiperffuxitpfuxicores) |
+| `ksrc:tools/test-fuxi-der-entitlements.py` | kernel-adsp-battery.yml | [K-084](../items/K-kernel.zh-TW.md#k-084-option-b-核心基礎aks-sel-8233240160slot-7-der-entitlements容器去平台化與網路追蹤過濾0080)、[B-022](../items/B-boot.zh-TW.md#b-022-雙系統日常常駐-boot_a-升級scheme-a-29-補丁主分支wave-2-pure-120hzm4-2-probe_0x4eoption-b-013101330080poster-硬防護與系統-app-矩陣maps-class-1-預設關閉並排除隔離實驗) |
 | `ksrc:tools/test-fuxi-exec-inject.py` | kernel-adsp-battery.yml | [K-020](../items/K-kernel.zh-TW.md#k-020-核心在-exec-時注入函式庫fxinj補丁-0118)、[U-018](../items/U-userland.zh-TW.md#u-018-手動加入-wi-fi-時的密碼框等待)、[K-077](../items/K-kernel.zh-TW.md#k-077-wcn7850-uartsk-與-skywalk-常駐收送) |
 | `ksrc:tools/test-fuxi-gnss.py` | kernel-adsp-battery.yml | [K-082](../items/K-kernel.zh-TW.md#k-082-gpsgnss-定位通道qmi_loc-與-pds-橋接)、[B-021](../items/B-boot.zh-TW.md#b-021-雙系統日常常駐-boot_a-升級25-補丁主分支imx800-四鏡頭-c-af閃光燈gnsswi-fi-加速gpu-class-0-1280-mib120-hz-te手電筒控制中心修復暫緩-maps) |
 | `ksrc:tools/test-fuxi-gpu-clock.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
@@ -37,7 +39,8 @@
 | `ksrc:tools/test-fuxi-gpu-irq.py` | kernel-adsp-battery.yml | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
 | `ksrc:tools/test-fuxi-gpu-k1.py` | kernel-adsp-battery.yml | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
 | `ksrc:tools/test-fuxi-gpu-probe.py` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu) |
-| `ksrc:tools/test-fuxi-gpu-scanout.py` |  | [S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow)、[G-050](../items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
+| `ksrc:tools/test-fuxi-gpu-scanout.py` | kernel-adsp-battery.yml | [G-052](../items/G-gpu.zh-TW.md#g-052-wave-2-120hz-純化整合m4-2-probe_0x4eposter-硬防護冷機-120hz-promotion-定論與-maps-phase-111212b469-隔離實驗實證)、[S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow)、[G-050](../items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
+| `ksrc:tools/test-fuxi-gpu-wave2.py` | kernel-adsp-battery.yml | [G-052](../items/G-gpu.zh-TW.md#g-052-wave-2-120hz-純化整合m4-2-probe_0x4eposter-硬防護冷機-120hz-promotion-定論與-maps-phase-111212b469-隔離實驗實證)、[B-022](../items/B-boot.zh-TW.md#b-022-雙系統日常常駐-boot_a-升級scheme-a-29-補丁主分支wave-2-pure-120hzm4-2-probe_0x4eoption-b-013101330080poster-硬防護與系統-app-矩陣maps-class-1-預設關閉並排除隔離實驗) |
 | `ksrc:tools/test-fuxi-h1.py` |  | [S-103](../items/S-upstream.zh-TW.md#s-103-實作-fuxi-h1-amfi-相容層按鍵仲裁注入自動鎖屏ui-腳本導覽與-pmk8550-rtc-校時) |
 | `ksrc:tools/test-fuxi-haptic-fifo.py` | hw000-preparation.yml | [K-034](../items/K-kernel.zh-TW.md#k-034-震動-fifo-準備主機模型) |
 | `ksrc:tools/test-fuxi-haptic-pulse.py` | hw000-preparation.yml、kernel-adsp-battery.yml | [K-032](../items/K-kernel.zh-TW.md#k-032-hap525-震動盤點與有界脈衝) |
@@ -61,6 +64,7 @@
 | `ksrc:tools/test-fuxi-metal-ca-offline.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-metal-cache-hits.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-metal-cache.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
+| `ksrc:tools/test-fuxi-metal-clientgate.py` | kernel-adsp-battery.yml | [G-052](../items/G-gpu.zh-TW.md#g-052-wave-2-120hz-純化整合m4-2-probe_0x4eposter-硬防護冷機-120hz-promotion-定論與-maps-phase-111212b469-隔離實驗實證)、[B-022](../items/B-boot.zh-TW.md#b-022-雙系統日常常駐-boot_a-升級scheme-a-29-補丁主分支wave-2-pure-120hzm4-2-probe_0x4eoption-b-013101330080poster-硬防護與系統-app-矩陣maps-class-1-預設關閉並排除隔離實驗) |
 | `ksrc:tools/test-fuxi-metal-defaults.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-metal-draw-plans.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-metal-frametrace.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
@@ -101,7 +105,7 @@
 | `ksrc:tools/test-fuxi-metal-pipeline.cpp` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-metal-pipeline.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-metal-shadows.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
-| `ksrc:tools/test-fuxi-metal-stage.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
+| `ksrc:tools/test-fuxi-metal-stage.py` | kernel-adsp-battery.yml | [G-052](../items/G-gpu.zh-TW.md#g-052-wave-2-120hz-純化整合m4-2-probe_0x4eposter-硬防護冷機-120hz-promotion-定論與-maps-phase-111212b469-隔離實驗實證)、[T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試)、[B-022](../items/B-boot.zh-TW.md#b-022-雙系統日常常駐-boot_a-升級scheme-a-29-補丁主分支wave-2-pure-120hzm4-2-probe_0x4eoption-b-013101330080poster-硬防護與系統-app-矩陣maps-class-1-預設關閉並排除隔離實驗) |
 | `ksrc:tools/test-fuxi-metal-translation.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-metal.py` | kernel-adsp-battery.yml | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
 | `ksrc:tools/test-fuxi-metal2.py` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化)、[S-100](../items/S-upstream.zh-TW.md#s-100-實作受閘控執行路徑代換測試路由與-nativeadreno-abi-效能除錯追蹤sweetexecswap) |
@@ -111,6 +115,7 @@
 | `ksrc:tools/test-fuxi-modem.py` | kernel-adsp-battery.yml | [B-019](../items/B-boot.zh-TW.md#b-019-系統去紫u-0264gvolte-行動數據與個人熱點k-079-ap7整合日常版)、[B-020](../items/B-boot.zh-TW.md#b-020-大一統整合日常版震動交響樂斷音修復錄音聽寫原生相機感測器指南針wda-時序與關熱點-wi-fi-穩定性修復) |
 | `ksrc:tools/test-fuxi-nativemetal-bridge.cpp` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-nativemetal.py` | native-metal-host-tests.yml | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁)、[T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試)、[T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `ksrc:tools/test-fuxi-net-trace.py` | kernel-adsp-battery.yml | [K-084](../items/K-kernel.zh-TW.md#k-084-option-b-核心基礎aks-sel-8233240160slot-7-der-entitlements容器去平台化與網路追蹤過濾0080)、[B-022](../items/B-boot.zh-TW.md#b-022-雙系統日常常駐-boot_a-升級scheme-a-29-補丁主分支wave-2-pure-120hzm4-2-probe_0x4eoption-b-013101330080poster-硬防護與系統-app-矩陣maps-class-1-預設關閉並排除隔離實驗) |
 | `ksrc:tools/test-fuxi-pac.py` |  | [S-114](../items/S-upstream.zh-TW.md#s-114-實作全核心-el1-pac-指針驗證硬體自我測試fuxigpuncimport-bit-25) |
 | `ksrc:tools/test-fuxi-patch-stack.py` |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁)、[T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-perf.py` |  | [S-097](../items/S-upstream.zh-TW.md#s-097-實作-fuxi-觸控編譯-cpu-加速推薦核心遮罩與熱壓力橋接fuxiperffuxitpfuxicores) |
@@ -141,6 +146,7 @@
 | `ksrc:tools/test-fuxi-turnip-submit.py` |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁)、[T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-unixnu-port2.py` |  | [S-106](../items/S-upstream.zh-TW.md#s-106-整合-unixnu-顯示ufs-安全策略120-hz-te-同步掃描輸出追蹤與-mtdblk-獨立紀錄fx_log)、[S-110](../items/S-upstream.zh-TW.md#s-110-移植-unixnu-union-lower-directory-查找資格修正fuxiuniondir) |
 | `ksrc:tools/test-fuxi-unixnu.py` |  | [S-106](../items/S-upstream.zh-TW.md#s-106-整合-unixnu-顯示ufs-安全策略120-hz-te-同步掃描輸出追蹤與-mtdblk-獨立紀錄fx_log)、[G-050](../items/G-gpu.zh-TW.md#g-050-在-1080-寬面板顯示完整-1125-寬畫面並對齊觸控) |
+| `ksrc:tools/test-fuxi-user-app-noplatform.py` | kernel-adsp-battery.yml | [K-084](../items/K-kernel.zh-TW.md#k-084-option-b-核心基礎aks-sel-8233240160slot-7-der-entitlements容器去平台化與網路追蹤過濾0080)、[B-022](../items/B-boot.zh-TW.md#b-022-雙系統日常常駐-boot_a-升級scheme-a-29-補丁主分支wave-2-pure-120hzm4-2-probe_0x4eoption-b-013101330080poster-硬防護與系統-app-矩陣maps-class-1-預設關閉並排除隔離實驗) |
 | `ksrc:tools/test-fuxi-vk-smoke.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-vulkan.py` |  | [T-058](../items/T-tools.zh-TW.md#t-058-ksrc-繼承的-gpu建置與其他主機測試) |
 | `ksrc:tools/test-fuxi-wifi-ios.py` | kernel-adsp-battery.yml | [S-104](../items/S-upstream.zh-TW.md#s-104-實作-ios-apple80211ionetworkstack-wi-fi-模擬與原生-wcn7850-站台對接層fuxiwifiios)、[K-053](../items/K-kernel.zh-TW.md#k-053-ios-station-後端電源與掃描) |

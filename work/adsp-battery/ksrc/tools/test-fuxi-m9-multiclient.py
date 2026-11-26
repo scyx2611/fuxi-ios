@@ -241,8 +241,94 @@ int main(void) {
  assert(fg_abi_present_wait == 0 && vm_p1->poisoned == 1 && fuxi_gpu_abi_vm_poisoned(vm_p1) == 1);
  assert(fuxi_gpu_abi_vm_reserve_quota(vm_p1, 1, 16384, 0) == -1);
 
+ /* 8. Track 1 BR-IB2 diagnostic peek in fg_abi_snapshot() */
+ reset();
+ assert(fuxi_gpu_abi_vm_create(FG_CLASS_COMPOSITOR, 100, "backboardd", &vm_bb) == 0);
+ assert(fuxi_gpu_abi_vm_create(FG_CLASS_APP, 201, "Maps", &vm_maps) == 0);
+ assert(fuxi_gpu_abi_vm_map(vm_maps, 0x20000000ULL, IBSRC, 4096, 3, 0, 2) == 0);
+ assert(fuxi_gpu_abi_vm_map(vm_maps, 0x20002000ULL, IBSRC + 4096, 4096, 3, 0, 2) == 0);
+ {
+  uint32_t ib1_words[8] = {
+   fg_abi_pkt7(0x3f, 3), 0x20002000u, 0u, 0x40u,
+   fg_abi_pkt7(0x26, 0), 0u, 0u, 0u
+  };
+  memcpy(ibMemory, ib1_words, sizeof(ib1_words));
+  for (unsigned i = 0; i < 64; i++) {
+   uint32_t w = 0x55aa0000u + i;
+   memcpy(ibMemory + 4096 + i * 4, &w, 4);
+  }
+  uint64_t ib1_ad[1] = {0x20000000ULL}, ib1_sz[1] = {32}, f_ib2 = 0;
+  assert(fuxi_gpu_abi_vm_submit(vm_maps, ib1_ad, ib1_sz, 1, &f_ib2) == 0);
+  stallLines = 0;
+  regs[0x928] = 0x20000000u; regs[0x929] = 0; regs[0x943] = 8; regs[0x92a] = 4;
+  regs[0x92b] = 0x20002000u; regs[0x92c] = 0; regs[0x92d] = 0x20u;
+  regs[0xa6d] = 0; regs[0xa71] = 0; regs[0xa72] = 0;
+  ticks = 40001;
+  assert(fuxi_gpu_abi_vm_poll(vm_maps, f_ib2) == -3);
+  int saw_head = 0, saw_at = 0;
+  for (unsigned i = 0; i < stallLines; i++) {
+   if (strstr(stallLog[i], "BR-IB2-HEAD") && strstr(stallLog[i], "55aa0000 55aa0001")) saw_head = 1;
+   if (strstr(stallLog[i], "BR-IB2-AT") && strstr(stallLog[i], "at 0x2000207c") && strstr(stallLog[i], "55aa001f")) saw_at = 1;
+  }
+  assert(saw_head && saw_at);
+  assert(!vm_bb->poisoned && !fg_abi_poisoned);
+ }
+
+ /* 9. Challenge 2 regression (PROBE 1D/1E): backward 512-dw scan on IB1 > 512 dwords & stale earlier PKT7(0x3f, 3) */
+ {
+  uint32_t big_ib1[1024];
+  memset(big_ib1, 0, sizeof(big_ib1));
+  big_ib1[700] = fg_abi_pkt7(0x3f, 3);
+  big_ib1[701] = 0x20002000u;
+  big_ib1[702] = 0u;
+  big_ib1[703] = 0x40u;
+  memcpy(ibMemory, big_ib1, sizeof(big_ib1));
+  for (unsigned i = 0; i < 1024; i++) {
+   uint32_t w = 0x55aa0000u + i;
+   memcpy(ibMemory + 4096 + i * 4, &w, 4);
+  }
+  fg_active_vm = vm_maps;
+  /* PROBE 1D: target PKT7(0x3f, 3) at dword 700 with reached=924 (> 512) */
+  stallLines = 0;
+  regs[0x928] = 0x20000000u; regs[0x929] = 0; regs[0x943] = 924; regs[0x92a] = 0;
+  regs[0x92b] = 0x20002000u; regs[0x92c] = 0; regs[0x92d] = 0x20u;
+  fg_abi_snapshot("probe-1d");
+  int saw_1d_head = 0, saw_1d_at = 0;
+  for (unsigned i = 0; i < stallLines; i++) {
+   if (strstr(stallLog[i], "BR-IB2-HEAD") && strstr(stallLog[i], "55aa0000 55aa0001")) saw_1d_head = 1;
+   if (strstr(stallLog[i], "BR-IB2-AT") && strstr(stallLog[i], "at 0x2000207c") && strstr(stallLog[i], "55aa001f")) saw_1d_at = 1;
+  }
+  assert(saw_1d_head && saw_1d_at);
+
+  /* PROBE 1E: stale PKT7(0x3f, 3) at dwords 10 and 450 (init=0x10) before real call at dword 700 (init=0x400, rem=0x100) */
+  big_ib1[10] = fg_abi_pkt7(0x3f, 3); big_ib1[11] = 0x20002000u; big_ib1[12] = 0u; big_ib1[13] = 0x10u;
+  big_ib1[450] = fg_abi_pkt7(0x3f, 3); big_ib1[451] = 0x20002000u; big_ib1[452] = 0u; big_ib1[453] = 0x10u;
+  big_ib1[703] = 0x400u;
+  memcpy(ibMemory, big_ib1, sizeof(big_ib1));
+  stallLines = 0;
+  regs[0x92d] = 0x100u;
+  fg_abi_snapshot("probe-1e");
+  int saw_1e_at = 0;
+  for (unsigned i = 0; i < stallLines; i++) {
+   if (strstr(stallLog[i], "BR-IB2-AT") && strstr(stallLog[i], "at 0x20002bfc") && strstr(stallLog[i], "55aa02ff")) saw_1e_at = 1;
+  }
+  assert(saw_1e_at);
+
+  /* Short reached < 4 boundary safely skips BR-IB2-AT without underflow */
+  stallLines = 0;
+  regs[0x943] = 6; regs[0x92a] = 4;
+  fg_abi_snapshot("probe-short");
+  int saw_short_head = 0, saw_short_at = 0;
+  for (unsigned i = 0; i < stallLines; i++) {
+   if (strstr(stallLog[i], "BR-IB2-HEAD")) saw_short_head = 1;
+   if (strstr(stallLog[i], "BR-IB2-AT")) saw_short_at = 1;
+  }
+  assert(saw_short_head && !saw_short_at);
+  fg_active_vm = NULL;
+ }
+
  free_all_vms();
- puts("PASS: M9 backend: multi-VM PT/ASID/fence-slot/inline isolation, Class 1 40ms quantum & yield, guilty-VM soft recovery, Class 0 fail-closed, BUG-2/BUG-4/BUG-5/Minor#2");
+ puts("PASS: M9 backend: multi-VM PT/ASID/fence-slot/inline isolation, Class 1 40ms quantum & yield, guilty-VM soft recovery, Class 0 fail-closed, BUG-2/BUG-4/BUG-5/Minor#2, BR-IB2 peek");
  return 0;
 }
 '''
@@ -264,99 +350,280 @@ def build_xnu_soft_recover_test():
 #include <string.h>
 
 struct fuxi_gpu_vm { uint32_t asid, seq; };
-static unsigned g3_bank = 2, g3_wptr = 0, fg_access_failed = 0, fg_irq_quiesced = 0, fg_irq_rearmed = 0;
+static unsigned g3_bank = 2, g3_wptr = 0, fg_access_failed = 0;
+static unsigned fg_irq_quiesced = 0, fg_irq_soft_quiesced = 0, fg_irq_rearmed = 0;
+static unsigned fg_irq_state = 1, fg_irq_ok = 1, fg_irq_why = 0;
+static unsigned fg_soft_recover_count = 1;
 static uint64_t fg_suspends = 0;
 static struct fuxi_gpu_vm g_bb_vm_obj = {3, 1}, *fg_bb_vm = &g_bb_vm_obj;
 static uint32_t g_bb_in_use = 1, g_bb_poisoned = 0;
 #define GPU_REG_BASE 0x3d00000ULL
 #define GPU_SMMU_BASE 0x15000000ULL
+#define SMMU_GFSR 0x48u
+#define G3_FSR_MASK 0xc00001feu
 #define G3_SQE_CNTL 0x808u
-#define G4_RB_CMP_DBG 0x8e00u
+#define G4_RB_CMP_DBG 0x8e28u
 #define G4_RB_NC 0x8e08u
 #define G4_TPL1_NC 0xb604u
 #define G4_SP_NC 0xae02u
 #define G3_APERTURE_HOST 0xa00u
 #define G4_GRAS_NC 0x8602u
+#define G3_RING_PA 0x1320000u
 #define G3_PTR_PA 0x1000u
 #define G3_FENCE_PA 0x2000u
 #define G3_FENCE_VA 0x10029000u
 
-static uint32_t g_fsr = 0x40000002u; /* FSR.SS=1 + translation fault */
-static unsigned g_cb_resumed_before_drain = 0, g_drain_polls_while_stalled = 0, g_drain_step = 0;
+/* Hardware register/SMMU/ring state machine modeling stick15 A740 failure modes. */
+static uint32_t g_fsr = 0, g_gfsr = 0;
+static uint64_t g_far = 0;
+static uint32_t g_fsynr1 = 0;
+static unsigned g_uche_pending = 0;
+static unsigned g_rbbm_halt = 0, g_gbif_halt = 0;
+static unsigned g_sw_reset_asserted = 0, g_hw_inited = 0, g_ptrs_valid = 0, g_sqe_loaded = 0, g_sqe_enabled = 0, g_me_init_done = 0;
+static unsigned g_ttbr_is_g3pt = 0;
+static unsigned g_cb_resumed_before_drain = 0, g_drain_polls_while_stalled = 0;
+static unsigned g_reset_saw_gbif_halt = 0, g_reset_saw_rbbm_halt = 0, g_reset_before_g3pt = 0;
 static unsigned g_switched_to_null = 0, g_switched_to_bb = 0, g_tlb_asid = 0;
+static unsigned g_inject_selftest_fault_race = 0;
 static uint32_t g_regs[0x10000];
+static uint32_t g_ring[8192];
 static uint32_t g_fence_word = 0, g_sentinel = 0;
 
 static unsigned g_cb(unsigned b) { return 0x10000u + b * 0x1000u; }
-static void fg_irq_quiesce_soft(void) { fg_irq_quiesced++; }
-static int fg_irq_rearm_soft(void) { fg_irq_rearmed++; return 1; }
+static void fg_irq_dead(unsigned why) { if (!fg_irq_why) fg_irq_why = why; fg_irq_state = 3; }
+static void fg_irq_quiesce(void) {
+ fg_irq_quiesced++;
+ if (!fg_irq_ok) {
+  if (fg_irq_state == 1) fg_irq_dead(3);
+  return;
+ }
+ fg_irq_ok = 0;
+ fg_irq_dead(3);
+}
+static void fg_irq_quiesce_soft(void) {
+ fg_irq_soft_quiesced++;
+ if (!fg_irq_ok) return;
+ fg_irq_ok = 0;
+}
+static int fg_irq_rearm_soft(void) {
+ if (fg_irq_state != 1) return 1;
+ fg_irq_rearmed++;
+ fg_irq_ok = 1;
+ return 1;
+}
 static void delay(unsigned us) { (void)us; }
-static void g_zero(uint64_t pa, unsigned bytes) { (void)pa; (void)bytes; }
-static void g_wr(uint64_t pa, unsigned off, uint32_t v) { (void)pa; (void)off; g_fence_word = v; }
 static uint32_t g3_read(uint64_t pa) { (void)pa; return g_fence_word; }
-static uint32_t g3_pkt7(unsigned op, unsigned n) { return (op << 16) | n; }
+static void g_wr(uint64_t pa, unsigned off, uint32_t v) { (void)pa; (void)off; g_fence_word = v; }
+static unsigned g3_parity(unsigned x) { x ^= x >> 16; x ^= x >> 8; x ^= x >> 4; return (0x9669u >> (x & 15)) & 1; }
+static uint32_t g3_pkt7(unsigned op, unsigned n) { return 0x70000000u | n | g3_parity(n)<<15 | op<<16 | g3_parity(op)<<23; }
+
+static void hw_check_uche_fault(void) {
+ /* If UCHE/SP still has inflight Maps reads (not yet reset) and CB2 was switched to G3_PT
+  * while GBIF_HALT is not active, residual reads hit unmapped 0x2563d8c0 on ASID 2! */
+ if (g_uche_pending && g_ttbr_is_g3pt && g_gbif_halt == 0) {
+  g_fsr |= 0x402u;
+  g_far = 0x2563d8c0ULL;
+  g_fsynr1 = 1u; /* UCHE */
+ }
+}
+
+static void g_zero(uint64_t pa, unsigned bytes) {
+ if (pa == G3_RING_PA) memset(g_ring, 0, bytes < sizeof(g_ring) ? bytes : sizeof(g_ring));
+}
 static void g3_emit(uint32_t w) {
+ g_ring[g3_wptr & 8191] = w;
  g3_wptr = (g3_wptr + 1) & 8191;
- if (w == 0x5a730001u || (w & 0xffff0000u) == 0x5a730000u) g_sentinel = w;
+ if ((w & 0xffff0000u) == 0x5a730000u) g_sentinel = w;
 }
 static int fg_access(uint64_t addr, uint64_t *val, int write, int smmu) {
  (void)smmu;
  unsigned off = (unsigned)(addr - GPU_REG_BASE);
- if (off == 0x3c45u * 4u && write) { g_drain_step = (unsigned)*val; return 0; }
+ if (off == 0x16u * 4u && write) { g_rbbm_halt = (unsigned)*val; return 0; }
+ if (off == 0x17u * 4u && !write) { *val = (g_rbbm_halt & 1u) ? 1ULL : 0ULL; return 0; }
+ if (off == 0x3c45u * 4u && write) {
+  g_gbif_halt = (unsigned)*val;
+  hw_check_uche_fault();
+  return 0;
+ }
  if (off == 0x3c46u * 4u && !write) {
   if (g_fsr & (1u << 30)) {
    g_drain_polls_while_stalled++;
    *val = 0; /* Hardware AXI stall keeps GBIF acks blocked until CB_RESUME! */
    return 0;
   }
-  *val = (g_drain_step >= 2) ? 3ULL : (g_drain_step == 1 ? 1ULL : 0ULL);
+  *val = (g_gbif_halt >= 2) ? 3ULL : (g_gbif_halt == 1 ? 1ULL : 0ULL);
+  return 0;
+ }
+ if (off == 0x43u * 4u && write) {
+  if (*val == 1) {
+   g_sw_reset_asserted = 1;
+   g_reset_saw_gbif_halt = (g_gbif_halt != 0);
+   g_reset_saw_rbbm_halt = (g_rbbm_halt != 0);
+   g_reset_before_g3pt = !g_ttbr_is_g3pt;
+  } else if (*val == 0 && g_sw_reset_asserted) {
+   g_sw_reset_asserted = 0;
+   g_uche_pending = 0; /* Core reset drains/drops residual UCHE/SP fetches */
+   g_regs[0x806] = 0; g_regs[0x807] = 0; g_regs[0x823] = 0; g_regs[0x210] = 0;
+   g_regs[G3_SQE_CNTL] = 0;
+   g_hw_inited = 0; g_ptrs_valid = 0; g_sqe_enabled = 0; g_me_init_done = 0;
+  }
   return 0;
  }
  return 0;
 }
 static uint32_t g3_sr(unsigned off) {
  if (off == g_cb(g3_bank) + 0x58) return g_fsr;
+ if (off == SMMU_GFSR) return g_gfsr;
  return 0;
 }
 static int g3_sw(unsigned off, uint32_t v) {
  if (off == g_cb(g3_bank) + 0x08 && v == 1) {
-  if (g_drain_step == 0) g_cb_resumed_before_drain = 1;
+  if (g_gbif_halt == 0) g_cb_resumed_before_drain = 1;
   g_fsr &= ~(1u << 30);
   return 1;
  }
- if (off == g_cb(g3_bank) + 0x58) { g_fsr &= ~v; return 1; }
+ if (off == g_cb(g3_bank) + 0x58) { g_fsr &= ~(v & ~0x400u); return 1; }
+ if (off == SMMU_GFSR) { g_gfsr &= ~v; return 1; }
  return 1;
 }
 static uint32_t g3_gr(unsigned r) {
- if (r == 0x806) return g3_wptr;
- if (r == 0x210) return 0;
+ if (r == 0x3c46) return (g_fsr & (1u << 30)) ? 0u : (g_gbif_halt >= 2 ? 3u : (g_gbif_halt == 1 ? 1u : 0u));
+ if (r == 0x17) return (g_rbbm_halt & 1u) ? 1u : 0u;
  return g_regs[r];
 }
 static int g3_gw(unsigned r, uint32_t v) {
  g_regs[r] = v;
- if (r == 0x807 && g_sentinel) g_fence_word = g_sentinel;
+ if (r == 0x37) { g_regs[0x201] &= ~v; return 1; }
+ if (r == G3_SQE_CNTL && v == 1) {
+  /* Hardware model: enabling SQE without hw_init/SQE firmware or without CP_THREAD_CONTROL + CP_ME_INIT
+   * pre-loaded in ring raises CP_INTERRUPT_STATUS [0x823] = 0x80 (BR_ILLEGAL_INSTR). */
+  int me_preloaded = g_hw_inited && g_ptrs_valid && g_sqe_loaded &&
+      g3_wptr >= 7 &&
+      g_ring[0] == g3_pkt7(0x17, 1) && g_ring[1] == (1u << 27) &&
+      g_ring[2] == g3_pkt7(0x48, 4);
+  if (!me_preloaded) {
+   g_regs[0x823] |= 0x80u;
+  } else {
+   g_sqe_enabled = 1;
+  }
+  return 1;
+ }
+ if (r == 0x807) {
+  if (v == 7 && g_sqe_enabled && g_ring[0] == g3_pkt7(0x17, 1) && g_ring[2] == g3_pkt7(0x48, 4)) {
+   g_me_init_done = 1;
+   g_regs[0x806] = v;
+  } else if (v > 7 && g_me_init_done && g_sentinel) {
+   g_fence_word = g_sentinel;
+   g_regs[0x806] = v;
+   if (g_inject_selftest_fault_race) {
+    g_regs[0x823] |= 0x80u;
+    g_fsr |= 0x40000002u;
+   }
+  }
+ }
  return 1;
 }
 static int fg_abi_tlb_asid(unsigned asid) { g_tlb_asid = asid; return 0; }
 static int fg_abi_switch_vm(struct fuxi_gpu_vm *vm) {
+ g_ttbr_is_g3pt = (vm == NULL) ? 1 : 0;
  if (!vm) g_switched_to_null = 1; else g_switched_to_bb = 1;
+ hw_check_uche_fault();
  return 1;
 }
-static int g3_hw_init(void) { return 1; }
-static int g3_faulted(void) { return 0; }
-static int g3_wait(unsigned ms) { (void)ms; return 0; }
+static int g3_sqe(void) { g_sqe_loaded = 1; return 0; }
+static int g3_hw_init(void) {
+ g_gbif_halt = 0; g_rbbm_halt = 0;
+ hw_check_uche_fault();
+ g_hw_inited = 1; g_ptrs_valid = 1;
+ g_regs[0x38] = 0;
+ return 1;
+}
+static int g3_verify_pointers(void) { return (g_hw_inited && g_ptrs_valid) ? 0 : 0xc0b; }
+static int g3_faulted(void) {
+ return fg_access_failed || (g_regs[0x823] & 0x3fff7u) || (g_regs[0x201] & 0x33c002c2u) || (g_fsr & G3_FSR_MASK) || g_gfsr;
+}
+static int g3_wait(unsigned fence) {
+ (void)fence;
+ if (g3_faulted()) return 0xc06;
+ if (!g_me_init_done || g_regs[0x806] != g3_wptr || g_regs[0x807] != g3_wptr) return 0xc07;
+ return 0;
+}
+
+static void reset_hw_model(uint32_t init_fsr, unsigned uche_pending) {
+ g_fsr = init_fsr; g_gfsr = 0; g_far = 0; g_fsynr1 = 0;
+ g_uche_pending = uche_pending;
+ g_rbbm_halt = 0; g_gbif_halt = 0;
+ g_sw_reset_asserted = 0; g_hw_inited = 0; g_ptrs_valid = 0; g_sqe_loaded = 0; g_sqe_enabled = 0; g_me_init_done = 0;
+ g_ttbr_is_g3pt = 0;
+ g_cb_resumed_before_drain = 0; g_drain_polls_while_stalled = 0;
+ g_reset_saw_gbif_halt = 0; g_reset_saw_rbbm_halt = 0; g_reset_before_g3pt = 0;
+ g_switched_to_null = 0; g_switched_to_bb = 0; g_tlb_asid = 0;
+ memset(g_regs, 0, sizeof(g_regs));
+ memset(g_ring, 0, sizeof(g_ring));
+ g3_wptr = 0; g_fence_word = 0; g_sentinel = 0;
+ g_inject_selftest_fault_race = 0;
+ fg_access_failed = 0; fg_irq_quiesced = 0; fg_irq_soft_quiesced = 0; fg_irq_rearmed = 0;
+ fg_irq_state = 1; fg_irq_ok = 1; fg_irq_why = 0;
+}
 
 struct fg_bb_shim { int in_use, poisoned; };
 ''' + real_recover.replace('fg_bb_vm->in_use && !fg_bb_vm->poisoned', 'g_bb_in_use && !g_bb_poisoned') + r'''
 int main(void) {
- struct fuxi_gpu_vm guilty = {7, 42};
- int ok = fg_soft_recover_hw(&guilty);
- assert(ok == 1);
+ struct fuxi_gpu_vm guilty = {4, 11};
+
+ /* Negative Test A: Catch stick15 bug #1 — releasing GBIF_HALT + switching to G3_PT BEFORE RBBM_SW_RESET causes UCHE FSR=0x402 */
+ reset_hw_model(0x400u, 1u);
+ {
+  uint64_t v = 1;
+  assert(!fg_access(GPU_REG_BASE + 0x3c45*4, &v, 1, 0));
+  v = 0;
+  assert(!fg_access(GPU_REG_BASE + 0x3c45*4, &v, 1, 0)); /* prematurely cleared GBIF_HALT */
+  assert(fg_abi_switch_vm(NULL) == 1);                     /* switched to G3_PT before 0x43 reset */
+  assert(g_fsr == 0x402u && g_far == 0x2563d8c0ULL && g_fsynr1 == 1u);
+  assert(g3_faulted() != 0);
+ }
+
+ /* Negative Test B: Catch stick15 bug #2 — enabling G3_SQE_CNTL=1 before writing CP_ME_INIT triggers 0x823=0x80 */
+ reset_hw_model(0x400u, 0u);
+ g_hw_inited = 1; g_ptrs_valid = 1; g_sqe_loaded = 1; g3_wptr = 0;
+ assert(g3_gw(0x807, 0) && g3_gw(G3_SQE_CNTL, 1));
+ assert((g_regs[0x823] & 0x80u) == 0x80u);
+ assert(g3_faulted() != 0);
+
+ /* Positive Test 1: FSR.SS stalled SMMU + active UCHE pending -> real fg_soft_recover_hw unblocks CB_RESUME before drain & passes */
+ reset_hw_model(0x40000002u, 1u);
+ int ok1 = fg_soft_recover_hw(&guilty);
+ assert(ok1 == 1);
  assert(g_cb_resumed_before_drain == 1);
  assert(g_drain_polls_while_stalled == 0);
- assert(g_fsr == 0 && g_tlb_asid == 7 && g_switched_to_null == 1 && g_switched_to_bb == 1);
- assert(fg_irq_quiesced == 1 && fg_irq_rearmed == 1);
- puts("PASS: BUG-3 real XNU fg_soft_recover_hw unblocks FSR.SS CB_RESUME before GBIF drain");
+ assert(g_reset_saw_gbif_halt == 1 && g_reset_saw_rbbm_halt == 1 && g_reset_before_g3pt == 1);
+ assert(g_uche_pending == 0 && g_me_init_done == 1);
+ assert((g_fsr & G3_FSR_MASK) == 0 && g_regs[0x823] == 0 && g_regs[0x201] == 0);
+ assert(g_tlb_asid == 4 && g_switched_to_null == 1 && g_switched_to_bb == 1);
+ assert(fg_irq_soft_quiesced == 1 && fg_irq_rearmed == 1 && fg_irq_state == 1 && fg_irq_ok == 1);
+
+ /* Positive Test 2: Stick-15 Maps seq 11 hang (FSR=0x400 reserved bit10, RBBM_STATUS=0x00ef95f7, stale ring) -> clean Class 1 recovery */
+ reset_hw_model(0x400u, 1u);
+ g_regs[0x210] = 0x00ef95f7u;
+ g_ring[0] = 0xdead0001u;
+ int ok2 = fg_soft_recover_hw(&guilty);
+ assert(ok2 == 1);
+ assert(g_reset_saw_gbif_halt == 1 && g_reset_saw_rbbm_halt == 1 && g_reset_before_g3pt == 1);
+ assert(g_uche_pending == 0 && g_me_init_done == 1);
+ assert((g_fsr & G3_FSR_MASK) == 0 && g_regs[0x823] == 0 && g_regs[0x201] == 0);
+ assert(g_switched_to_null == 1 && g_switched_to_bb == 1);
+ assert(fg_irq_state == 1 && fg_irq_ok == 1);
+
+ /* Negative Test C (PROBE 2F-4 + Challenge 3): CP_MEM_WRITE sentinel race with 0x823=0x80 + FSR.SS must FAIL and mark fg_irq_state=3 */
+ reset_hw_model(0x400u, 1u);
+ g_inject_selftest_fault_race = 1;
+ int ok3 = fg_soft_recover_hw(&guilty);
+ assert(ok3 == 0);
+ assert(g3_faulted() != 0);
+ assert(fg_irq_soft_quiesced == 1 && fg_irq_quiesced >= 1 && fg_irq_rearmed == 0);
+ assert(fg_irq_state == 3 && fg_irq_why == 3 && fg_irq_ok == 0);
+
+ puts("PASS: real XNU fg_soft_recover_hw state machine catches UCHE FSR=0x402, SQE 0x823=0x80, PROBE 2F-4 selftest fault race & IRQ state=3, passes FSR.SS & Maps seq 11 hang recovery");
  return 0;
 }
 '''

@@ -164,6 +164,10 @@ int main(void)
  wakes = 0; fg_irq_quiesce(); assert(!fg_irq_ok && fg_irq_state == 3 && fg_irq_why == 3 && wakes == 1 && (gd(0x180 + w) & bit));
  rbbm[0x201] = 1u<<20; rbbm[0x37] = 0; installed(0, 0, 0, 332); assert(rbbm[0x37] == 0 && rbbm[0x201] == (1u<<20));
  wakes = 0; fg_irq_quiesce(); assert(!wakes); /* idempotent */
+ reset(); assert(fuxi_gpu_irq_setup()); gdw(0x180 + w, 0);
+ wakes = 0; fg_irq_quiesce_soft(); assert(!fg_irq_ok && fg_irq_state == 1 && !fg_irq_why && wakes == 1 && (gd(0x180 + w) & bit));
+ wakes = 0; fg_irq_quiesce(); assert(!fg_irq_ok && fg_irq_state == 3 && fg_irq_why == 3 && wakes == 1);
+ wakes = 0; fg_irq_quiesce(); assert(!wakes && fg_irq_state == 3);
  reset(); fg_irq_quiesce(); assert(fg_irq_state == 0); /* never armed: nothing to do */
  puts("PASS: actual fuxi_gpu_irq.inc: opt-in, refusals, GICD attach/readback/routing, per-CPU install order, bit-20-only clear, empty/burst/foreign/no-delivery/isolation masks, sleep race/timeout/written/wrap, mask repair");
  return 0;
@@ -178,8 +182,11 @@ typedef int IOReturn;
 enum { kIOReturnSuccess = 0, kIOReturnTimeout = 1, kIOReturnIOError = 2 };
 enum { FG_ABI_STAT_SLEEP = 19 };
 static uint64_t now;
+static uint32_t irqSliceUs = 1000;
+static unsigned lastSleepUs;
 static uint64_t mach_absolute_time() { return now; }
 static void nanoseconds_to_absolutetime(uint64_t ns, uint64_t *t) { *t = ns; }
+static void absolutetime_to_nanoseconds(uint64_t t, uint64_t *n) { *n = t; }
 static int polls[64], npoll, pollAt, irqArmed, sleepRet[64], nsleep, sleepAt, pauses, stats, setups;
 static uint32_t seqNow, sleepSeq[64];
 struct fuxi_gpu_vm;
@@ -187,7 +194,7 @@ static int fuxi_gpu_abi_poll(uint64_t) { now += 1000; return pollAt < npoll ? po
 static int fuxi_gpu_abi_vm_poll(struct fuxi_gpu_vm *, uint64_t f) { return fuxi_gpu_abi_poll(f); }
 static int fuxi_gpu_irq_setup() { setups++; return irqArmed; }
 static uint32_t fuxi_gpu_irq_seq() { return seqNow; }
-static int fuxi_gpu_irq_sleep(uint32_t seq, uint64_t fence, unsigned us) { assert(fence == 9 && us == 1000); sleepSeq[sleepAt] = seq; now += 50000; return sleepRet[sleepAt++]; }
+static int fuxi_gpu_irq_sleep(uint32_t seq, uint64_t fence, unsigned us) { assert(fence == 9 && us >= 1 && us <= irqSliceUs); lastSleepUs = us; sleepSeq[sleepAt] = seq; now += 50000; return sleepRet[sleepAt++]; }
 static int fuxi_gpu_irq_sleep_vm(struct fuxi_gpu_vm *, uint32_t seq, uint64_t fence, unsigned us) { return fuxi_gpu_irq_sleep(seq, fence, us); }
 static void abiPause() { pauses++; now += 100000; }
 static void abiStat(unsigned slot, uint64_t) { assert(slot == FG_ABI_STAT_SLEEP); stats++; }
@@ -215,8 +222,18 @@ int main() {
  reset(1); for (int i = 0; i < 64; i++) { polls[i] = 1; sleepRet[i] = 0; } npoll = 64; assert(c.spin(9, 200000, &retired, &first) == kIOReturnTimeout && sleepAt < 8);
  c.vm_ = (struct fuxi_gpu_vm *)0x1;
  reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
- assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnSuccess && setups == 1 && sleepAt == 1);
- puts("PASS: actual WaitFence spin: interrupt sleep while unwritten, poll when written/unarmed/off, one setup, retire stamp, errors and deadline");
+ assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnSuccess && setups == 1 && sleepAt == 1 && lastSleepUs == 1000);
+ /* Wave 2 irqSliceUs=8000: uses 8000 us on long waits, clamps to remaining deadline on short waits (<=2000 us). */
+ irqSliceUs = 8000;
+ reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
+ assert(c.spin(9, 1000000000, &retired, &first) == kIOReturnSuccess && lastSleepUs == 8000);
+ reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
+ assert(c.spin(9, 2000000, &retired, &first) == kIOReturnSuccess && lastSleepUs >= 1 && lastSleepUs <= 2000);
+ irqSliceUs = 16000;
+ reset(1); polls[0] = polls[1] = 1; npoll = 2; sleepRet[0] = 0;
+ assert(c.spin(9, 500000, &retired, &first) == kIOReturnSuccess && lastSleepUs >= 1 && lastSleepUs <= 500);
+ irqSliceUs = 1000;
+ puts("PASS: actual WaitFence spin: interrupt sleep while unwritten, poll when written/unarmed/off, one setup, retire stamp, errors, deadline and irqSliceUs clamping");
 }
 '''
 

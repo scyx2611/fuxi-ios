@@ -124,7 +124,7 @@ int main() {
 
 def main():
     src = (ROOT/'xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp').read_text()
-    stats = src[src.index('static IOLock *statLock;'):src.index('static bool connected;')]
+    stats = src[src.index('static IOLock *statLock;'):src.index('/* Multi-client M9:')]
     step = src[src.index('static const char *abiStep('):src.index('class FuxiAdrenoUserClient :')]
     log = src[src.index('extern "C" void fuxi_gpu_abi_stats_log(void)'):src.index('extern "C" void fuxi_gpu_abi_publish(void)')]
     with tempfile.TemporaryDirectory() as tmp:

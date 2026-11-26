@@ -1,15 +1,56 @@
+diff --git a/bsd/net/rtsock.c b/bsd/net/rtsock.c
 --- a/bsd/net/rtsock.c
 +++ b/bsd/net/rtsock.c
-@@ -510,6 +510,25 @@
+@@ -89,6 +89,37 @@
+ #include <netinet6/nd6.h>
+ 
+ #include <IOKit/IOBSD.h>
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++static uint32_t
++fuxi_net_trace_filter_rt(void)
++{
++	static int cached = -1;
++	int cur = __atomic_load_n(&cached, __ATOMIC_ACQUIRE);
++	if (cur >= 0) {
++		return (uint32_t)cur;
++	}
++	uint32_t val = 0u;
++	if (!PE_parse_boot_argn("sweetnettrace", &val, sizeof(val))) {
++		DTEntry chosen = NULL;
++		const void *prop = NULL;
++		unsigned int bytes = 0;
++		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++		    SecureDTGetProperty(chosen, "fuxi,net-trace-filter", &prop, &bytes) == kSuccess &&
++		    prop != NULL && bytes == sizeof(uint32_t)) {
++			memcpy(&val, prop, sizeof(val));
++		}
++	}
++	if (val > 2u) {
++		val = 0u;
++	}
++	__atomic_store_n(&cached, (int)val, __ATOMIC_RELEASE);
++	return val;
++}
++#endif
+ 
+ extern struct rtstat rtstat;
+ extern struct domain routedomain_s;
+@@ -510,6 +541,27 @@
  		SIN6(info.rti_info[RTAX_DST])->sin6_addr.s6_addr16[1] = 0;
  	}
  
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +	/* SWEET: which process changes IPv4 routes (network bring-up). */
-+	if ((rtm->rtm_type == RTM_ADD || rtm->rtm_type == RTM_DELETE || rtm->rtm_type == RTM_CHANGE) &&
++	if (fuxi_net_trace_filter_rt() != 2u &&
++	    (rtm->rtm_type == RTM_ADD || rtm->rtm_type == RTM_DELETE || rtm->rtm_type == RTM_CHANGE) &&
 +	    info.rti_info[RTAX_DST] != NULL && info.rti_info[RTAX_DST]->sa_family == AF_INET) {
 +		static int sweet_rt_logged;
-+		if (sweet_rt_logged++ < 200) {
++		if (__atomic_load_n(&sweet_rt_logged, __ATOMIC_RELAXED) < 200 &&
++		    __atomic_fetch_add(&sweet_rt_logged, 1, __ATOMIC_RELAXED) < 200) {
 +			const uint8_t *d = (const uint8_t *)&SIN(info.rti_info[RTAX_DST])->sin_addr;
 +			const uint8_t *g = (info.rti_info[RTAX_GATEWAY] != NULL &&
 +			    info.rti_info[RTAX_GATEWAY]->sa_family == AF_INET) ?
@@ -26,26 +67,97 @@
  	switch (rtm->rtm_type) {
  	case RTM_ADD:
  		if (info.rti_info[RTAX_GATEWAY] == NULL) {
+diff --git a/bsd/netinet/in.c b/bsd/netinet/in.c
 --- a/bsd/netinet/in.c
 +++ b/bsd/netinet/in.c
-@@ -1210,6 +1210,20 @@
+@@ -77,6 +77,9 @@
+ 
+ #include <kern/zalloc.h>
+ #include <pexpert/pexpert.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <pexpert/device_tree.h>
++#endif
+ #include <os/log.h>
+ 
+ #include <net/if.h>
+@@ -1193,6 +1196,50 @@
+  * If called directly from within the networking stack (as opposed to via
+  * pru_control), the socket parameter may be NULL.
+  */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++static int sweet_in_logged;
++
++static uint32_t
++fuxi_net_trace_filter_in(void)
++{
++	static int cached = -1;
++	int cur = __atomic_load_n(&cached, __ATOMIC_ACQUIRE);
++	if (cur >= 0) {
++		return (uint32_t)cur;
++	}
++	uint32_t val = 0u;
++	if (!PE_parse_boot_argn("sweetnettrace", &val, sizeof(val))) {
++		DTEntry chosen = NULL;
++		const void *prop = NULL;
++		unsigned int bytes = 0;
++		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++		    SecureDTGetProperty(chosen, "fuxi,net-trace-filter", &prop, &bytes) == kSuccess &&
++		    prop != NULL && bytes == sizeof(uint32_t)) {
++			memcpy(&val, prop, sizeof(val));
++		}
++	}
++	if (val > 2u) {
++		val = 0u;
++	}
++	__atomic_store_n(&cached, (int)val, __ATOMIC_RELEASE);
++	return val;
++}
++
++static void
++fuxi_net_trace_log_in(u_long cmd, caddr_t data, struct ifnet *ifp, struct proc *p)
++{
++	if (__atomic_load_n(&sweet_in_logged, __ATOMIC_RELAXED) < 100 &&
++	    __atomic_fetch_add(&sweet_in_logged, 1, __ATOMIC_RELAXED) < 100) {
++		const uint8_t *a = (cmd == SIOCAIFADDR)
++		    ? (const uint8_t *)&((struct in_aliasreq *)(void *)data)->ifra_addr.sin_addr
++		    : (const uint8_t *)&((const struct sockaddr_in *)(const void *)&((struct ifreq *)(void *)data)->ifr_addr)->sin_addr;
++		char pname[20];
++		proc_name(proc_pid(p), pname, sizeof(pname));
++		printf("SWEET NET: %s %s %s %u.%u.%u.%u\n", pname, if_name(ifp),
++		    cmd == SIOCAIFADDR ? "add address" : "delete address", a[0], a[1], a[2], a[3]);
++	}
++}
++#endif
+ int
+ in_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp,
+     struct proc *p)
+@@ -1210,6 +1257,14 @@
  	/* In case it's NULL, make sure it came from the kernel */
  	VERIFY(so != NULL || p == kernproc);
  
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
-+	/* SWEET: which process sets IPv4 addresses on which interface. */
-+	if ((cmd == SIOCAIFADDR || cmd == SIOCDIFADDR) && ifp != NULL) {
-+		static int sweet_in_logged;
-+		if (sweet_in_logged++ < 100) {
-+			const uint8_t *a = (const uint8_t *)&((struct in_aliasreq *)(void *)data)->ifra_addr.sin_addr;
-+			char pname[20];
-+			proc_name(proc_pid(p), pname, sizeof(pname));
-+			printf("SWEET NET: %s %s %s %u.%u.%u.%u\n", pname, if_name(ifp),
-+			    cmd == SIOCAIFADDR ? "add address" : "delete address", a[0], a[1], a[2], a[3]);
-+		}
++	/* SWEET: mode=0 logs on entry before EADDRNOTAVAIL checks (legacy behavior). */
++	if (fuxi_net_trace_filter_in() == 0u &&
++	    (cmd == SIOCAIFADDR || cmd == SIOCDIFADDR) && ifp != NULL) {
++		fuxi_net_trace_log_in(cmd, data, ifp, p);
 +	}
 +#endif
 +
  	/*
  	 * ioctls which don't require ifp, but require socket.
  	 */
+@@ -1586,6 +1641,14 @@
+ 	if (so_unlocked) {
+ 		socket_lock(so, 0);
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* SWEET: mode=1 logs at done: only when error != EADDRNOTAVAIL. */
++	if (fuxi_net_trace_filter_in() == 1u &&
++	    (cmd == SIOCAIFADDR || cmd == SIOCDIFADDR) &&
++	    ifp != NULL && error != EADDRNOTAVAIL) {
++		fuxi_net_trace_log_in(cmd, data, ifp, p);
++	}
++#endif
+ 
+ 	return error;
+ }

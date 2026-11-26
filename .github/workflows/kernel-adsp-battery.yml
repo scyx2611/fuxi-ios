@@ -45,6 +45,10 @@ on:
       - patches/kernel-gps-gnss.patch
       - patches/kernel-wifi-join-speed.patch
       - patches/kernel-metal-multiclient.patch
+      - patches/kernel-gpu120-wave2.patch
+      - patches/kernel-m42-probe0x4e.patch
+      - patches/kernel-aks-der-noplatform.patch
+      - patches/kernel-net-trace-filter.patch
       - tests/test-backlight-dsi.py
       - tests/test-perf-governor.py
       - tests/test-ib-profile.py
@@ -135,6 +139,14 @@ jobs:
           git -C source apply ../harness/patches/kernel-wifi-join-speed.patch
           git -C source apply --check ../harness/patches/kernel-metal-multiclient.patch
           git -C source apply ../harness/patches/kernel-metal-multiclient.patch
+          git -C source apply --check ../harness/patches/kernel-gpu120-wave2.patch
+          git -C source apply ../harness/patches/kernel-gpu120-wave2.patch
+          git -C source apply --check ../harness/patches/kernel-m42-probe0x4e.patch
+          git -C source apply ../harness/patches/kernel-m42-probe0x4e.patch
+          git -C source apply --check ../harness/patches/kernel-aks-der-noplatform.patch
+          git -C source apply ../harness/patches/kernel-aks-der-noplatform.patch
+          git -C source apply --check ../harness/patches/kernel-net-trace-filter.patch
+          git -C source apply ../harness/patches/kernel-net-trace-filter.patch
           (cd source && python3 tools/sync-fuxi-modem.py --check && python3 tools/test-fuxi-modem.py --sanitize)
           (cd source && python3 tools/test-fuxi-gnss.py --sanitize)
           (cd source && python3 tools/sync-fuxi-camera.py --check && python3 tools/test-fuxi-camera.py --sanitize)
@@ -183,7 +195,14 @@ jobs:
           (cd source && python3 tools/test-fuxi-wlan-ios.py)
           (cd source && python3 tools/test-fuxi-wifi-ios.py)
           (cd source && python3 tools/sync-abi-backend.py --check && python3 tools/sync-fuxi-metal.py --check && python3 tools/sync-fuxi-metal2.py --check && python3 tools/sync-fuxi-adreno-shared.py --check)
-          (cd source && python3 tools/test-fuxi-gpu-irq.py && python3 tools/test-fuxi-hostimport.py && python3 tools/test-fuxi-gpu-k1.py && python3 tools/test-fuxi-metal.py && python3 tools/test-fuxi-m9-multiclient.py)
+          (cd source && python3 tools/test-fuxi-gpu-irq.py && python3 tools/test-fuxi-hostimport.py && python3 tools/test-fuxi-gpu-k1.py && python3 tools/test-fuxi-metal.py && python3 tools/test-fuxi-m9-multiclient.py && python3 tools/test-fuxi-gpu-wave2.py --sanitize && python3 tools/test-fuxi-gpu-scanout.py)
+          (cd source && python3 -B tools/test-fuxi-metal-stage.py --policy-storage-only)
+          (cd source && python3 -B tools/test-fuxi-metal-clientgate.py)
+          (cd source && python3 -B tools/test-fuxi-aks.py --sanitize)
+          (cd source && python3 -B tools/test-fuxi-der-entitlements.py --sanitize)
+          (cd source && python3 -B tools/test-fuxi-user-app-noplatform.py --sanitize)
+          (cd source && python3 -B tools/test-fuxi-net-trace.py --sanitize)
+          (cd source && python3 -B tools/test-fuxi-net-trace.py --tsan)
       - name: Download the pinned public ath12k link input
         if: ${{ inputs.ath12k }}
         uses: actions/download-artifact@v4

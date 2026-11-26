@@ -301,8 +301,21 @@ static uint64_t mach_absolute_time(void) {return ticks++;}
 static void absolutetime_to_nanoseconds(uint64_t n,uint64_t *out) {*out=n;}
 static unsigned teOption,teOffsetOption=7800,teReads;
 static bool teOffsetPresent=true;
+static bool noPollBootPresent=false,noPollAdtPresent=false;
+static uint32_t noPollBootValue=0,noPollAdtValue=0;
+typedef void *DTEntry;
+constexpr int kSuccess=0;
+static int SecureDTLookupEntry(void *,const char *path,DTEntry *out) {
+ if(!noPollAdtPresent || strcmp(path,"/chosen"))return -1;
+ *out=(DTEntry)0x1;return kSuccess;
+}
+static int SecureDTGetProperty(DTEntry,const char *key,const void **prop,unsigned *bytes) {
+ if(!noPollAdtPresent || strcmp(key,"fuxi,nopoll"))return -1;
+ *prop=&noPollAdtValue;*bytes=sizeof(noPollAdtValue);return kSuccess;
+}
 static bool PE_parse_boot_argn(const char *name,void *n,unsigned) {
  if(!strcmp(name,"fuxivsynctoff") && !teOffsetPresent)return false;
+ if(!strcmp(name,"fuxinopoll")) { if(!noPollBootPresent)return false; *(unsigned *)n=noPollBootValue; return true; }
  unsigned value=!strcmp(name,"fuxivsyncte")?teOption:!strcmp(name,"fuxivsynctoff")?teOffsetOption:1;
  *(unsigned *)n=value;return true;
 }
@@ -1169,7 +1182,7 @@ def main():
         declaration = declaration.replace(': public IOMobileFramebuffer', '').replace(
             'OSDeclareDefaultStructors(AppleCLCD);', 'public:')
         methods = ''.join(function(display, name) for name in (
-            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
+            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'sweet_fb_nopoll_mode', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
             'AppleCLCD::presentWantedLocked', 'AppleCLCD::wakePresentLocked', 'sweet_fb_rearm',
             'AppleCLCD::vsyncFired', 'AppleCLCD::scanoutLog', 'get32', 'AppleCLCD::observeRecord', 'AppleCLCD::recordDone', 'AppleCLCD::consumeRecord', 'AppleCLCD::retireEarly', 'AppleCLCD::releaseRecord',
             'AppleCLCD::swapWait', 'AppleCLCD::stopRecords',
@@ -1182,6 +1195,63 @@ def main():
                         '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                         '-I', str(SRC), str(cpp), '-o', str(tmp / 'display')], check=True)
         subprocess.run([str(tmp / 'display')], check=True)
+        # Verify sweet_fb_nopoll_mode() boot-arg priority, /chosen fuxi,nopoll fallback, clamping & non-FUXI guard
+        nopoll_fn = function(display, 'sweet_fb_nopoll_mode')
+        nopoll_test = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define FUXI 1
+typedef void *DTEntry;
+constexpr int kSuccess = 0;
+static bool bootPresent, adtPresent;
+static uint32_t bootVal, adtVal;
+static unsigned logs;
+static void IOLog(const char *, ...) { ++logs; }
+static bool PE_parse_boot_argn(const char *k, void *out, unsigned sz) {
+ if (!strcmp(k, "fuxinopoll") && bootPresent && sz == sizeof(uint32_t)) {
+  memcpy(out, &bootVal, sizeof(uint32_t)); return true;
+ }
+ return false;
+}
+static int SecureDTLookupEntry(void *, const char *path, DTEntry *out) {
+ if (!adtPresent || strcmp(path, "/chosen")) return -1;
+ *out = (DTEntry)0x1; return kSuccess;
+}
+static int SecureDTGetProperty(DTEntry, const char *key, const void **prop, unsigned *bytes) {
+ if (!adtPresent || strcmp(key, "fuxi,nopoll")) return -1;
+ *prop = &adtVal; *bytes = sizeof(adtVal); return kSuccess;
+}
+''' + nopoll_fn + r'''
+int main(int argc, char **argv) {
+ assert(argc == 5);
+ bootPresent = atoi(argv[1]) != 0;
+ bootVal = (uint32_t)atoi(argv[2]);
+ adtPresent = atoi(argv[3]) != 0;
+ adtVal = (uint32_t)atoi(argv[4]);
+ uint32_t got = sweet_fb_nopoll_mode();
+ printf("%u:%u\n", got, logs);
+ return 0;
+}
+'''
+        np_cpp = tmp / 'nopoll.cpp'
+        np_cpp.write_text(nopoll_test)
+        np_exe = tmp / 'nopoll'
+        subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                        '-fsanitize=address,undefined', str(np_cpp), '-o', str(np_exe)], check=True)
+        for args_in, expected in [
+            (('0', '0', '0', '0'), '0:0'),
+            (('0', '0', '1', '1'), '1:1'),
+            (('1', '0', '1', '1'), '0:0'),   # boot-arg=0 overrides ADT=1
+            (('1', '5', '1', '1'), '8:1'),   # 2..7 clamped to 8
+            (('0', '0', '1', '12'), '12:1'), # 8..16 preserved from ADT
+            (('0', '0', '1', '17'), '0:0'),  # >16 -> 0
+        ]:
+            out = subprocess.check_output([str(np_exe), *args_in], text=True).strip()
+            assert out == expected, (args_in, out, expected)
+        print('PASS: sweet_fb_nopoll_mode boot-arg priority, /chosen fuxi,nopoll fallback, clamping & opt-in log')
         # Compile our ARM cache primitive as real AArch64 code (never run reference code).
         arm = tmp / 'cache.c'
         arm.write_text('typedef __UINTPTR_TYPE__ uintptr_t; typedef unsigned uint32_t;\n'

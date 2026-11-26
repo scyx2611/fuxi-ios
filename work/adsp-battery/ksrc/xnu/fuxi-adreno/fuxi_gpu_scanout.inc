@@ -837,7 +837,7 @@ int fuxi_gpu_scanout_te(struct fg_te_observer *te)
  } else te->edge = raw;
  te->raw_edge = raw;
  te->raw_frame = frame;
- if (te->samples < 2) te->samples++;
+ if (te->samples < 8) te->samples++;
  return te->samples >= 2;
 }
 /* Arm the per-START gates. Called with the current read pointer value. */

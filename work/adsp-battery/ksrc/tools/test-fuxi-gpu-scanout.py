@@ -1657,6 +1657,7 @@ int main(void) {
  const unsigned size=4320u*2400;
  for(unsigned b=0;b<3;b++) {
   base=0xb8000000u+b*0xa00000u;
+  assert(screenshot(0,512) && copiedFrom==(uint64_t)base && copiedBytes==512);
   assert(screenshot(123,1024) && copiedFrom==(uint64_t)base+123 && copiedBytes==512);
   assert(screenshot(size-512,512) && copiedFrom==(uint64_t)base+size-512);
   assert(screenshot(size,0) && !copiedBytes);
@@ -1921,7 +1922,7 @@ static int IOLog(const char *format,...) {va_list args;va_start(args,format);vsn
         declaration = source[source.index('class AppleCLCD :'):source.index('OSDefineMetaClassAndStructors(AppleCLCD')]
         declaration = declaration.replace(': public IOMobileFramebuffer', '').replace('OSDeclareDefaultStructors(AppleCLCD);', 'public:')
         methods = ''.join(display.function(source, n) for n in (
-            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
+            'sweet_fit_src', 'sweet_fit_first', 'sweet_fit_copy', 'sweet_fb_swap_bin', 'sweet_fb_te_configure', 'sweet_fb_nopoll_mode', 'AppleCLCD::teVsyncTick', 'AppleCLCD::teVsyncLog',
             'AppleCLCD::presentWantedLocked', 'AppleCLCD::wakePresentLocked', 'sweet_fb_rearm',
             'AppleCLCD::vsyncFired', 'AppleCLCD::scanoutLog', 'get32', 'AppleCLCD::observeRecord', 'AppleCLCD::recordDone', 'AppleCLCD::consumeRecord', 'AppleCLCD::retireEarly', 'AppleCLCD::releaseRecord',
             'AppleCLCD::swapWait', 'AppleCLCD::stopRecords',

@@ -31,9 +31,11 @@ using IOReturn=int;using IOByteCount=uint64_t;using ppnum_t=uint32_t;
 using task_t=unsigned;using IOOptionBits=unsigned;
 constexpr task_t kernel_task=99;
 constexpr int kIOReturnSuccess=0,kIOReturnBadArgument=1,kIOReturnNoResources=2,
- kIOReturnNoMemory=3,kIOReturnBusy=4,kIOReturnIOError=5;
+ kIOReturnNoMemory=3,kIOReturnBusy=4,kIOReturnIOError=5,kIOReturnNotOpen=6;
 constexpr unsigned kIODirectionNone=0,kIODirectionIn=1,kIODirectionOut=2,kIODirectionInOut=3,kIOMapReadOnly=4096,kIOMemoryMapperNone=8,kIOMemoryPersistent=16,
  kIOMapAnywhere=32,kIOMapDefaultCache=0;
+#define THREAD_UNINT 0
+static uint32_t lockSplitEnabled = 0;
 #define bzero(p,n) memset(p,0,n)
 static task_t caller=7;
 static task_t current_task() {return caller;}
@@ -46,6 +48,8 @@ static bool busy,undrained;
 static int clientLock;
 static void IOLockLock(int *){}
 static void IOLockUnlock(int *){}
+static int IOLockSleep(int *, void *, int){ return 0; }
+static void IOLockWakeup(int *, void *, bool){}
 static void IOLog(const char *,...){}
 static void abiTrace(const char *,int,int){}
 static void cboStat(int,uint64_t){}
@@ -204,6 +208,16 @@ int main() {
  assert(c.importHost(request,out)==kIOReturnNoResources);c.wired_=0;
  c.nextHandle_=UINT64_MAX;assert(c.importHost(request,out)==kIOReturnNoResources);
  assert(prepares>completes); // prepare failure itself never calls complete
+ // Wave 2 lockSplitEnabled=1: importHost + drop(b, true) teardown & all failure unwinds (1..13)
+ lockSplitEnabled=1;c.live_=true;c.nextHandle_=1;request.bytes=32768;fail=0;
+ assert(!c.importHost(request,out) && out.handle && c.wired_==32768 && c.liveImports_==1 && !c.inflightUnlocked_);
+ assert(!c.drop(c.bos_[0],true) && !c.wired_ && !c.liveImports_ && !c.inflightUnlocked_);empty();
+ for(fail=1;fail<=13;fail++) {
+  unsigned bf=completes;
+  assert(c.importHost(request,out)!=0 && !c.wired_ && !c.liveImports_ && !c.inflightUnlocked_);
+  empty();assert(completes==bf+(fail>=3));
+ }
+ fail=0;lockSplitEnabled=0;
  puts("PASS: ABI2/16K/overflow/ownership/quota, actual import failure unwind, pin/map refs, busy free, task close, quarantine and idempotent release");
 }
 '''
@@ -233,7 +247,9 @@ def main():
  ~Client(){index_.release();}
  task_t task_=7;struct fuxi_gpu_vm *vm_=nullptr;char procName_[32]={};
  uint64_t nextHandle_=1,wired_=0,lastFence_=1;
- int *lock_=&clientLock;bool live_=true;int pid_=0;
+ int *lock_=&clientLock;unsigned inflightUnlocked_=0;bool live_=true,closing_=false;int pid_=0;
+ void enterUnlocked() { ++inflightUnlocked_; }
+ void leaveUnlocked() { if (inflightUnlocked_ && --inflightUnlocked_==0) IOLockWakeup(lock_,&inflightUnlocked_,false); }
  void terminate(){}
  int wait(uint64_t,uint64_t) {waits++;busy=false;return undrained?kIOReturnIOError:0;}
 ''' + method(source, 'importHost') + method(source, 'drop') + close + TEST

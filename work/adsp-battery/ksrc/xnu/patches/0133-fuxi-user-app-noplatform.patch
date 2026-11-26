@@ -1,0 +1,227 @@
+diff --git a/bsd/kern/fuxi_user_app_noplatform.h b/bsd/kern/fuxi_user_app_noplatform.h
+new file mode 100644
+index 0000000..eeb6fe4
+--- /dev/null
++++ b/bsd/kern/fuxi_user_app_noplatform.h
+@@ -0,0 +1,107 @@
++/*
++ * Opt-in drop of CS_PLATFORM_BINARY for third-party app container paths
++ * (/private/var/containers/Bundle/Application/<UUID>/<App>.app/<Exec>).
++ *
++ * On SWEET, every binary on MNT_ROOTFS is marked CS_PLATFORM_BINARY by
++ * sweet_amfi.c (because there is no static trust cache on a single rootfs).
++ * Third-party apps installed under /private/var/containers/Bundle/Application/
++ * live on that same rootfs and must NOT run as Apple platform binaries.
++ *
++ * Controlled independently (isolated toggle, no signature bypass, no
++ * dev-mode sysctl):
++ *   boot-arg fuxiuserappnoplat=0|1, else ADT /chosen u32 "fuxi,user-app-noplatform".
++ *   Default: 0 (disabled).
++ */
++#ifndef FUXI_USER_APP_NOPLATFORM_H
++#define FUXI_USER_APP_NOPLATFORM_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++/* True for third-party app container executables/libraries under Bundle/Application. */
++static inline bool
++fuxi_appsync_is_user_app_path(const char *path)
++{
++	static const char prefix_priv[] = "/private/var/containers/Bundle/Application/";
++	static const char prefix_var[] = "/var/containers/Bundle/Application/";
++	const char *part;
++	const char *seg;
++	bool seen_app_dir = false;
++	bool has_post_app_seg = false;
++	bool last_seg_nonempty = false;
++
++	if (path == NULL) {
++		return false;
++	}
++	if (strncmp(path, prefix_priv, sizeof(prefix_priv) - 1) == 0) {
++		part = path + (sizeof(prefix_priv) - 1);
++	} else if (strncmp(path, prefix_var, sizeof(prefix_var) - 1) == 0) {
++		part = path + (sizeof(prefix_var) - 1);
++	} else {
++		return false;
++	}
++	for (seg = part; *seg != '\0';) {
++		const char *slash = seg;
++		size_t seg_len;
++
++		while (*slash != '\0' && *slash != '/') {
++			slash++;
++		}
++		seg_len = (size_t)(slash - seg);
++		if ((seg_len == 1 && seg[0] == '.') ||
++		    (seg_len == 2 && seg[0] == '.' && seg[1] == '.')) {
++			return false;
++		}
++		if (seen_app_dir && seg_len > 0) {
++			has_post_app_seg = true;
++		}
++		if (seg_len > 4 && seg[0] != '.' &&
++		    memcmp(slash - 4, ".app", 4) == 0 && *slash == '/') {
++			seen_app_dir = true;
++		}
++		if (*slash == '\0') {
++			last_seg_nonempty = (seg_len > 0);
++			break;
++		}
++		seg = slash + 1;
++	}
++	return seen_app_dir && has_post_app_seg && last_seg_nonempty;
++}
++
++static inline bool
++fuxi_user_app_noplatform_read(void)
++{
++	uint32_t val = 0;
++	if (PE_parse_boot_argn("fuxiuserappnoplat", &val, sizeof(val))) {
++		return val != 0;
++	}
++	DTEntry chosen;
++	void const *prop = NULL;
++	unsigned int bytes = 0;
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++	    SecureDTGetProperty(chosen, "fuxi,user-app-noplatform", &prop, &bytes) == kSuccess &&
++	    prop != NULL && bytes == sizeof(uint32_t)) {
++		memcpy(&val, prop, sizeof(val));
++		return val != 0;
++	}
++	return false;
++}
++
++static inline bool
++fuxi_user_app_noplatform_enabled(void)
++{
++	static volatile int32_t cached = -1;
++	int32_t v = cached;
++	if (v >= 0) {
++		return v != 0;
++	}
++	bool on = fuxi_user_app_noplatform_read();
++	cached = on ? 1 : 0;
++	if (on) {
++		printf("FUXI EXEC: user-app platform_binary drop on\n");
++	}
++	return on;
++}
++
++#endif /* FUXI_USER_APP_NOPLATFORM_H */
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 47ca382..6501cea 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -141,10 +141,14 @@
+ #include <kern/thread.h>
+ #include <kern/coalition.h>
+ #include <kern/policy_internal.h>
+ #include <kern/kalloc.h>
+ #include <kern/zalloc.h> /* zone_userspace_reboot_checks() */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <pexpert/device_tree.h>
++#include "fuxi_user_app_noplatform.h"
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+ 
+ #include <os/log.h>
+ 
+ #if CONFIG_MACF
+ #include <security/mac_framework.h>
+@@ -1735,10 +1739,24 @@ grade:
+ 	 * The load result will have already been munged by AMFI to include the
+ 	 * platform binary flag if boot-args dictated it (AMFI will mark anything
+ 	 * that doesn't go through the upcall path as a platform binary if its
+ 	 * enforcement is disabled).
+ 	 */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (load_result.platform_binary && fuxi_user_app_noplatform_enabled() &&
++	    imgp->ip_vp != NULL) {
++		int path_len = MAXPATHLEN;
++		char *app_path = kalloc_data(MAXPATHLEN, Z_WAITOK);
++		if (app_path != NULL) {
++			if (vn_getpath(imgp->ip_vp, app_path, &path_len) == 0 &&
++			    fuxi_appsync_is_user_app_path(app_path)) {
++				load_result.platform_binary = FALSE;
++			}
++			kfree_data(app_path, MAXPATHLEN);
++		}
++	}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+ 	if (load_result.platform_binary) {
+ 		if (cs_debug) {
+ 			printf("setting platform binary on task: pid = %d\n", proc_getpid(p));
+ 		}
+ 
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index eeef4c0..38760bf 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -42,10 +42,12 @@
+ #include <sys/systm.h>
+ #include <sys/ubc_internal.h>
+ #include <sys/vnode.h>
+ #include <security/mac_policy.h>
+ #include <pexpert/device_tree.h>
++#include <pexpert/pexpert.h>
++#include "fuxi_user_app_noplatform.h"
+ 
+ /* iokit/Kernel/arm/SweetEntitlements.cpp */
+ void *sweet_entitlements_create(const CS_GenericBlob *blob, size_t blob_len);
+ void *sweet_entitlements_copy_dict(const void *ent);
+ bool sweet_entitlements_copy_xml(const void *ent, CS_GenericBlob **out);
+@@ -273,27 +275,49 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, sweet_amfi_register);
+ /*
+  * The signature reached this hook validated, so mark it CS_SIGNED like AMFI
+  * does: exec copies the flag to the process, and csproc_get_blob() (csops
+  * status, cdhash, platform and entitlement queries by process) ignores
+  * processes without it. Every signed binary on the root filesystem is a
+- * platform binary. New signatures (ubc_cs_blob_add passes its writable copy;
++ * platform binary (except user-app container paths when fuxiuserappnoplat=1).
++ * New signatures (ubc_cs_blob_add passes its writable copy;
+  * revalidation passes the read-only blob itself) get their entitlements here.
+  */
++static bool
++sweet_amfi_is_user_app_vnode(struct vnode *vp)
++{
++	bool is_user_app = false;
++	if (!fuxi_user_app_noplatform_enabled() || vp == NULL) {
++		return false;
++	}
++	int path_len = MAXPATHLEN;
++	char *app_path = kalloc_data(MAXPATHLEN, Z_WAITOK);
++	if (app_path != NULL) {
++		if (vn_getpath(vp, app_path, &path_len) == 0 &&
++		    fuxi_appsync_is_user_app_path(app_path)) {
++			is_user_app = true;
++		}
++		kfree_data(app_path, MAXPATHLEN);
++	}
++	return is_user_app;
++}
++
+ static int
+ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+     __unused cpu_type_t cpu_type, struct cs_blob *cs_blob,
+     unsigned int *cs_flags, __unused unsigned int *signer_type,
+     __unused int flags, __unused unsigned int platform,
+     __unused char **fatal_failure_desc, __unused size_t *fatal_failure_desc_len)
+ {
+-	mount_t mp = vnode_mount(vp);
++	mount_t mp = vp != NULL ? vnode_mount(vp) : NULL;
+ 	*cs_flags |= CS_SIGNED | CS_VALID;
+ 	extern int fuxi_camera_dylib_is_mounted(void);
+ 	if (mp != NULL && ((vfs_flags(mp) & MNT_ROOTFS) ||
+ 	    (fuxi_camera_dylib_is_mounted() &&
+ 	     strcmp(vfs_statfs(mp)->f_mntonname, "/Developer") == 0))) {
+-		*cs_flags |= CS_PLATFORM_BINARY;
++		if (!sweet_amfi_is_user_app_vnode(vp)) {
++			*cs_flags |= CS_PLATFORM_BINARY;
++		}
+ 	}
+ 	if (cs_blob != cs_blob->csb_ro_addr && cs_blob->csb_entitlements == NULL) {
+ 		sweet_amfi_attach_entitlements(cs_blob);
+ 	}
+ 	return 0;

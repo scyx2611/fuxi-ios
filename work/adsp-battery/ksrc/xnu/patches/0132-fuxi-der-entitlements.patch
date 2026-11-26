@@ -1,0 +1,673 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index 73517a9..eeef4c0 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -6,10 +6,10 @@
+  * has neither, and code signing reaches it on every exec (ubc_cs_blob_add).
+  *
+  * Entitlements: when a code signature is added, its XML entitlements blob
++ * (Slot 5, 0xfade7171) or DER entitlements blob (Slot 7, 0xfade7172)
+  * (already checked against the code directory) is parsed into a
+  * SweetEntitlements object (iokit/Kernel/arm/SweetEntitlements.cpp), set as
+- * the blob's csb_entitlements, and every query is answered from it. DER-only
+- * signatures get none. Code signature and page hash validation stay with the
++ * the blob's csb_entitlements, and every query is answered from it. Code signature and page hash validation stay with the
+  * kernel. Trust caches remain unavailable (no Image4), so the TrustCache
+  * interface is left at version 0.
+  *
+@@ -128,30 +128,44 @@ sweet_amfi_adjust_with_monitor(__unused void *os_entitlements,
+ }
+ 
+ /*
+- * Attach the parsed XML entitlements to a code signature being added. This
+- * must happen in the vnode_check_signature MAC hook, like AMFI does: later,
+- * converting a 4K-page signature to multilevel hashes drops the XML blob.
+- * Nothing is granted when the blob is missing, unreadable or does not match
+- * its code directory hash.
++ * Attach the parsed XML (Slot 5) or DER (Slot 7) entitlements to a code
++ * signature being added. Slot 5 XML takes precedence; hash or parse errors
++ * fail closed without falling back to Slot 7.
+  */
+ static void
+ sweet_amfi_attach_entitlements(struct cs_blob *code_signing_blob)
+ {
+ 	void *xml = NULL;
+ 	size_t xml_len = 0;
++	const CS_GenericBlob *blob = NULL;
++	size_t blob_len = 0;
+ 
+ 	if (csblob_get_entitlements(code_signing_blob, &xml, &xml_len) != 0) {
+ 		printf("SWEET AMFI: %s: entitlements do not match the code directory, granting none\n",
+ 		    csblob_get_identity(code_signing_blob));
+ 		return;
+ 	}
+-	if (xml == NULL) {
+-		return;                 /* no XML entitlements */
++	if (xml != NULL) {
++		blob = (const CS_GenericBlob *)xml;
++		blob_len = xml_len;
++	} else {
++		const CS_GenericBlob *der = NULL;
++		size_t der_len = 0;
++		if (csblob_get_der_entitlements(code_signing_blob, &der, &der_len) != 0) {
++			printf("SWEET AMFI: %s: DER entitlements do not match the code directory, granting none\n",
++			    csblob_get_identity(code_signing_blob));
++			return;
++		}
++		if (der == NULL) {
++			return;         /* no XML or DER entitlements */
++		}
++		blob = der;
++		blob_len = der_len;
+ 	}
+-	void *ent = sweet_entitlements_create(xml, xml_len);
++	void *ent = sweet_entitlements_create(blob, blob_len);
+ 	if (ent == NULL) {
+ 		printf("SWEET AMFI: %s: unreadable entitlements (%zu bytes), granting none\n",
+-		    csblob_get_identity(code_signing_blob), xml_len);
++		    csblob_get_identity(code_signing_blob), blob_len);
+ 		return;
+ 	}
+ 	if (sweet_amfi_debug) {
+@@ -252,7 +266,7 @@ static void
+ sweet_amfi_register(void)
+ {
+ 	amfi_interface_register(&sweet_amfi);
+-	printf("SWEET AMFI: built-in interface registered (XML entitlements)\n");
++	printf("SWEET AMFI: built-in interface registered (XML + DER entitlements)\n");
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, sweet_amfi_register);
+ 
+diff --git a/iokit/Kernel/arm/SweetEntitlements.cpp b/iokit/Kernel/arm/SweetEntitlements.cpp
+index 6186541..22e044f 100644
+--- a/iokit/Kernel/arm/SweetEntitlements.cpp
++++ b/iokit/Kernel/arm/SweetEntitlements.cpp
+@@ -14,10 +14,13 @@
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSArray.h>
+ #include <libkern/c++/OSBoolean.h>
++#include <libkern/c++/OSData.h>
+ #include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
+ #include <libkern/c++/OSString.h>
+ #include <libkern/c++/OSUnserialize.h>
+ #include <kern/cs_blobs.h>
++#include "fuxi_der_entitlements.h"
+ 
+ class SweetEntitlements : public OSObject {
+ 	OSDeclareDefaultStructors(SweetEntitlements);
+@@ -50,6 +53,99 @@ SweetEntitlements::free(void)
+ 	OSObject::free();
+ }
+ 
++static void *
++sweet_der_make_bool(void *ctx __unused, bool value)
++{
++	return OSBoolean::withBoolean(value);
++}
++
++static void *
++sweet_der_make_number(void *ctx __unused, uint64_t value, unsigned int bits)
++{
++	return OSNumber::withNumber(value, bits);
++}
++
++static void *
++sweet_der_make_data(void *ctx __unused, const uint8_t *bytes, size_t len)
++{
++	if (len > 0xffffffffu) {
++		return NULL;
++	}
++	return OSData::withBytes(bytes, (unsigned int)len);
++}
++
++static void *
++sweet_der_make_string(void *ctx __unused, const char *str, size_t len)
++{
++	return OSString::withCString(str, len);
++}
++
++static void *
++sweet_der_make_array(void *ctx __unused, unsigned int capacity)
++{
++	return OSArray::withCapacity(capacity);
++}
++
++static bool
++sweet_der_array_append(void *ctx __unused, void *arr_obj, void *elem_obj)
++{
++	OSArray *arr = (OSArray *)arr_obj;
++	OSObject *elem = (OSObject *)elem_obj;
++	return arr != NULL && elem != NULL && arr->setObject(elem);
++}
++
++static void *
++sweet_der_make_dict(void *ctx __unused, unsigned int capacity)
++{
++	return OSDictionary::withCapacity(capacity);
++}
++
++static bool
++sweet_der_dict_set(void *ctx __unused, void *dict_obj, const char *key, size_t key_len, void *val_obj)
++{
++	OSDictionary *dict = (OSDictionary *)dict_obj;
++	OSObject *val = (OSObject *)val_obj;
++	if (dict == NULL || val == NULL || key == NULL || key_len == 0) {
++		return false;
++	}
++	char stack_key[256];
++	char *kbuf = stack_key;
++	size_t alloc_len = 0;
++	if (key_len >= sizeof(stack_key)) {
++		alloc_len = key_len + 1;
++		kbuf = (char *)kalloc_data(alloc_len, Z_WAITOK);
++		if (kbuf == NULL) {
++			return false;
++		}
++	}
++	memcpy(kbuf, key, key_len);
++	kbuf[key_len] = '\0';
++	bool ok = dict->setObject(kbuf, val);
++	if (alloc_len != 0) {
++		kfree_data(kbuf, alloc_len);
++	}
++	return ok;
++}
++
++static void
++sweet_der_release(void *ctx __unused, void *obj)
++{
++	OSObject *o = (OSObject *)obj;
++	OSSafeReleaseNULL(o);
++}
++
++static const struct fuxi_der_ops sweet_der_ops = {
++	.make_bool = sweet_der_make_bool,
++	.make_number = sweet_der_make_number,
++	.make_data = sweet_der_make_data,
++	.make_string = sweet_der_make_string,
++	.make_array = sweet_der_make_array,
++	.array_append = sweet_der_array_append,
++	.make_dict = sweet_der_make_dict,
++	.dict_set = sweet_der_dict_set,
++	.release = sweet_der_release,
++};
++
+ static SweetEntitlements *
+ sweet_ent(const void *obj)
+ {
+@@ -57,47 +153,67 @@ sweet_ent(const void *obj)
+ }
+ 
+ extern "C" {
+-/* Parsed entitlements for one XML blob (header included), or NULL. Retained. */
++/* Parsed entitlements for one XML or DER blob (header included), or NULL. Retained. */
+ void *
+ sweet_entitlements_create(const CS_GenericBlob *blob, size_t blob_len)
+ {
+ 	if (blob == NULL || blob_len <= sizeof(CS_GenericBlob) ||
+-	    ntohl(blob->magic) != CSMAGIC_EMBEDDED_ENTITLEMENTS ||
+-	    ntohl(blob->length) != blob_len) {
++	    blob_len > FUXI_DER_MAX_BLOB || ntohl(blob->length) != blob_len) {
+ 		return NULL;
+ 	}
+ 
+-	/* OSUnserializeXML needs a terminating NUL inside the buffer. */
+-	size_t text_len = blob_len - sizeof(CS_GenericBlob);
+-	char *text = (char *)kalloc_data(text_len + 1, Z_WAITOK);
+-	if (text == NULL) {
+-		return NULL;
+-	}
+-	memcpy(text, blob->data, text_len);
+-	text[text_len] = '\0';
+-	OSObject *parsed = OSUnserializeXML(text, text_len + 1);
+-	kfree_data(text, text_len + 1);
+-
+-	OSDictionary *dict = OSDynamicCast(OSDictionary, parsed);
+-	if (dict == NULL) {
+-		OSSafeReleaseNULL(parsed);
++	uint32_t magic = ntohl(blob->magic);
++	OSDictionary *dict = NULL;
++	CS_GenericBlob *xml = NULL;
++	size_t xml_len = 0;
++
++	if (magic == CSMAGIC_EMBEDDED_ENTITLEMENTS) {
++		/* OSUnserializeXML needs a terminating NUL inside the buffer. */
++		size_t text_len = blob_len - sizeof(CS_GenericBlob);
++		char *text = (char *)kalloc_data(text_len + 1, Z_WAITOK);
++		if (text == NULL) {
++			return NULL;
++		}
++		memcpy(text, blob->data, text_len);
++		text[text_len] = '\0';
++		OSObject *parsed = OSUnserializeXML(text, text_len + 1);
++		kfree_data(text, text_len + 1);
++
++		dict = OSDynamicCast(OSDictionary, parsed);
++		if (dict == NULL) {
++			OSSafeReleaseNULL(parsed);
++			return NULL;
++		}
++
++		xml = (CS_GenericBlob *)kalloc_data(blob_len, Z_WAITOK);
++		if (xml == NULL) {
++			dict->release();
++			return NULL;
++		}
++		memcpy(xml, blob, blob_len);
++		xml_len = blob_len;
++	} else if (magic == CSMAGIC_EMBEDDED_DER_ENTITLEMENTS) {
++		dict = (OSDictionary *)fuxi_der_parse_blob((const uint8_t *)blob, blob_len,
++		    &sweet_der_ops, NULL);
++		if (dict == NULL) {
++			return NULL;
++		}
++	} else {
+ 		return NULL;
+ 	}
+ 
+ 	SweetEntitlements *ent = OSTypeAlloc(SweetEntitlements);
+-	CS_GenericBlob *xml = (CS_GenericBlob *)kalloc_data(blob_len, Z_WAITOK);
+-	if (ent == NULL || !ent->init() || xml == NULL) {
++	if (ent == NULL || !ent->init()) {
+ 		OSSafeReleaseNULL(ent);
+-		if (xml) {
+-			kfree_data(xml, blob_len);
++		if (xml != NULL) {
++			kfree_data(xml, xml_len);
+ 		}
+ 		dict->release();
+ 		return NULL;
+ 	}
+-	memcpy(xml, blob, blob_len);
+ 	ent->dict = dict;
+ 	ent->xml = xml;
+-	ent->xml_len = blob_len;
++	ent->xml_len = xml_len;
+ 	return ent;
+ }
+ 
+@@ -118,7 +234,8 @@ bool
+ sweet_entitlements_copy_xml(const void *obj, CS_GenericBlob **out)
+ {
+ 	SweetEntitlements *ent = sweet_ent(obj);
+-	if (ent == NULL) {
++	if (ent == NULL || out == NULL || ent->xml == NULL ||
++	    ent->xml_len < sizeof(CS_GenericBlob)) {
+ 		return false;
+ 	}
+ 	CS_GenericBlob *copy = (CS_GenericBlob *)kalloc_data(ent->xml_len, Z_WAITOK);
+diff --git a/iokit/Kernel/arm/fuxi_der_entitlements.h b/iokit/Kernel/arm/fuxi_der_entitlements.h
+new file mode 100644
+index 0000000..fca3c09
+--- /dev/null
++++ b/iokit/Kernel/arm/fuxi_der_entitlements.h
+@@ -0,0 +1,368 @@
++/*
++ * Pure C11/C++ DER entitlements parser for SWEET/FUXI (Slot 7, 0xfade7172).
++ *
++ * Supports:
++ *   - CoreEntitlements v1: 0x70 [APP 16 CONSTRUCTED] { 0x02 INT(1), 0xb0|0x31|0x30 dict }
++ *   - CoreEntitlements v0 / ldid: 0x31 SET (or tolerant top-level 0x30 key/value SEQUENCE)
++ *   - Value types: Bool (0x01), Integer (0x02, 1..8B signed BE), Data (0x04),
++ *     UTF8String (0x0c, no NUL), Array (0x30), nested Dict (0xb0 / 0x31)
++ */
++#ifndef FUXI_DER_ENTITLEMENTS_H
++#define FUXI_DER_ENTITLEMENTS_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define FUXI_DER_MAGIC       0xfade7172u
++#define FUXI_DER_MAX_BLOB    1048576u
++#define FUXI_DER_MAX_DEPTH   16u
++#define FUXI_DER_MAX_STRING  262142u
++#define FUXI_DER_MAX_KEY     4096u
++
++struct fuxi_der_ops {
++	void *(*make_bool)(void *ctx, bool value);
++	void *(*make_number)(void *ctx, uint64_t value, unsigned int bits);
++	void *(*make_data)(void *ctx, const uint8_t *bytes, size_t len);
++	void *(*make_string)(void *ctx, const char *str, size_t len);
++	void *(*make_array)(void *ctx, unsigned int capacity);
++	bool (*array_append)(void *ctx, void *arr, void *elem);
++	void *(*make_dict)(void *ctx, unsigned int capacity);
++	bool (*dict_set)(void *ctx, void *dict, const char *key, size_t key_len, void *val);
++	void (*release)(void *ctx, void *obj);
++};
++
++static inline uint32_t
++fuxi_der_be32(const uint8_t *p)
++{
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
++}
++
++static inline bool
++fuxi_der_has_nul(const uint8_t *p, size_t len)
++{
++	for (size_t i = 0; i < len; i++) {
++		if (p[i] == '\0') {
++			return true;
++		}
++	}
++	return false;
++}
++
++static inline bool
++fuxi_der_read_tlv(const uint8_t *p, const uint8_t *end,
++    uint8_t *tag_out, const uint8_t **val_out, size_t *len_out, const uint8_t **next_out)
++{
++	if (p == NULL || end == NULL || p >= end) {
++		return false;
++	}
++	uint8_t tag = *p++;
++	if ((tag & 0x1fu) == 0x1fu) {
++		return false; /* high-tag-number form not supported */
++	}
++	if (p >= end) {
++		return false;
++	}
++	uint8_t lb = *p++;
++	size_t len = 0;
++	if ((lb & 0x80u) == 0) {
++		len = lb;
++	} else {
++		uint8_t nbytes = lb & 0x7fu;
++		if (lb == 0x80u || lb == 0xffu || nbytes == 0 || nbytes > 4) {
++			return false;
++		}
++		if ((size_t)(end - p) < nbytes) {
++			return false;
++		}
++		if (p[0] == 0x00u) {
++			return false; /* non-minimal DER length */
++		}
++		for (uint8_t i = 0; i < nbytes; i++) {
++			len = (len << 8) | (size_t)p[i];
++		}
++		if (len < 128u) {
++			return false; /* non-minimal DER length */
++		}
++		p += nbytes;
++	}
++	if (len > (size_t)(end - p)) {
++		return false;
++	}
++	*tag_out = tag;
++	*val_out = p;
++	*len_out = len;
++	*next_out = p + len;
++	return true;
++}
++
++static inline bool
++fuxi_der_parse_int64(const uint8_t *val, size_t len, uint64_t *out)
++{
++	if (len == 0 || len > 8) {
++		return false;
++	}
++	uint64_t u = (val[0] & 0x80u) ? ~0ULL : 0ULL;
++	for (size_t i = 0; i < len; i++) {
++		u = (u << 8) | (uint64_t)val[i];
++	}
++	*out = u;
++	return true;
++}
++
++static inline bool
++fuxi_der_count_items(const uint8_t *p, const uint8_t *end, unsigned int *count_out)
++{
++	unsigned int count = 0;
++	while (p < end) {
++		uint8_t tag = 0;
++		const uint8_t *val = NULL;
++		size_t len = 0;
++		const uint8_t *next = NULL;
++		if (!fuxi_der_read_tlv(p, end, &tag, &val, &len, &next)) {
++			return false;
++		}
++		(void)tag;
++		(void)val;
++		(void)len;
++		if (count == ~0u) {
++			return false;
++		}
++		count++;
++		p = next;
++	}
++	*count_out = count;
++	return p == end;
++}
++
++static void *fuxi_der_parse_dict(const uint8_t *p, const uint8_t *end,
++    const struct fuxi_der_ops *ops, void *ctx, unsigned int depth);
++
++static void *
++fuxi_der_parse_value(const uint8_t *p, const uint8_t *end, const uint8_t **next_out,
++    const struct fuxi_der_ops *ops, void *ctx, unsigned int depth)
++{
++	if (depth > FUXI_DER_MAX_DEPTH) {
++		return NULL;
++	}
++	uint8_t tag = 0;
++	const uint8_t *val = NULL;
++	size_t len = 0;
++	const uint8_t *next = NULL;
++	if (!fuxi_der_read_tlv(p, end, &tag, &val, &len, &next)) {
++		return NULL;
++	}
++	void *obj = NULL;
++	switch (tag) {
++	case 0x01: /* BOOLEAN */
++		if (len != 1) {
++			return NULL;
++		}
++		obj = ops->make_bool(ctx, val[0] != 0);
++		break;
++	case 0x02: { /* INTEGER */
++		uint64_t u = 0;
++		if (!fuxi_der_parse_int64(val, len, &u)) {
++			return NULL;
++		}
++		obj = ops->make_number(ctx, u, 64u);
++		break;
++	}
++	case 0x04: /* OCTET STRING */
++		obj = ops->make_data(ctx, len ? val : (const uint8_t *)"", len);
++		break;
++	case 0x0c: /* UTF8String */
++		if (len >= FUXI_DER_MAX_STRING || fuxi_der_has_nul(val, len)) {
++			return NULL;
++		}
++		obj = ops->make_string(ctx, len ? (const char *)val : "", len);
++		break;
++	case 0x30: { /* SEQUENCE -> Array */
++		if (depth >= FUXI_DER_MAX_DEPTH) {
++			return NULL;
++		}
++		unsigned int count = 0;
++		if (!fuxi_der_count_items(val, next, &count)) {
++			return NULL;
++		}
++		void *arr = ops->make_array(ctx, count);
++		if (arr == NULL) {
++			return NULL;
++		}
++		const uint8_t *cur = val;
++		while (cur < next) {
++			const uint8_t *elem_next = NULL;
++			void *elem = fuxi_der_parse_value(cur, next, &elem_next, ops, ctx, depth + 1u);
++			if (elem == NULL) {
++				ops->release(ctx, arr);
++				return NULL;
++			}
++			bool ok = ops->array_append(ctx, arr, elem);
++			ops->release(ctx, elem);
++			if (!ok) {
++				ops->release(ctx, arr);
++				return NULL;
++			}
++			cur = elem_next;
++		}
++		if (cur != next) {
++			ops->release(ctx, arr);
++			return NULL;
++		}
++		obj = arr;
++		break;
++	}
++	case 0xb0: /* CE v1 Dictionary */
++	case 0x31: /* CE v0 / ldid Dictionary */
++		obj = fuxi_der_parse_dict(val, next, ops, ctx, depth);
++		break;
++	default:
++		return NULL;
++	}
++	if (obj == NULL) {
++		return NULL;
++	}
++	*next_out = next;
++	return obj;
++}
++
++static void *
++fuxi_der_parse_dict(const uint8_t *p, const uint8_t *end,
++    const struct fuxi_der_ops *ops, void *ctx, unsigned int depth)
++{
++	if (depth >= FUXI_DER_MAX_DEPTH) {
++		return NULL;
++	}
++	unsigned int count = 0;
++	if (!fuxi_der_count_items(p, end, &count)) {
++		return NULL;
++	}
++	void *dict = ops->make_dict(ctx, count);
++	if (dict == NULL) {
++		return NULL;
++	}
++	const uint8_t *cur = p;
++	while (cur < end) {
++		uint8_t item_tag = 0;
++		const uint8_t *item_val = NULL;
++		size_t item_len = 0;
++		const uint8_t *item_next = NULL;
++		if (!fuxi_der_read_tlv(cur, end, &item_tag, &item_val, &item_len, &item_next) ||
++		    item_tag != 0x30) {
++			ops->release(ctx, dict);
++			return NULL;
++		}
++		const uint8_t *item_end = item_next;
++
++		uint8_t key_tag = 0;
++		const uint8_t *key_val = NULL;
++		size_t key_len = 0;
++		const uint8_t *val_start = NULL;
++		if (!fuxi_der_read_tlv(item_val, item_end, &key_tag, &key_val, &key_len, &val_start) ||
++		    key_tag != 0x0c || key_len == 0 || key_len > FUXI_DER_MAX_KEY ||
++		    key_len >= FUXI_DER_MAX_STRING || fuxi_der_has_nul(key_val, key_len)) {
++			ops->release(ctx, dict);
++			return NULL;
++		}
++
++		const uint8_t *val_end = NULL;
++		void *val_obj = fuxi_der_parse_value(val_start, item_end, &val_end, ops, ctx, depth + 1u);
++		if (val_obj == NULL || val_end != item_end) {
++			if (val_obj != NULL) {
++				ops->release(ctx, val_obj);
++			}
++			ops->release(ctx, dict);
++			return NULL;
++		}
++
++		bool ok = ops->dict_set(ctx, dict, (const char *)key_val, key_len, val_obj);
++		ops->release(ctx, val_obj);
++		if (!ok) {
++			ops->release(ctx, dict);
++			return NULL;
++		}
++		cur = item_next;
++	}
++	if (cur != end) {
++		ops->release(ctx, dict);
++		return NULL;
++	}
++	return dict;
++}
++
++static inline void *
++fuxi_der_parse_blob(const uint8_t *blob, size_t blob_len,
++    const struct fuxi_der_ops *ops, void *ctx)
++{
++	if (blob == NULL || ops == NULL ||
++	    ops->make_bool == NULL || ops->make_number == NULL ||
++	    ops->make_data == NULL || ops->make_string == NULL ||
++	    ops->make_array == NULL || ops->array_append == NULL ||
++	    ops->make_dict == NULL || ops->dict_set == NULL || ops->release == NULL) {
++		return NULL;
++	}
++	if (blob_len < 8u || blob_len > FUXI_DER_MAX_BLOB) {
++		return NULL;
++	}
++	uint32_t magic = fuxi_der_be32(blob);
++	uint32_t total_len = fuxi_der_be32(blob + 4);
++	if (magic != FUXI_DER_MAGIC || total_len != blob_len) {
++		return NULL;
++	}
++	const uint8_t *payload = blob + 8;
++	size_t payload_len = blob_len - 8u;
++	if (payload_len == 0) {
++		return NULL;
++	}
++	if (payload_len >= 5 && payload[0] == '<' && payload[1] == '?' &&
++	    payload[2] == 'x' && payload[3] == 'm' && payload[4] == 'l') {
++		return NULL;
++	}
++	const uint8_t *payload_end = payload + payload_len;
++
++	uint8_t root_tag = 0;
++	const uint8_t *root_val = NULL;
++	size_t root_len = 0;
++	const uint8_t *root_next = NULL;
++	if (!fuxi_der_read_tlv(payload, payload_end, &root_tag, &root_val, &root_len, &root_next) ||
++	    root_next != payload_end) {
++		return NULL;
++	}
++
++	if (root_tag == 0x70) {
++		const uint8_t *root_end = root_val + root_len;
++		uint8_t ver_tag = 0;
++		const uint8_t *ver_val = NULL;
++		size_t ver_len = 0;
++		const uint8_t *dict_start = NULL;
++		uint64_t ver = 0;
++		if (!fuxi_der_read_tlv(root_val, root_end, &ver_tag, &ver_val, &ver_len, &dict_start) ||
++		    ver_tag != 0x02 || !fuxi_der_parse_int64(ver_val, ver_len, &ver) || ver != 1ULL) {
++			return NULL;
++		}
++		uint8_t dtag = 0;
++		const uint8_t *dval = NULL;
++		size_t dlen = 0;
++		const uint8_t *dnext = NULL;
++		if (!fuxi_der_read_tlv(dict_start, root_end, &dtag, &dval, &dlen, &dnext) ||
++		    dnext != root_end || (dtag != 0xb0 && dtag != 0x31 && dtag != 0x30)) {
++			return NULL;
++		}
++		return fuxi_der_parse_dict(dval, dnext, ops, ctx, 0u);
++	}
++	if (root_tag == 0x31 || root_tag == 0x30) {
++		return fuxi_der_parse_dict(root_val, root_next, ops, ctx, 0u);
++	}
++	return NULL;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* FUXI_DER_ENTITLEMENTS_H */

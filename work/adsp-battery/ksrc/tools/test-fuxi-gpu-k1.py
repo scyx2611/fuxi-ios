@@ -37,14 +37,15 @@ struct IOBufferMemoryDescriptor: IOMemoryDescriptor {
   *n=length-off;return (UINT64_C(1)<<36)-16384+off;                 // ends at/after 2^36
  }
 };
+static void (*bindHook)();
 struct FuxiAdrenoBoView {
  IOBufferMemoryDescriptor *backing=nullptr;
- bool bind(IOBufferMemoryDescriptor *m) {backing=m;m->retain();return true;}
+ bool bind(IOBufferMemoryDescriptor *m) {if(bindHook)bindHook();backing=m;m->retain();return true;}
  void release() {if(backing){backing->complete();backing->release();}delete this;}
 };
 '''
 EXTRA = r'''
-constexpr int kIOReturnNotReady=6,kIOReturnTimeout=7,kIOReturnUnsupported=8,kIOReturnNotOpen=9;
+constexpr int kIOReturnNotReady=7,kIOReturnTimeout=8,kIOReturnUnsupported=9;
 static bool available=true;
 static int timeRc,statusRc;
 static uint64_t gpuTicks=0xabcdef0123456789ULL,gpuFaults=7,gpuSuspends=3;
@@ -374,6 +375,33 @@ int main() {
   assert(!call(a2,2,&al,&o3));
   assert(!call(a2,4,&fr2,nullptr) && !a1.clientClose() && !a2.clientClose());
  }
+ // Wave 2 lockSplitEnabled=1: BoAlloc/BoImport/BoFree/Submit/clientClose and regression test for valid==true && !live_ (no double complete)
+ {
+  lockSplitEnabled=1;
+  Client w; w.live_=true;
+  NativeAdrenoAbiBoAlloc wa{65536,12,0}; NativeAdrenoAbiBoAllocReply wOut{};
+  assert(!call(w,2,&wa,&wOut) && w.wired_==65536 && !w.inflightUnlocked_ && lockDepth==0);
+  Client::Bo *wb=w.find(wOut.handle); assert(wb && !wb->pendingAlloc && !wb->dropping);
+  wb->iova=0x20100000;
+  NativeAdrenoAbiSubmit sub{}; sub.buffer_count=1; sub.buffers[0]={wOut.handle,0x20100000,4096};
+  NativeAdrenoAbiSubmitReply sr{}; submitRc=0; submitBusy=1; eventWaits=0; eventWoke=true;
+  assert(!call(w,5,&sub,&sr) && eventWaits==1 && lastWaitDepth==0 && !w.inflightUnlocked_ && lockDepth==0);
+  submitBusy=0;
+  NativeAdrenoAbiBoImport wimp{0x100000,16384}; NativeAdrenoAbiBoAllocReply wiOut{};
+  assert(!call(w,16,&wimp,&wiOut) && w.liveImports_==1 && !w.inflightUnlocked_ && lockDepth==0);
+  NativeAdrenoAbiBoFree wf1{wOut.handle}, wf2{wiOut.handle};
+  assert(!call(w,4,&wf1,nullptr) && !call(w,4,&wf2,nullptr) && !w.wired_ && !w.liveImports_ && !w.inflightUnlocked_);
+  // Regression test: allocate() succeeds view->bind() (valid==true), but clientClose kills live_ while unlocked -> single complete() only!
+  static Client *gKillClient = nullptr;
+  gKillClient = &w;
+  bindHook = []() { gKillClient->live_ = false; };
+  unsigned cBefore = completes;
+  assert(call(w,2,&wa,&wOut) == kIOReturnNotOpen);
+  bindHook = nullptr; gKillClient = nullptr;
+  assert(completes == cBefore + 1 && !descriptors && !w.wired_ && !w.liveBos_ && !w.inflightUnlocked_ && lockDepth==0);
+  w.live_=true; assert(!w.clientClose() && !w.vm_);
+  lockSplitEnabled=0;
+ }
  assert(bbWaits==0 && bbWaitPeaks>=1);
  puts("PASS: actual methods 7/8 dispatch/errors/lengths, 1024 BO allocation/refusal/reuse/close, handle index after churn, 128-IB and legacy 416-byte submit records, shared wired quota, metadata refusal and CPU leases, cached-coherent BOs, M9 lazy VM & Class 1 quotas");
 }
@@ -425,7 +453,7 @@ def main():
  task_t task_=7;struct fuxi_gpu_vm *vm_=nullptr;char procName_[32]={};
  uint64_t nextHandle_=1,wired_=0,lastFence_=0,firstFence_=0,submitAt_[16]={};
  uint32_t nextToken_=1;bool queues_[8]={true};
- int *lock_=&clientLock;bool live_=true;int pid_=0;
+ int *lock_=&clientLock;unsigned inflightUnlocked_=0;bool live_=true,closing_=false;int pid_=0;
  void terminate(){} void result(){}
  '''+set_class+ensure_vm+find+wait+''.join(host.method(source, n) for n in ('allocate', 'importHost', 'drop', 'run'))+memory+close+external+TEST
     with tempfile.TemporaryDirectory() as tmp:

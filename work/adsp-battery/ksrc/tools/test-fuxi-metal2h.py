@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def main():
     client=(ROOT/'xnu/fuxi-adreno/FuxiAdrenoUserClient.cpp').read_text()
-    view=client[client.index('class FuxiAdrenoBoView'):client.index('\nstatic IOLock')]
+    view=client[client.index('class FuxiAdrenoBoView'):client.index('\nOSDefineMetaClassAndStructors(FuxiAdrenoBoView')] + '\nOSDefineMetaClassAndStructors(FuxiAdrenoBoView,IOSubMemoryDescriptor)\n'
     drop=client[client.index(' IOReturn drop('):client.index(' IOReturn allocate(')]
     lookup=client[client.index(' IOReturn clientMemoryForType('):client.index(' IOReturn clientClose(')].replace(' override','')
     assert 'kIOMemoryTypePhysical' not in client and 'IOAddressRange' not in client
@@ -23,8 +23,9 @@ def main():
 #define OSDefineMetaClassAndStructors(x,y)
 using IOReturn=int;using IOOptionBits=unsigned;using UInt32=unsigned;
 constexpr int kIOReturnSuccess=0,kIOReturnBusy=1,kIOReturnIOError=2,kIOReturnBadArgument=3,kIOReturnNotFound=4;
-constexpr unsigned kIODirectionNone=0,kIODirectionInOut=3,kIOMapAnywhere=1,kIOMapWriteCombineCache=2;
+constexpr unsigned kIODirectionNone=0,kIODirectionInOut=3,kIOMapAnywhere=1,kIOMapWriteCombineCache=2,kIOMapDefaultCache=0;
 static unsigned freed,completed,unmaps;static bool failBind,failDrain;
+struct fuxi_gpu_vm;
 struct IOMemoryDescriptor {
  unsigned refs=1;virtual ~IOMemoryDescriptor()=default;
  void retain() {++refs;} void release() {assert(refs);if(!--refs){free();delete this;}}
@@ -44,16 +45,26 @@ struct IOSubMemoryDescriptor: IOMemoryDescriptor {
  }
  void free() override {if(parent)parent->release();}
 };
-static void IOLockLock(int) {} static void IOLockUnlock(int) {}
+static void IOLockLock(int *) {} static void IOLockUnlock(int *) {}
+static void IOLog(const char *,...) {}
 static void abiTrace(const char *,int,int) {}
+static void cboStat(int,uint64_t) {}
 static int fuxi_gpu_abi_unmap(uint64_t,uint64_t) {++unmaps;return failDrain?1:0;}
+static int fuxi_gpu_abi_vm_unmap(struct fuxi_gpu_vm *,uint64_t va,uint64_t bytes) {return fuxi_gpu_abi_unmap(va,bytes);}
+static void fuxi_gpu_abi_vm_release_quota(struct fuxi_gpu_vm *,uint32_t,uint64_t,uint32_t) {}
 struct IOMemoryMap {int wireRange(unsigned,uint64_t,uint64_t){assert(false);return 1;}void release(){assert(false);}};
 '''+view+r'''
 struct Client {
  struct Bo {IOBufferMemoryDescriptor *memory;FuxiAdrenoBoView *view;
  uint64_t handle,bytes,allocated,iova;unsigned token,leases;
- IOMemoryDescriptor *importMemory=nullptr;IOMemoryMap *importMap=nullptr;} bos_[1]={};
- bool live_=true;int lock_=0,pid_=78;uint64_t wired_=65536;
+ IOMemoryDescriptor *importMemory=nullptr;IOMemoryMap *importMap=nullptr;
+ bool cached=false;} bos_[1]={};
+ struct fuxi_gpu_vm *vm_=nullptr;
+ unsigned inflightUnlocked_=0;
+ bool live_=true;int lockStorage_=0;int *lock_=&lockStorage_;int pid_=78;uint64_t wired_=65536;
+ void enterUnlocked() {++inflightUnlocked_;}
+ void leaveUnlocked() {if(inflightUnlocked_)--inflightUnlocked_;}
+ void unbound(Bo &) {}
 '''+drop+lookup+r'''
 };
 int main() {
@@ -71,7 +82,7 @@ int main() {
   assert(c.clientMemoryForType(8,&options,&again)==kIOReturnNotFound && !again);
   failDrain=true;assert(c.drop(c.bos_[0])==kIOReturnBusy && c.wired_==65536 && mem->prepared);failDrain=false;
   if(!retained)map->release();
-  assert(c.drop(c.bos_[0])==0 && !c.wired_);
+  assert(c.drop(c.bos_[0],retained==1)==0 && !c.wired_ && !c.inflightUnlocked_);
   assert(completed==retained+(!retained) && freed==completed);
   if(retained){assert(mem->prepared && mem->refs==2);map->release();}
   assert(completed==retained+1 && freed==completed);
@@ -79,7 +90,7 @@ int main() {
  failBind=true;auto *mem=new IOBufferMemoryDescriptor;auto *view=new FuxiAdrenoBoView;
  assert(!view->bind(mem));view->release();assert(mem->refs==1);mem->complete();mem->release();
  assert(freed==3 && completed==3 && unmaps==4);
- puts("PASS: real subdescriptor/cpu-map/drop; same pager and unmap identity, NC flags, retained mapping lifetime, failed bind/drain");
+ puts("PASS: real subdescriptor/cpu-map/drop; same pager and unmap identity, NC flags, retained mapping lifetime, failed bind/drain and unlock teardown");
 }
 '''
     with tempfile.TemporaryDirectory() as tmp:

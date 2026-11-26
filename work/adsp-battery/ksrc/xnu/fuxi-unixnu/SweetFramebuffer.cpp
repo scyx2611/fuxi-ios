@@ -69,6 +69,9 @@ extern "C" { int sweet_fb_display_off; }        /* read by bsd/dev/fuxi_touch.c 
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/system.h>
 #include <pexpert/pexpert.h>
+#if defined(FUXI)
+#include <pexpert/device_tree.h>
+#endif
 #include <kern/clock.h>
 #include <kern/thread_call.h>
 #include <sys/proc.h>
@@ -530,6 +533,36 @@ static void sweet_fb_te_configure(AppleCLCD *fb)
  IOLog("SWEET FB: vsync TE requested offset_us=%u\n", offset);
 }
 
+/* Wave 2 opt-in (fuxinopoll=0 default off, or ADT /chosen u32 "fuxi,nopoll"):
+ * - 0: legacy continuous ~515 us (period/16) polling.
+ * - 1: smart idle TE-bracket suppression (keep period/16 during any active/pending present
+ *      or unlocked/converging TE (samples < 4) so 0.7 ms GPU copy completePresent() has zero
+ *      added delay and IIR period converges first; when idle and TE-locked with samples >= 4,
+ *      jump between TE edges while bracketing each edge within <= period/5 via period/8 step).
+ * - 8..16 (2..7 clamped to 8): explicit safe idle divisor <= period/8 (< period/4 limit). */
+static uint32_t sweet_fb_nopoll_mode(void)
+{
+ static uint32_t cached = ~0u;
+ if (cached != ~0u) return cached;
+ uint32_t val = 0;
+ if (!PE_parse_boot_argn("fuxinopoll", &val, sizeof(val))) {
+  DTEntry chosen;
+  const void *prop = NULL;
+  unsigned bytes = 0;
+  if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+      SecureDTGetProperty(chosen, "fuxi,nopoll", &prop, &bytes) == kSuccess &&
+      prop && bytes == sizeof(val)) {
+   memcpy(&val, prop, sizeof(val));
+  }
+ }
+ if (val == 1) cached = 1;
+ else if (val >= 2 && val <= 7) cached = 8;
+ else if (val >= 8 && val <= 16) cached = val;
+ else cached = 0;
+ if (cached) IOLog("SWEET FB: idle TE poll suppress mode=%u (fuxinopoll)\n", cached);
+ return cached;
+}
+
 bool AppleCLCD::teVsyncTick(uint64_t &now, bool fallback)
 {
  bool wasValid = fTeValid;
@@ -668,6 +701,7 @@ AppleCLCD::start(IOService *provider)
 		    fFit, fuxi_fit_h(fFit), fuxi_fit_y0(fFit), fLogicalW, fLogicalH);
 	}
 	sweet_fb_te_configure(this);
+	if (fVsyncTE) (void)sweet_fb_nopoll_mode();
 #endif
 	uint32_t timerOptions = sweet_fb_timer_options();
 	if (timerOptions == kIOTimerEventSourceOptionsPriorityHigh)
@@ -818,13 +852,38 @@ sweet_fb_rearm(AppleCLCD *fb, IOTimerEventSource *sender)
       (fb->fPowerOff ? fb->fFadeStep == 0 : fb->fDirty));
   /* fuxigpuncimport bit 2048: poll the in-flight scanout copy at 1/64 tick so its surface lease is released at retire. */
   uint64_t poll = now + fb->fTickAbs/((fb->fGpuPending && fuxi_gpu_abi_pace()) || ((fb->fPublicationPending || fuxi_gpu_scanout_pending()) && fuxi_gpu_abi_start()) ? 64 : 16);
+  uint32_t noPollMode = sweet_fb_nopoll_mode();
   if (fb->fVsyncTE) {
    if (fb->fTeValid) {
     deadline = fb->fTeNext;
-    poll = now + fb->fTe.period/16;
+    uint64_t minPoll = fb->fTe.period / 16;
+    if (!minPoll) minPoll = 1;
+    poll = now + minPoll;
+    if (noPollMode && !active && fb->fTe.samples >= 2) {
+     if (noPollMode == 1) {
+      if (fb->fTe.samples >= 4) {
+       uint64_t margin = fb->fTe.period / 5;
+       uint64_t bracketStep = fb->fTe.period / 8;
+       if (!bracketStep) bracketStep = minPoll;
+       uint64_t nextEdge = fb->fTe.edge + fb->fTe.period;
+       if (nextEdge > now + margin) {
+        uint64_t preEdge = nextEdge - margin;
+        poll = preEdge > now + minPoll ? preEdge : (now + minPoll);
+       } else if (nextEdge + margin > now) {
+        poll = now + bracketStep;
+       } else {
+        poll = now + minPoll;
+       }
+      }
+     } else {
+      uint64_t divStep = fb->fTe.period / noPollMode;
+      poll = now + (divStep > minPoll ? divStep : minPoll);
+     }
+    }
    }
-   /* Keep observing TE even with subscribers but no dirty swap. */
+   /* Keep observing TE even with subscribers but no dirty swap; never arm a past deadline. */
    if (poll < deadline || deadline <= now) deadline = poll;
+   if (deadline <= now) deadline = now + (fb->fTeValid && fb->fTe.period >= 16 ? fb->fTe.period / 16 : 1);
   } else if (active && poll < deadline) deadline = poll;
   fb->fTickArmed = true;
   sender->wakeAtTime(kIOTimeOptionsWithLeeway, deadline, 0);

@@ -2572,7 +2572,7 @@
 + } else te->edge = raw;
 + te->raw_edge = raw;
 + te->raw_frame = frame;
-+ if (te->samples < 2) te->samples++;
++ if (te->samples < 8) te->samples++;
 + return te->samples >= 2;
 +}
 +/* Arm the per-START gates. Called with the current read pointer value. */
@@ -4466,7 +4466,7 @@
 +SOFTWARE.
 --- a/bsd/dev/fuxi_gpu_abi_backend.inc
 +++ b/bsd/dev/fuxi_gpu_abi_backend.inc
-@@ -0,0 +1,2194 @@
+@@ -0,0 +1,2338 @@
 +/* Built into fuxi_adreno.c, with access to its proven SMMU/ring helpers.
 + * Multi-client M9 isolation: per-process dynamic fuxi_gpu_vm roots/ASIDs,
 + * two-class scheduling (Class 0 compositor/root, Class 1 foreground apps),
@@ -5203,7 +5203,8 @@
 +  if (i>=room || fuxi_gpu_access(m->source+(start-m->iova)+4*i,&v,0,0)) { w[i]=0xdeadbeef; bad++; } else w[i]=(uint32_t)v;
 + }
 + printf("FUXI GPU STALL: %s at %#llx from %#llx map %#llx seq %u/%u unread %u: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
-+     tag,(unsigned long long)at,(unsigned long long)start,(unsigned long long)m->iova,m->seq,fg_abi_submit_map_seq,bad,
++     tag,(unsigned long long)at,(unsigned long long)start,(unsigned long long)m->iova,m->seq,
++     fg_active_vm ? fg_active_vm->submit_map_seq : fg_abi_submit_map_seq,bad,
 +     w[0],w[1],w[2],w[3],w[4],w[5],w[6],w[7],w[8],w[9],w[10],w[11],w[12],w[13],w[14],w[15]);
 +}
 +static void fg_abi_snapshot(const char *why)
@@ -5225,6 +5226,38 @@
 + fg_abi_peek("BR-IB1",br,br-48);
 + fg_abi_peek("BV-IB1",bv1,bv1-48);
 + fg_abi_peek("BV-IB2",bv2,bv2-48);
++ const uint64_t br2_base = (uint64_t)v[15]<<32 | v[14];
++ if (br2_base) {
++  fg_abi_peek("BR-IB2-HEAD", br2_base, br2_base);
++  const struct fg_abi_map_rec *m1 = fg_abi_map_at(ib1);
++  if (m1 && ib1 >= m1->iova && m1->source && reached >= 4u) {
++   uint32_t start_dw = reached > 512u ? reached - 512u : 0u;
++   uint32_t end_dw = reached - 4u;
++   uint32_t ib2_init = 0;
++   const uint32_t ib_pkt = fg_abi_pkt7(0x3f, 3);
++   if (end_dw >= start_dw) {
++    for (uint32_t i = end_dw; ; i--) {
++     uint64_t off = (ib1 - m1->iova) + 4ull * i;
++     uint64_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
++     if (off + 16 <= m1->bytes &&
++         !fuxi_gpu_access(m1->source + off, &w0, 0, 0) &&
++         (uint32_t)w0 == ib_pkt &&
++         !fuxi_gpu_access(m1->source + off + 4, &w1, 0, 0) && (uint32_t)w1 == v[14] &&
++         !fuxi_gpu_access(m1->source + off + 8, &w2, 0, 0) && (uint32_t)w2 == v[15] &&
++         !fuxi_gpu_access(m1->source + off + 12, &w3, 0, 0)) {
++      ib2_init = (uint32_t)w3 & 0xfffffu;
++      break;
++     }
++     if (i == start_dw) break;
++    }
++   }
++   if (ib2_init >= v[16] && ib2_init > 0) {
++    uint32_t ib2_reached = ib2_init - v[16];
++    uint64_t br2_at = br2_base + 4ull * (ib2_reached ? ib2_reached - 1 : 0);
++    if (br2_at > br2_base) fg_abi_peek("BR-IB2-AT", br2_at, br2_at - 48);
++   }
++  }
++ }
 +}
 +static unsigned fg_abi_hang_dumped;
 +static void fg_abi_hang_dump_for(const char *why, const struct fuxi_gpu_vm *vm)
@@ -5275,16 +5308,38 @@
 +{
 + fg_irq_quiesce_soft();
 + unsigned cb = g_cb(g3_bank);
++ const char *fail_step = NULL;
++ uint32_t fsr_pre = g3_sr(cb + 0x58);
++ uint32_t cp_pre = g3_gr(0x823);
++ uint32_t rbbm_pre = g3_gr(0x210);
++ uint32_t fsr_rst = 0, cp_rst = 0, rbbm_rst = 0;
++ uint32_t fsr_sqe = 0, cp_sqe = 0, rbbm_sqe = 0;
++ unsigned rbbm_halt_ack = 0;
++
++ if (fg_access_failed) { fail_step = "pre-mmio"; goto fail; }
 +
 + /* Unblock any stalled SMMU context bank transaction (FSR.SS) BEFORE GBIF bus drain,
 +  * otherwise AXI stall keeps 0x3c46 drain acks blocked until timeout. */
-+ uint32_t fsr = g3_sr(cb + 0x58);
-+ if (fg_access_failed) return 0;
-+ if (fsr & (1u << 30)) {
-+  if (!g3_sw(cb + 0x08, 1)) return 0; /* CB_RESUME terminate */
++ if (fsr_pre & (1u << 30)) {
++  if (!g3_sw(cb + 0x08, 1)) { fail_step = "cb-resume-pre"; goto fail; }
 + }
-+ if (fsr && !g3_sw(cb + 0x58, fsr)) return 0;
-+ if (guilty_vm && fg_abi_tlb_asid(guilty_vm->asid)) return 0;
++ if (fsr_pre && !g3_sw(cb + 0x58, fsr_pre)) { fail_step = "fsr-clear-pre"; goto fail; }
++ /* Halt SQE before draining GBIF so no new CP fetches issue during bus quiesce. */
++ if (!g3_gw(G3_SQE_CNTL, 3)) { fail_step = "sqe-halt"; goto fail; }
++ if (guilty_vm && fg_abi_tlb_asid(guilty_vm->asid)) { fail_step = "tlb-guilty"; goto fail; }
++
++ /* Halt RBBM->GBIF (0x16) and GBIF client/arbiter (0x3c45); keep halted across SW reset
++  * and until after CB2 switches to G3_PT so residual UCHE/SP fetches cannot fault on ASID 2. */
++ {
++  uint64_t hv = 1;
++  if (fg_access(GPU_REG_BASE + 0x16*4, &hv, 1, 0)) { fail_step = "rbbm-halt-wr"; goto fail; }
++  for (unsigned i = 0; i < 1000; i++) {
++   hv = 0;
++   if (fg_access(GPU_REG_BASE + 0x17*4, &hv, 0, 0)) { fail_step = "rbbm-halt-rd"; goto fail; }
++   if (hv & 1u) { rbbm_halt_ack = 1; break; }
++   delay(1);
++  }
++ }
 +
 + uint64_t v = 1;
 + int good = !fg_access(GPU_REG_BASE + 0x3c45*4, &v, 1, 0);
@@ -5302,38 +5357,80 @@
 +   if (fg_access(GPU_REG_BASE + 0x3c45*4, &v, 1, 0)) good = 0;
 +  }
 + }
-+ v = 0;
-+ if (!good || fg_access(GPU_REG_BASE + 0x3c45*4, &v, 1, 0)) return 0;
++ if (!good) { fail_step = "gbif-halt"; goto fail; }
++ (void)g3_gr(0x3c46);
++ (void)g3_gr(0x17);
++ __asm__ volatile("dsb sy" ::: "memory");
++ if (fg_access_failed) { fail_step = "halt-barrier"; goto fail; }
 +
-+ /* Switch CB2 to safe G3_PT before pulsing GPU SW reset. */
-+ if (!fg_abi_switch_vm(NULL)) return 0;
-+
-+ /* Pulse RBBM_SW_RESET (never leave S2CR faulted). */
++ /* Pulse RBBM_SW_RESET while GBIF_HALT stays asserted and before switching TTBR to G3_PT. */
 + v = 1;
-+ if (fg_access(GPU_REG_BASE + 0x43*4, &v, 1, 0)) return 0;
++ if (fg_access(GPU_REG_BASE + 0x43*4, &v, 1, 0)) { fail_step = "sw-reset-set"; goto fail; }
 + delay(100);
 + v = 0;
-+ if (fg_access(GPU_REG_BASE + 0x43*4, &v, 1, 0)) return 0;
++ if (fg_access(GPU_REG_BASE + 0x43*4, &v, 1, 0)) { fail_step = "sw-reset-clr"; goto fail; }
++ (void)g3_gr(0x43);
 + delay(20);
 + if (fg_suspends != UINT64_MAX) ++fg_suspends;
 +
-+ /* Re-program CP/UCHE/RB registers and restart SQE on G3_PT. */
-+ if (!g3_hw_init()) return 0;
-+ g3_wptr = 0;
-+ g_zero(G3_PTR_PA, 16);
-+ if (!g3_gw(0x807, 0) || !g3_gw(G3_SQE_CNTL, 1)) return 0;
-+ delay(50);
-+ if (fg_access_failed || g3_faulted()) return 0;
++ fsr_rst = g3_sr(cb + 0x58);
++ cp_rst = g3_gr(0x823);
++ rbbm_rst = g3_gr(0x210);
++ if (fg_access_failed) { fail_step = "post-reset-rd"; goto fail; }
++ if (fsr_rst & (1u << 30)) {
++  if (!g3_sw(cb + 0x08, 1)) { fail_step = "cb-resume-rst"; goto fail; }
++ }
++ if (fsr_rst && !g3_sw(cb + 0x58, fsr_rst)) { fail_step = "fsr-clear-rst"; goto fail; }
++ {
++  uint32_t gfsr_rst = g3_sr(SMMU_GFSR);
++  if (fg_access_failed) { fail_step = "gfsr-rd"; goto fail; }
++  if (gfsr_rst && !g3_sw(SMMU_GFSR, gfsr_rst)) { fail_step = "gfsr-clr"; goto fail; }
++ }
++ if (!g3_gw(0x37, 0xffffffffu)) { fail_step = "int-clear-rst"; goto fail; }
 +
++ /* GPU core is reset and GBIF is still halted: switch CB2 to safe G3_PT (ASID 2). */
++ if (!fg_abi_switch_vm(NULL)) { fail_step = "switch-g3pt"; goto fail; }
++ {
++  uint32_t fsr_pt = g3_sr(cb + 0x58);
++  if (fg_access_failed) { fail_step = "fsr-pt-rd"; goto fail; }
++  if (fsr_pt & G3_FSR_MASK) {
++   if (fsr_pt & (1u << 30)) (void)g3_sw(cb + 0x08, 1);
++   if (!g3_sw(cb + 0x58, fsr_pt)) { fail_step = "fsr-pt-clr"; goto fail; }
++  }
++ }
++
++ /* Verify/reload SQE firmware and zero ring + RPTR shadow before g3_hw_init() clears halts. */
++ if (g3_sqe()) { fail_step = "sqe-reload"; goto fail; }
++ g3_wptr = 0;
++ g_zero(G3_RING_PA, 32768);
++ g_zero(G3_PTR_PA, 16);
++
++ /* Re-program CP/UCHE/RB registers (releases 0x3c45/0x16 halts with readbacks). */
++ if (!g3_hw_init()) { fail_step = "hw-init"; goto fail; }
++ if (!g3_gw(0x37, 0xffffffffu)) { fail_step = "int-clear-hw"; goto fail; }
++ if (g3_verify_pointers()) { fail_step = "verify-ptrs"; goto fail; }
++
++ /* Match g3_cp_start(): load CP_THREAD_CONTROL + CP_ME_INIT into ring BEFORE G3_SQE_CNTL=1. */
++ g3_wptr = 0;
 + g3_emit(g3_pkt7(0x17, 1)); g3_emit(1u << 27);
 + g3_emit(g3_pkt7(0x48, 4)); g3_emit(0x4b); g3_emit(3); g3_emit(0x20000000); g3_emit(2);
 + __asm__ volatile("dsb sy" ::: "memory");
-+ if (!g3_gw(0x807, g3_wptr)) return 0;
-+ if (g3_wait(0)) return 0;
++ if (fg_access_failed || g3_faulted()) { fail_step = "pre-sqe-fault"; goto fail; }
++ if (!g3_gw(0x807, 0)) { fail_step = "wptr0"; goto fail; }
++ __asm__ volatile("dsb sy" ::: "memory");
++ if (!g3_gw(G3_SQE_CNTL, 1)) { fail_step = "sqe-cntl"; goto fail; }
++ delay(100);
++ fsr_sqe = g3_sr(cb + 0x58);
++ cp_sqe = g3_gr(0x823);
++ rbbm_sqe = g3_gr(0x210);
++ if (fg_access_failed || g3_faulted()) { fail_step = "sqe-start-fault"; goto fail; }
++
++ if (!g3_gw(0x807, g3_wptr)) { fail_step = "me-init-wptr"; goto fail; }
++ if (g3_wait(0)) { fail_step = "me-init-wait"; goto fail; }
 +
 + /* Re-apply SM8550 UBWC NC settings and CMP_DBG bit 11. */
 + uint32_t cmp = g3_gr(G4_RB_CMP_DBG);
-+ if (fg_access_failed || !g3_gw(G4_RB_CMP_DBG, cmp | (1u<<11))) return 0;
++ if (fg_access_failed || !g3_gw(G4_RB_CMP_DBG, cmp | (1u<<11))) { fail_step = "cmp-dbg"; goto fail; }
 + static const struct { unsigned reg; uint32_t val; } nc_writes[] = {
 +  {G4_RB_NC, 0x816}, {G4_TPL1_NC, 6}, {G4_SP_NC, 0x26},
 +  {G3_APERTURE_HOST, 1u<<12}, {G4_GRAS_NC, 0x60},
@@ -5341,7 +5438,7 @@
 +  {G3_APERTURE_HOST, 0},
 + };
 + for (unsigned i = 0; i < sizeof(nc_writes)/sizeof(nc_writes[0]); i++)
-+  if (!g3_gw(nc_writes[i].reg, nc_writes[i].val)) return 0;
++  if (!g3_gw(nc_writes[i].reg, nc_writes[i].val)) { fail_step = "nc-writes"; goto fail; }
 +
 + /* Self-test CP_MEM_WRITE to unused scratch slot G3_FENCE_PA + 8. */
 + uint32_t sentinel = 0x5a730001u ^ (guilty_vm ? guilty_vm->seq : 0u);
@@ -5350,21 +5447,34 @@
 + g3_emit(g3_pkt7(0x26, 0));
 + g3_wptr &= 8191;
 + __asm__ volatile("dsb sy" ::: "memory");
-+ if (!g3_gw(0x807, g3_wptr)) return 0;
++ if (!g3_gw(0x807, g3_wptr)) { fail_step = "selftest-wptr"; goto fail; }
 + unsigned ok = 0;
 + for (unsigned i = 0; i < 2000; i++) {
-+  if (g3_read(G3_FENCE_PA + 8) == sentinel && g3_gr(0x806) == g3_wptr && !(g3_gr(0x210) & ~1u)) { ok = 1; break; }
-+  if (fg_access_failed || g3_faulted()) return 0;
++  if (g3_read(G3_FENCE_PA + 8) == sentinel && g3_gr(0x806) == g3_wptr && !(g3_gr(0x210) & ~1u) &&
++      !fg_access_failed && !g3_faulted()) { ok = 1; break; }
++  if (fg_access_failed || g3_faulted()) { fail_step = "selftest-fault"; goto fail; }
 +  delay(5);
 + }
-+ if (!ok) return 0;
++ if (!ok || fg_access_failed || g3_faulted()) {
++  if (!fail_step) fail_step = (fg_access_failed || g3_faulted()) ? "selftest-fault" : "selftest-timeout";
++  goto fail;
++ }
 +
 + /* Restore backboardd VM (if live) and fence IRQ if previously armed. */
 + if (fg_bb_vm && fg_bb_vm->in_use && !fg_bb_vm->poisoned) {
-+  if (!fg_abi_switch_vm(fg_bb_vm)) return 0;
++  if (!fg_abi_switch_vm(fg_bb_vm)) { fail_step = "restore-bb-vm"; goto fail; }
 + }
-+ if (!fg_irq_rearm_soft()) return 0;
++ if (!fg_irq_rearm_soft()) { fail_step = "irq-rearm"; goto fail; }
++ if (fg_soft_recover_count <= 8) {
++  printf("FUXI GPU RECOVER: hw_ok rbbm_halt=%u pre(fsr=%#x cp=%#x rbbm=%#x) rst(fsr=%#x cp=%#x rbbm=%#x) sqe(fsr=%#x cp=%#x rbbm=%#x)\n",
++      rbbm_halt_ack, fsr_pre, cp_pre, rbbm_pre, fsr_rst, cp_rst, rbbm_rst, fsr_sqe, cp_sqe, rbbm_sqe);
++ }
 + return 1;
++fail:
++ fg_irq_quiesce();
++ printf("FUXI GPU RECOVER: hw_fail step=%s rbbm_halt=%u pre(fsr=%#x cp=%#x rbbm=%#x) rst(fsr=%#x cp=%#x rbbm=%#x) sqe(fsr=%#x cp=%#x rbbm=%#x) acc=%u\n",
++     fail_step ? fail_step : "unknown", rbbm_halt_ack, fsr_pre, cp_pre, rbbm_pre, fsr_rst, cp_rst, rbbm_rst, fsr_sqe, cp_sqe, rbbm_sqe, fg_access_failed);
++ return 0;
 +}
 +#define FG_SOFT_RECOVER_HW(vm) fg_soft_recover_hw(vm)
 +#else
@@ -5641,7 +5751,10 @@
 + if (rsr("cntpct_el0") >= fg_client_deadline) {
 +  run_vm->timed_out = 1;
 +  if (run_vm == fg_default_vm) fg_abi_timed_out = 1;
-+  int rc = fg_abi_guilty_fault(run_vm, run_vm->client_class == FG_CLASS_APP ? "client fence deadline (40 ms)" : "client fence deadline (100 ms)");
++  char why_buf[48];
++  snprintf(why_buf, sizeof(why_buf), "client fence deadline (%u ms)",
++      run_vm->client_class == FG_CLASS_APP ? fg_class1_quantum_ms : 100u);
++  int rc = fg_abi_guilty_fault(run_vm, why_buf);
 +  if (vm && vm != run_vm && !vm->poisoned && fuxi_gpu_ready() && !fg_abi_poisoned) return 0;
 +  return rc;
 + }
@@ -5666,6 +5779,7 @@
 + }
 +}
 +
++static unsigned fg_vm_create_refused_logs;
 +static int fg_abi_vm_create_locked(unsigned client_class, int pid, const char *name, struct fuxi_gpu_vm **vm_out)
 +{
 + if (!fg_abi_live || !fuxi_gpu_ready() || fg_abi_poisoned) return -1;
@@ -5678,16 +5792,42 @@
 +    if (pid > 0 && fg_vm_pool[i].pid == pid) pid_cnt++;
 +   }
 +  }
-+  if (app_cnt >= FG_ABI_MAX_CLASS1_CLIENTS) return -1;
-+  if (pid > 0 && pid_cnt >= FG_ABI_MAX_CLASS1_VMS_PER_PID) return -1;
++  if (app_cnt >= FG_ABI_MAX_CLASS1_CLIENTS) {
++   if (fg_vm_create_refused_logs < 16) {
++    fg_vm_create_refused_logs++;
++    printf("FUXI GPU ABI: vm_create refused reason=max-class1-clients pid=%d name=%s app_cnt=%u\n",
++        pid, name ? name : "", app_cnt);
++   }
++   return -1;
++  }
++  if (pid > 0 && pid_cnt >= FG_ABI_MAX_CLASS1_VMS_PER_PID) {
++   if (fg_vm_create_refused_logs < 16) {
++    fg_vm_create_refused_logs++;
++    printf("FUXI GPU ABI: vm_create refused reason=max-pid-vms pid=%d name=%s pid_cnt=%u\n",
++        pid, name ? name : "", pid_cnt);
++   }
++   return -1;
++  }
 + }
 + int slot = -1;
 + for (unsigned i = 0; i < FG_ABI_MAX_VMS; i++) {
 +  if (!fg_vm_pool[i].in_use) { slot = (int)i; break; }
 + }
-+ if (slot < 0) return -1;
++ if (slot < 0) {
++  if (fg_vm_create_refused_logs < 16) {
++   fg_vm_create_refused_logs++;
++   printf("FUXI GPU ABI: vm_create refused reason=no-vm-slot pid=%d name=%s\n", pid, name ? name : "");
++  }
++  return -1;
++ }
 + uint32_t asid = fg_asid_alloc();
-+ if (!asid) return -1;
++ if (!asid) {
++  if (fg_vm_create_refused_logs < 16) {
++   fg_vm_create_refused_logs++;
++   printf("FUXI GPU ABI: vm_create refused reason=no-asid pid=%d name=%s\n", pid, name ? name : "");
++  }
++  return -1;
++ }
 + struct fuxi_gpu_vm *vm = &fg_vm_pool[slot];
 + memset(vm, 0, sizeof(*vm));
 + vm->id = (uint32_t)slot;
@@ -5823,7 +5963,11 @@
 +#ifdef FUXI_GPU_XNU
 + {
 +  unsigned qms = 0;
-+  if (PE_parse_boot_argn("fuxigpuquantum", &qms, sizeof(qms)) && qms >= 10 && qms <= 100) fg_class1_quantum_ms = qms;
++  if (PE_parse_boot_argn("fuxigpuquantum", &qms, sizeof(qms)) && qms >= 10 && qms <= 100) {
++   fg_class1_quantum_ms = qms;
++   if (fg_class1_quantum_ms != 40u)
++    printf("FUXI GPU ABI: Class 1 quantum override=%u ms (fuxigpuquantum)\n", fg_class1_quantum_ms);
++  }
 +  DTEntry chosen;
 +  void const *prop = NULL;
 +  unsigned int bytes = 0;
@@ -6663,7 +6807,7 @@
 +}
 --- a/bsd/dev/fuxi_gpu_irq.inc
 +++ b/bsd/dev/fuxi_gpu_irq.inc
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,230 @@
 +/* GPU fence interrupt: WaitFence sleeps until the GPU says a fence landed (opt-in, fuxigpuncimport bit 26 = 67108864, default off).
 + * Adapted from UniXNU-sheng package/GpuPowerProbe.cpp gpuIrq/ringIdle/irqAndTimer (b0ccf61, 36ec562) and UniXNU ArmCpu
 + * armcpu_spi_attach (1951cc8), both BSD-2-Clause-Patent: Copyright (c) 2026, UniXNU contributors (LICENSE.UniXNU-sheng) and
@@ -6745,7 +6889,13 @@
 + * handler sees fg_irq_ok clear or this sees it inside and waits it out (a few MMIO accesses). */
 +static void fg_irq_quiesce(void)
 +{
-+ if (!__atomic_load_n(&fg_irq_ok, __ATOMIC_SEQ_CST)) return;
++ if (!__atomic_load_n(&fg_irq_ok, __ATOMIC_SEQ_CST)) {
++  if (__atomic_load_n(&fg_irq_state, __ATOMIC_ACQUIRE) == 1) {
++   fg_irq_dead(3);
++   fg_irq_wake();
++  }
++  return;
++ }
 + __atomic_store_n(&fg_irq_ok, 0, __ATOMIC_SEQ_CST);
 + fg_irq_dead(3);
 + for (unsigned i = 0; i < 1000000 && __atomic_load_n(&fg_irq_inside, __ATOMIC_SEQ_CST); i++) __asm__ volatile("yield");

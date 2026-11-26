@@ -33,6 +33,9 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'AudioHal')][string]$AudioBundle,
     [Parameter(Mandatory = $true, ParameterSetName = 'AudioHal')][ValidatePattern('^[a-f0-9]{64}$')][string]$AudioSha,
     [Parameter(Mandatory = $true, ParameterSetName = 'NativeMetal')][string]$NativeMetalDir,
+    [Parameter(Mandatory = $true, ParameterSetName = 'InstallApp')][string]$InstallAppDir,
+    [Parameter(Mandatory = $true, ParameterSetName = 'RemoveApp')][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.app$')][string]$RemoveAppName,
+    [Parameter(Mandatory = $true, ParameterSetName = 'RemoveApp')][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$')][string]$RemoveAppBundleId,
     [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][ValidateSet('backup', 'rootbackup', 'prepare', 'survey', 'android', 'recovery', 'ios', 'inspectreturn', 'timing', 'stocktiming', 'removeksu')][string]$DualBootCheck,
     [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][string]$RestorePoint,
     [Parameter(ParameterSetName = 'DualBoot')][string]$Candidate,
@@ -99,6 +102,11 @@ if ([bool]$TurnipHybrid -ne [bool]$TurnipSha) { throw 'Turnip and its verified S
 if ($TurnipHybrid -and $Dylib) { throw 'Stage one library per phone validation' }
 if ($TurnipHybrid -and (Get-FileHash -LiteralPath $TurnipHybrid -Algorithm SHA256).Hash.ToLowerInvariant() -ne $TurnipSha) {
     throw 'Turnip hash differs from the verified build'
+}
+if ($RemoveAppName) {
+    if ($Out -cnotmatch '^[a-z0-9-]+$') { throw 'Invalid app removal output name' }
+    if ($RemoveAppName -cnotmatch '\.app$') { throw 'RemoveAppName must end with lowercase .app' }
+    if ($RemoveAppBundleId.ToLowerInvariant().StartsWith('com.apple.')) { throw "Refusing to remove Apple bundle id: $RemoveAppBundleId" }
 }
 foreach ($path in @($phoneLock, $phoneHold, $phonePause)) {
     if (Test-Path -LiteralPath $path) { throw "Phone is reserved: $path" }
@@ -243,6 +251,22 @@ if ($NativeMetalDir) {
         --nativemetal-dir $NativeMetalDir `
         --output (Join-Path $workspace "work\statusbar-fix\$Out") }
     if ($LASTEXITCODE -ne 0) { throw 'NativeMetal staging failed' }
+    return
+}
+if ($InstallAppDir) {
+    if ($Out -cnotmatch '^[a-z0-9-]+$') { throw 'Invalid app install output name' }
+    if (-not (Test-Path -LiteralPath $InstallAppDir)) { throw "InstallAppDir not found: $InstallAppDir" }
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --install-app $InstallAppDir `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'App installation staging failed' }
+    return
+}
+if ($RemoveAppName) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --remove-app-name $RemoveAppName --remove-app-bundle-id $RemoveAppBundleId `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'App removal staging failed' }
     return
 }
 if ($Dylib) {

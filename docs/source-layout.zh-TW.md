@@ -1,4 +1,4 @@
-# 來源與目錄說明（2026-11-25）
+# 來源與目錄說明（2026-11-26）
 
 本倉庫由開發工作區去識別化匯出，收錄核心、loader、引導鏈、userland、研發紀錄庫與建置驗證工具的原始碼。三個上游樹已收進倉庫，本機建置不必再向上游下載。各上游的釘選版本、tree id、本機修改清單與去識別化紀錄都在 [`upstream/EXPORT-SOURCES.txt`](../upstream/EXPORT-SOURCES.txt)。
 
@@ -10,22 +10,22 @@
 | `ios-fuxi/` | bangprovn/ios-fuxi | `27f6a31c8b27c6f9127f9cf27092968422579ccf` | `c05b0ff0d5b4d9747ef1b9e4cc9f2a0eda963d98` |
 | `uefi-fuxi/Resources/Scripts/mkbootimg.py` | ljhhkx529/uefi-fuxi（AOSP 原檔） | `57969ab77d36a982261daef16592741ed4a1d811` | 只收這一個檔案，未修改 |
 
-每個上游樹先用一個提交原樣放進來，再用後續提交加上本機修改，所以 `git log -- ios-fuxi/` 或 `git diff <匯入提交> -- ios-fuxi/` 可以看出本機改了什麼。依 [`upstream/EXPORT-SOURCES.txt`](../upstream/EXPORT-SOURCES.txt) 最新基準，`ios-fuxi/` 的本機修改有 **14 個檔案**（loader、GPU probe、monitor 與 ADT 產生器）；`work/adsp-battery/ksrc/` 相對基底改了 **326 個檔案**。
+每個上游樹先用一個提交原樣放進來，再用後續提交加上本機修改，所以 `git log -- ios-fuxi/` 或 `git diff <匯入提交> -- ios-fuxi/` 可以看出本機改了什麼。依 [`upstream/EXPORT-SOURCES.txt`](../upstream/EXPORT-SOURCES.txt)（並經 `B-022` `ksrc a00205b` 與 `probe_0x4e` 實測核對），`ios-fuxi/` 的本機修改維持 **14 個檔案**（`shim/fuxi-probe/probe.c` SHA-256 已同步為 `a8d64c47...` 納入 `probe_0x4e`）；`work/adsp-battery/ksrc/` 相對基底異動共 **340 個檔案**（`git diff --name-only 979e2f08 HEAD` 實測，最終公開倉顯示數字以匯出腳本寫入 `upstream/EXPORT-SOURCES.txt` 為準）。
 
 ## 核心怎麼建
 
 核心不是直接從 `ksrc/` 編，而是「基底＋補丁」：
 
 1. `work/localbuild/fuxi-kernel-build.sh` 讀 `upstream/EXPORT-SOURCES.txt` 的 `kernel-base` 列，從本倉庫歷史取出 tree `73399c0c…`（zgl97/ios-fuxi `979e2f08` 的原樣內容）。
-2. 依 `.github/workflows/kernel-adsp-battery.yml` 的清單與順序，把 `patches/` 裡的 **25 份補丁**依序套上去；`-Tests` 時照 workflow 的順序穿插執行 **56 項主機測試命令**（若使用 `-Ath12k` 另加 5 項連結與 Wi-Fi 重驗命令）。`patches/` 目錄共收錄 39 份檔案（含歷史與 GPU 前期實驗補丁），日常建置流程只套用 workflow 明列的 25 份。
+2. 依 `.github/workflows/kernel-adsp-battery.yml` 的清單與順序，把 `patches/` 裡的 **29 份補丁**依序套上去；`-Tests` 時照 workflow 的順序穿插執行 **63 項主機測試命令**（若使用 `-Ath12k` 另加 5 項連結與 Wi-Fi 重驗命令）。`patches/` 目錄共收錄 **43 份**檔案（含歷史與 GPU 前期實驗補丁），日常建置流程只套用 workflow 明列的 29 份。
 3. 用 Darwin 交叉工具鏈編出 `kernel.development.fuxi`、`fuxi.adt` 等產物。
 
-`ksrc/` 是編輯用的樹。基底依 workflow 套完 25 份補丁後，與 `ksrc/` HEAD 完全一致，無差異檔案（見 `EXPORT-SOURCES.txt`）。
+`ksrc/` 是編輯用的樹。基底依 workflow 套完 29 份補丁後，與 `ksrc/` HEAD（`a00205b`）在建置路徑上完全一致，無差異檔案（見 `EXPORT-SOURCES.txt`）。
 
 改了 `ksrc/` 的驅動原始碼後：
 
-- 用 `ksrc/tools/sync-fuxi-*.py` 把改動同步進 `ksrc/xnu/patches/` 的補丁。要在 WSL 執行，Windows 的 Python 會把補丁寫成 CRLF。
-- `patches/kernel-adsp-battery.patch` 在工作區是拿 `ksrc` 自己的 git 歷史 diff 出來的；其餘子系統補丁（如 `kernel-modem-volte.patch`、`kernel-wifi-softap.patch`、`kernel-sensors-v8.patch`、`kernel-camera-imx800.patch`、`kernel-gps-gnss.patch`、`kernel-wifi-join-speed.patch`、`kernel-metal-multiclient.patch`）亦須按對應基底生成與檢核。
+- 用 `ksrc/tools/sync-fuxi-*.py` 把改動同步進 `ksrc/xnu/patches/`（共 **131** 份 `.patch`，含新增之 `0131-fuxi-aks-selectors.patch`、`0132-fuxi-der-entitlements.patch`、`0133-fuxi-user-app-noplatform.patch` 與更新之 `0080-sweet-net-trace.patch`）。要在 WSL 執行，Windows 的 Python 會把補丁寫成 CRLF。
+- `patches/kernel-adsp-battery.patch` 在工作區是拿 `ksrc` 自己的 git 歷史 diff 出來的；其餘子系統補丁（如 `kernel-modem-volte.patch`、`kernel-wifi-softap.patch`、`kernel-sensors-v8.patch`、`kernel-camera-imx800.patch`、`kernel-gps-gnss.patch`、`kernel-wifi-join-speed.patch`、`kernel-metal-multiclient.patch`、`kernel-gpu120-wave2.patch`、`kernel-m42-probe0x4e.patch`、`kernel-aks-der-noplatform.patch`、`kernel-net-trace-filter.patch`）亦須按對應基底生成與檢核。
 
 `build-kernel.ps1`、`build-sb-shape.ps1` 的 `-Harness` 預設：工作區有 `work\adsp-battery\harness` 就用它，否則用本倉庫根目錄。從本倉庫執行時不必給 `-Harness`。
 
@@ -39,14 +39,14 @@
 
 當開機參數或 ADT 屬性啟用 `fuxi,camera-dylib=1` 或 `fuxi,modem-bb != 0` 時，核心透過 `/dev/md1` 以只讀方式（`MNT_RDONLY | MNT_DONTBROWSE`）掛載於 `/Developer`，全程不改動手機磁碟上的 iOS RootFS。
 
-### B-021 日常版 Loader 與雙系統打包結構
+### B-022 日常版 Loader 與雙系統打包結構
 
-- **Loader 組裝（`work/adsp-battery/prepare-aio-loader.py`）**：於記憶體修補並擴充 `prepare-wlan-w18-loader.py`（committed HEAD）以封裝 `B-021` 全功能日常 loader：
-  - 將 ADT 大小上限由 `64 KiB`（`0x10000`）倍增至 **`128 KiB`（`0x20000`）**（`B-021` 實產 `private.adt` 為 `71,644 B`），容納 4 顆鏡頭（6 份 `.tab`）與感測器屬性；
+- **Loader 組裝（`work/adsp-battery/prepare-aio-loader.py`，`79,889 B` / SHA-256 `9eca8290...`）**：於記憶體修補並擴充 `prepare-wlan-w18-loader.py` 以封裝 `B-022` 全功能日常 loader：
+  - 將 ADT 大小上限設為 **`128 KiB`（`0x20000`）**（`B-022` 實產 `private.adt` 為 **`71,764 B`**），容納 4 顆鏡頭（6 份 `.tab`）與感測器屬性；
   - 將 `.sensor_pack`（`pack.bin`，`440,332 B`）置於 `_payload_end` 之後並 8-byte 對齊，開機時由 `stage_sensor_pack()` 複製至固定實體位址 `0xE8800000`；
-  - 支援 `--gpu-clients none`（`B-021` 依決策暫緩排除 Class 1 Apple Maps）、`--gpu-bb-recover 3`、`--wifi-ux 8191`、`--modem-gnss 3`、`--atx-fix 1`、`--rtc-persist --rtc-user 1`、`--display-fit aspect` 與 `--statusbar-width 360 --statusbar-height 86`；
-  - 啟用 `--camera-dylib` 時自動移除 `fuxi,capsrc-stub`（避免與 `/Developer/libfuxi-camera.dylib` 衝突並維持 `fuxi,inject`），同時將開機命令列嚴格控制在 `<= 607 B` 上限內（`B-021` 實產 `602 B`）。
-- **雙系統分流與常駐打包**：`work/boot-chain/build-chain.py` 與 `dualboot/build.py` 打包含 `loader-speaker.o`／`loader-audio-dma.o` 與 `.sensor_pack` 的 `slot _a` 選單映像（預設 10 秒進 Android、音量鍵選 iOS），並執行 `SAVED_FDT_REPLAY_OK` 與 `454` 項斷言檢查。
+  - 預設啟用 Wave 2 純三開關（`fuxi,gpu-locksplit=1`、`fuxi,nopoll=1`、`fuxi,gpu-irqslice=8000`），淘汰 `--gpu-hyb8-ovsh` 並納入 `BANNED_WAVE1_TOKENS` 檢查；支援 `--gpu-clients none`（`B-022` 日常維持排除 Class 1 Apple Maps）、`--gpu-bb-recover 3`、`--wifi-ux 8191`、`--modem-gnss 3`、`--atx-fix 1`、`--display-gamut sRGB`、`--rtc-persist --rtc-user 1`、`--display-fit aspect`、`--statusbar-width 360 --statusbar-height 86`，以及預設關閉的 opt-in 旗標 `--user-app-noplatform`（`0|1`）與 `--gpu-c1-bos`（`0|1024..4096`）；
+  - 預設自動從 `ios-fuxi/shim/fuxi-probe/probe.c`（`a8d64c47...`）編譯含 `probe_0x4e` `latched_base` 之探針，啟用 `--camera-dylib` 時自動移除 `fuxi,capsrc-stub`，同時將開機命令列嚴格控制在 `<= 607 B` 上限內（`B-022` 實產 **`602 B`**）。
+- **雙系統分流與常駐打包**：`work/boot-chain/build-chain.py` 與 `dualboot/build.py` 打包含 `loader-speaker.o`／`loader-audio-dma.o` 與 `.sensor_pack` 的 `slot _a` 選單映像 `menu-daily-b022-20261126`（`68,423,680 B`、PIN `3f021363...`、預設 10 秒進 Android、音量鍵選 iOS），並通過 `SAVED_FDT_REPLAY_OK`、`454` 項斷言與 `BASE_RELINK_IDENTICAL` 檢查。
 
 ## 本機建置需要的外部環境
 

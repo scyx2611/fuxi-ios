@@ -79,7 +79,13 @@ static void fg_irq_handler(void *target, void *refcon, void *nub, int source)
  * handler sees fg_irq_ok clear or this sees it inside and waits it out (a few MMIO accesses). */
 static void fg_irq_quiesce(void)
 {
- if (!__atomic_load_n(&fg_irq_ok, __ATOMIC_SEQ_CST)) return;
+ if (!__atomic_load_n(&fg_irq_ok, __ATOMIC_SEQ_CST)) {
+  if (__atomic_load_n(&fg_irq_state, __ATOMIC_ACQUIRE) == 1) {
+   fg_irq_dead(3);
+   fg_irq_wake();
+  }
+  return;
+ }
  __atomic_store_n(&fg_irq_ok, 0, __ATOMIC_SEQ_CST);
  fg_irq_dead(3);
  for (unsigned i = 0; i < 1000000 && __atomic_load_n(&fg_irq_inside, __ATOMIC_SEQ_CST); i++) __asm__ volatile("yield");
