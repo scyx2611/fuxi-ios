@@ -1,6 +1,6 @@
 # 由工作區 work/repo-export/export-fuxi-ios.py 產生，請勿手改
 harness HEAD 8462b76bd6d0c7288c619ec902956593dabdc3fe（branch codex/adsp-battery）
-workspace HEAD cc48ac37c3ececea5f095ba918773dda895f85de（只匯出已提交內容）
+workspace HEAD 9cd24f3f9bdf4b570c175870503134c11362375e（只匯出已提交內容）
 
 # 核心基底：本機建置（work/localbuild/fuxi-kernel-build.sh）從本倉庫歷史取這個 tree，不連上游
 kernel-base 979e2f08c704677bb75934ae96d4686ba9d1692b 73399c0c833e17e8a3f86f921e9f473a76cd7999 zgl97/ios-fuxi
