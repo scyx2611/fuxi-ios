@@ -1048,6 +1048,50 @@
 - **結論／未完成**：`boot #475`（`R1b`）實證 Turnip `#45858992261` 成功消滅 `53` 筆 `ERROR_FORMAT_NOT_SUPPORTED` 與 `34,000` 次 `shadow copy-ins` 並大幅降低大部分非 512B 對齊外之 shadow 負擔，但頂部黑塊尚未消除，且切換 App 時易因 `backboardd[57]` `smmu fsr 00000402 far 00000001:1fad4270` 觸發 `CRASH sig 11` 並永久退回 CPU（完測已安全還原 `Stick-14`）；Gate 2 CI `#45905226350` 已順利產出並凍結 `FD740` 雙層合成 ISA（`combined_sha256=827954dc…`），可供後續 Phase B scanout/合成路徑及調查 `#475` SMMU fault 根因復用。
 - **出處**：`work/statusbar-fix/stage-turnip-hybrid.sh`、`work/adsp-battery/fuxilog/20261127-064400/console.txt`、`work/Codex-Xiaomi13-GPU-20261109/run-b023-r1b-blacktile-1127b/`、`work/statusbar-fix/stage-b023-r1b-nativemetal-1127/`、`work/statusbar-fix/run-run-b023-r1b-blacktile-1127b-stage/`、`work/statusbar-fix/stage-b023-r1b-restore-stick14-1127/`、`work/Codex-Xiaomi13-GPU-20261109/phaseb-ir3-probe-45905226350/`（遠端 CI commit `scyx2611/fuxi-metal-frontend-check-20261108` `codex/hybrid-lane` `0818eecbee38155c0a07ccc1b2b64140f3823c31`）。
 
+### G-057 Task C-5：boot #475 SMMU Fault (FAR_HI=0x1) 離線 RCA、0033 黑塊 Plan B 接線草案與 Phase B-1 核心整合草案（含兩道前置安全閘門）
+
+- **日期**：2026-11-27（台北時間）
+- **狀態**：純離線 RCA 與整合草案已備妥（尚未上機，嚴守 `phone_operations = 0`）；已定案 `boot #475` SMMU CB2 `FAR_HI=0x1` (`0x00000001:1fad4270`) 故障與降級鏈並完成兩項數據口徑校正，另完成 Track 1 `0033` `DontCarePreserve` 雙補丁草案（預設關閉、`101` asserts）與 `phaseb-ksrc` Phase B-1 核心整合草案（納入 Gate 2 ISA `827954dc…`、`43` asserts）；載明**兩道前置安全閘門**（`FAR_HI=0x1` 未隔離前禁將 `0033` 上機；`phaseb_fs.asm` `c0.x` preamble 覆寫修正前禁開啟 `fuxiscangpudual=1`）；屬 `B-023` 隔離線（未併入 `B-022` 日常版）
+- **開關**：`0033` Plan B 接線預設關閉（`0`），優先序：`DeniedProcess`（永久拒絕 `SpringBoard`、`mediaserverd`、`*poster*`、空名）> `FUXI_M2V_DONT_CARE_PRESERVE` > `fuxim2vdcp=0|1` > `fuxitudebug=...,dcpreserve` > ADT `/chosen/fuxi,m2v-dcp` (`u32` LE) > `DefaultOff`；Phase B-1 核心預設關閉（`fuxiscangpudual=0` / ADT `fuxi,scanout-gpu-dual=0`）
+- **問題／現象**：
+  1. **多工卡片黑塊與切換 App 掉 GPU（`boot #475` `R1b`）**：`R1b` 實機雖消除 `ERROR_FORMAT_NOT_SUPPORTED` 與 shadow 風暴，但頁面移動／多工卡片頂部黑塊未消，且執行 `Maps` → 底部上滑啟動 `recentsd` 時發生 `backboardd[57]` `smmu fsr 00000402 far 00000001:1fad4270` → `CRASH sig 11`，接續 `backboardd[337]` 撞 `0x603` 永久降級 CPU。
+  2. **Plan B `0030` 控制開關與 Phase B-1 核心整合**：須為 `0030` `DontCarePreserve` 補齊可安全上機測試之預設關閉控制開關與遙測（不得影響 `SpringBoard`/`mediaserverd`/`*poster*` 之 `U-026` 契約），並將 Gate 2 CI `#45905226350` 凍結版 `FD740` ISA 整併至 `ksrc` Phase B-1 雙層合成核心補丁草案。
+- **根因**：
+  1. **`boot #475` SMMU CB2 `FAR_HI=0x1` 硬體翻譯錯誤與連環降級鏈**：
+     - SMMU CB2 設為 `CBn_TCR = 0x80802020`（`T0SZ = 32`、`EPD1 = 1`，`CBn_TCR2 = 0x38011`、`CBn_SCTLR = 0x1067`），僅支援 32-bit TTBR0（`0x0000_0000 .. 0xffff_ffff`），所有合法 client GPUVA 限於 `[0x2000_0000, 0x8000_0000)`。`exec recentsd`（`L10512`）後於 `seq 1012`（`L10528`），GPU 讀取子單元（`fsynr0 = 0x000d0000`：`PLVL=0`, `WNR=0`, `PTWF=0`, `fsynr0_hi=0x000d`）發出 64-bit IOVA `0x00000001:1fad4270`（`FAR_HI=0x00000001`），直接於 Level 0 觸發 Translation Fault（`fsr = 0x00000402`）。
+     - 降級鏈：`ksrc` Class 0 軟恢復重置硬體（`fg_state=1`）並回 `-1` → `kIOReturnIOError` (`0xe00002ca`) → `FUXI TURNIP LOST: wait fence failed: 0xe00002ca`（`L10539`）→ `backboardd[57]` 尚未進入 `noteFirstLostOnce` / `fuxiFailure()` 即觸發 `far 0x0` 空指標 `SIGSEGV`（`pc 0x107413654`, `L10540-10543`）→ `backboardd[337]` 重啟尚未開 `type 0`（僅開 `type 16711`, `L10688`）期間遇邊緣上滑（`L10697`），`fuxi_gpu_poll()` 撞無軟恢復分支之 `0x603`（`L10738`），`fg_isolate()` 寫死 `SID0/1 faulted`（`L10739`），後續 `type 0` 回 `0xe00002d5` 並寫入 `next-respawn=CPU persisted=1`（`L10749-10758`）。
+     - 三段改動嫌疑排除與釐清：`0029`（`MAX_COMMAND_POOLS=8`, `MAX_POOL_CBS=64`, `KEPT=16`）與 `0030`（`env=0` `PassReach::Draws`）皆已排除為元兇；`mesa-hyb-drm-linear-hostimport.patch` 在非 4 倍數高度 `BLIT_EVENT_LOAD`（`align_scissor=true`）雖存理論尾端越界風險，但合法 BO 之 `FAR_HI` 必為 `0x0`，無法解釋 `0x00000001:1fad4270`（`hyb` 僅放大 `live_bos` `261→711`、`imports` `5→16`、`ibs` `4.3→20.7`）。假設排序為 H1（`hyb`＋線性 host-import 在 `recentsd`/多工下讀寫高 32 位異常位址）> H2（`recentsd` 共現變因）> H3（`0029`/`0030` 邊角）> H4（獨立 `align_scissor`）。
+  2. **兩項數據口徑校正（`BOOT475_SMMU_FAULT_RCA.zh-TW.md §2.1`）**：
+     - 對照基線 `boot #472`（`work/adsp-battery/fuxilog/20261126-224305/console.txt`）之 `ERROR_FORMAT_NOT_SUPPORTED` 實搜確切為 **`25` 筆**（早期通報誤引 `53` 筆）。
+     - `boot #475` 故障前 `backboardd p99 = 3.942 ms` 僅為 `L8871` 單幀靜止空窗（`window_frames=1`）；真實活躍窗口為 `L9960`（`134` 幀，`p99 = 58.695 ms`）與 `L10327`（`449` 幀，`p95 = 24.357 ms` / `p99 = 91.867 ms`）。
+  3. **Gate 2 `phaseb_fs.asm` 常數覆寫缺陷（前置安全閘門 2）**：
+     - `phaseb-ir3-probe-45905226350/phaseb_fs.asm` L5/L18 顯示 `; offsets: preamble c0.x (4 vec4)` 且 preamble 執行 `stc.u32 c[0], r48.z, 1`（寫入 `l0_has_alpha` 至 `c0.x`），但 L27 主程式同時將 `c0.x` 用作 push constant `pass_y`（`mad.f32 r1.y, c4.y, r1.y, c0.x`）。根因為 `adreno_compiler_probe.c:823` 傳入 `const_allocs = {0}` 未預留 push constants 所佔 `4 vec4`，致 `ir3_opt_preamble` 分配重疊覆寫 `c0.x`。
+- **做法**：
+  1. **離線 RCA 定案與二分矩陣（`BOOT475_SMMU_FAULT_RCA.zh-TW.md`）**：完成 `#475` vs `#472` 逐欄對賬與口徑校正，制定步驟 0（離線解譯 `BR-IB1`/`BR-IB2-HEAD` `CP_SET_DRAW_STATE` 與 `.ips` 符號化）及二分組 A/B/C 定位計畫。
+  2. **Track 1 `m2v-dcp` `0033` Plan B 備援接線草案（`work/localbuild/b023-gpu-c5-1127/m2v-dcp/`）**：
+     - `patches/nativemetal-fuxi-0033-dont-care-preserve-wiring.patch`（`431` 行、`19,232 B`、SHA-256 `1638c05d801cde8bba7de262bc311e1dbfd0982db641f5ff8d1135cdbc2bba12`，適用 `UniXNU/NativeMetal`）：新增 `FuxiDontCarePreserve.h`，修改 `NativeBridgeMetalFrontend.mm` 與 `bridge/NativeMetalObjects.{h,rs}`，對接 `0030` FFI 符號 `nmb_device_dont_care_{cleared,preserved}_attachments` 與 `fuxi_native_metal_metric(11|12)` 遙測。
+     - `patches/fuxi-m2v-dont-care-preserve-setup.patch`（`293` 行、`19,965 B`、SHA-256 `eebaf406d322d631121aa7c3f498069a81610d564cb22eea4063e3d9180e5f03`，選配配套 `ios-fuxi` `tools/fuxi-metal/{ClientSetup.hpp, BackboardGate.hpp, Frontend.mm, ClientSetupTests.cpp, BackboardGateTests.cpp}`）與 `patches/native-metal-check-wiring.diff`（`21` 行、`1,765 B`、`146ce00a9fea594102c12fb177990563f23f6bf74e5d13cadea0ea0bec50774b`）。
+     - **U-026/B-019 保護契約**：`FuxiTextureLayout.inc`、`ClientGate.hpp`、`NativeBridgeMetalFrontend.h`、`FuxiNativeABI.h`、`NativeAdrenoMetalPlugin.mm` 維持 `0 diff / SHA-256 不變`，且永久拒絕 `SpringBoard`、`mediaserverd` 及 `*poster*`。
+  3. **Track 2 `phaseb-ksrc` Phase B-1 核心整合草案（`work/localbuild/b023-gpu-c5-1127/phaseb-ksrc/`）**：
+     - `kernel-gpu-phaseb1.patch`（`3,156` 行、`145,632 B`、SHA-256 `d51d69baa48722b9e139466ecd5b5e24b18879e07d6a93035b0e574c7fad7f69`）與 `harness-workflow-phaseb1.patch`（`24` 行、`2,215 B`、SHA-256 `cb441880ecace1d35590c6f0cd577e68d875cfbe2b9315b43f62c58aff0aef25`），嚴格疊加於 `ksrc` (`a00205b`) + `kernel-sweetfb-multilayer-blend.patch`（Phase 12D-A）之上。
+     - 納入 Gate 2 `#45905226350` 凍結版 `xnu/fuxi-adreno/fuxi_gpu_composite_isa.h`（`FUXI_PB_ISA_SHADER_SHA256 = 827954dc5afd77a713269e46986e7b35b990dc83b14e7b3e02e8326793580e47`、`FUXI_PB_VS_CONSTLEN=8u`, `FUXI_PB_FS_CONSTLEN=8u`）；新增純整數 C + `__builtin_clz` 之 `xnu/fuxi-adreno/fuxi_gpu_3d_blit.inc`（動態 `FG_3D_SCRATCH_VA = G3_SQE_VA + 0x2a000u`、2-pass `stride=2` PM4、於 `fs_const[16..19]` 顯式填入 `@const(c4.x)` `{-2.0f, 2.0f, 0.0f, 1.0f}`、U-026 `RB_SRGB_CNTL=0`/`SP_SRGB_CNTL=0`/`TPL1_TEX_MEMOBJ[0].SRGB=0`、45 巨集 `_Static_assert`）。
+     - 擴充 `fuxi_adreno.{h,c}`（`FG_CACHE_SLOTS=8u`、`G3_PT` 14 頁含前後 4 KiB Guard Pages、`!fg_3d_inflight_active` 保護 `fg_scanout_verify()`）、`SweetSurface.{h,cpp}`（`sweet_gpu_inflight_surfaces[4]` / `sweet_surface_gpu_compose2` / 無條件 `writerEpoch` 檢核 / quarantine + `sweet_surface_display_poison`）、`SweetFramebuffer.cpp`（`presentMultiLayer()` 快速路徑與無副作用 Phase A 回退），並同步 `xnu/patches/{0098, 0106, 0108}` 與 4 支核心 Python 測試。
+- **復現**：
+  - 本項目為離線隔離草案，尚未合入主 `ksrc`/`mac-ci-work` 亦未上機。隔離驗證指令：
+    - `0033` 接線檢核：`PYTHONDONTWRITEBYTECODE=1 python3 -X utf8 -B work/localbuild/b023-gpu-c5-1127/m2v-dcp/tests/test-nativemetal-0033-wiring.py`
+    - Phase B-1 核心檢核：`PYTHONDONTWRITEBYTECODE=1 python3 -X utf8 -B work/localbuild/b023-gpu-c5-1127/phaseb-ksrc/tests/run_phaseb1_tests.py`
+- **主機測試**：
+  - `m2v-dcp/tests/FuxiDontCarePreserveTests.cpp`（`308` 行、`101` 個 `assert`，`14,272 B`, SHA-256 `3072a034c76bb731d3a7980d3749c93d5eba32261673f5e59ddef236993ece98`）與 `test-nativemetal-0033-wiring.py`（`277` 行、6 階段：`CR=0/.pyc=0`、`0030` FFI 對齊、`0033`/`setup` 雙向 `git apply` + ASan/UBSan、workflow diff；因會唯讀讀取 `mac-ci-work/` 且目錄內未保存靜態 `.log`，歸檔盤點未於本輪重跑）。
+  - `phaseb-ksrc/tests/test_phaseb1_kernel.c`（`374` 行、`43` 個 `assert`，`14,950 B`, SHA-256 `61ad56f63f340dd0f1096b010ac003cf7cd11ff3a414ff7a4d81efb68c6e610a`）、`arch_int_unit.c`（`120` 行、`4,620 B`, `-mgeneral-regs-only` 純整數）與 `run_phaseb1_tests.py`（`96` 行、`4,138 B`, C11 ASan/UBSan + `llvm-objdump -d` 零 FP/NEON 掃描；目錄內未保存靜態 `.log`）。
+- **驗證紀錄**：
+  - **純離線狀態（尚未上機、`phone_operations = 0`）**：`work/localbuild/b023-gpu-c5-1127/` 共 14 個檔案經全量 SHA-256 校驗與編碼檢查（`CR=0`、`BOM=False`、`.pyc=0`）完好，但**尚未進行任何實機開機或遠端 CI 推送**。
+  - **兩道前置安全閘門（強制阻斷未解前上機）**：
+    1. **閘門 1（`FAR_HI=0x1` SMMU Fault 上機阻斷）**：在未徹底解釋並隔離 `smmu fsr 0x402`（`far = 0x00000001:1fad4270`）之使用者態／`hyb`／`recentsd` 觸發來源並切斷 `0x603` 降級鏈前，嚴禁將 `nativemetal-fuxi-0033-dont-care-preserve-wiring.patch` 視為唯一可直接上機方案。
+    2. **閘門 2（`phaseb_fs.asm` `c0.x` preamble 覆寫阻斷）**：在實機啟用 `fuxiscangpudual=1` 測試前，必須先修正 `adreno_compiler_probe.c:823` `const_allocs`（預留 push constants 所佔 `4 vec4`）並重跑 Gate 2 重新產生凍結版 `fuxi_gpu_composite_isa.h`（現行草案預設 `fuxiscangpudual=0`，可安全合入但不開機實測雙層 3D 路徑）。
+- **參考來源**：`G-056`、`G-055`、`G-054`、`U-026`、`B-019`、`work/adsp-battery/fuxilog/20261127-064400/console.txt`、`work/adsp-battery/fuxilog/20261126-224305/console.txt`、`work/Codex-Xiaomi13-GPU-20261109/phaseb-ir3-probe-45905226350/`。
+- **結論／未完成**：Task C-5 已完成 `boot #475` SMMU `FAR_HI=0x1` (`0x00000001:1fad4270`) 與 `backboardd[57] far 0x0 -> [337] 0x603` 降級鏈離線定性、兩項 `#472`/`#475` 數據口徑校正，以及 `0033`（`m2v-dcp`）與 Phase B-1（`phaseb-ksrc`）兩份隔離補丁草案與測試備妥；兩案皆明確受**兩道前置安全閘門**約束，待依序完成 `FAR_HI=0x1` 步驟 0 離線解譯與 A/B/C 二分隔離，並於 `adreno_compiler_probe.c` 修正 `c0.x` preamble 重疊後重跑 Gate 2，方得進入後續 CI 與實機驗證。
+- **出處**：`work/localbuild/b023-gpu-c5-1127/BOOT475_SMMU_FAULT_RCA.zh-TW.md`（SHA-256 `45fe4719bcb65ee4dbdfbb3c97d4acf38c22c2bef30deea77a7bf1f14a9c98b4`）、`work/localbuild/b023-gpu-c5-1127/m2v-dcp/`、`work/localbuild/b023-gpu-c5-1127/phaseb-ksrc/INTEGRATION_NOTES.md`（SHA-256 `cf4335c7146f8b9ed0381c56a5883cc26f2686ed038307b6b337867f0d938075`）、`work/localbuild/b023-gpu-c5-1127/phaseb-ksrc/`。
+
 ## 盤點附註（2026-11-18）
 
 > 整理 GPU 紀錄時記下的漏讀與疑點，原文照錄（編號已改成本紀錄庫的編號）。處理後請在對應項目更新，並刪掉這裡的條目。

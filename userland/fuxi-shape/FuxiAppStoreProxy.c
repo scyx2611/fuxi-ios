@@ -1,5 +1,5 @@
 /*
- * Route 2 AppStore.app media proxy + T5 hybrid read-only diagnostic probes.
+ * Route 2 AppStore.app media proxy + T6 hybrid read-only diagnostic probes.
  *
  * Design & references (AGENTS.md section 0):
  *  - Reuses the 4-library link allowlist (libSystem.B.dylib, libobjc.A.dylib,
@@ -8,10 +8,11 @@
  *  - Reuses pure-C URL/header/gate helpers from FuxiAppStoreProxy.h and safe
  *    objc_lookUpClass + _dyld_register_func_for_add_image swizzling pattern
  *    from FuxiAppStoreDiag.h.
- *  - Privacy-hardened for T5 login/purchase flows: URLs are always truncated at
+ *  - Privacy-hardened for T6 login/purchase flows: URLs are always truncated at
  *    '?' and '#' via apsd_cfurl_host_path(), Cookie/auth headers are stripped on
- *    rewritten public web endpoints, and CFError formatting only emits domain:code,
- *    numeric AMSStatusCode/AMSServerErrorCode, and NSUnderlyingError domain:code
+ *    rewritten public web endpoints, header presence probes emit only 0/1 flags,
+ *    and CFError formatting only emits domain:code, whitelisted numeric status
+ *    codes, and recursive NSUnderlyingError/NSMultipleUnderlyingErrorsKey chains
  *    (never reading NSLocalizedDescription or NSErrorFailingURLStringKey).
  */
 #include <CoreFoundation/CoreFoundation.h>
@@ -56,10 +57,16 @@ static unsigned apsd_proxy_tok_calls;
 static unsigned apsd_proxy_rw_calls;
 static unsigned apsd_proxy_img_calls;
 static unsigned apsd_url_done_calls;
+static unsigned apsd_url_key_done_calls;
+static unsigned apsd_nsurl_req_calls;
 static unsigned apsd_mescal_calls;
+static unsigned apsd_mescal_req_calls;
+static struct fuxi_appstore_mescal_sign_state apsd_mescal_fp_sign_state;
+static struct fuxi_appstore_mescal_sign_state apsd_mescal_sess_sign_state;
 static unsigned apsd_sap_calls;
 static unsigned apsd_bag_calls;
 static unsigned apsd_promise_calls;
+static unsigned apsd_promise_204_calls;
 static unsigned apsd_auth_calls;
 static unsigned apsd_purchase_calls;
 
@@ -75,6 +82,7 @@ static bool apsd_inst_mescal_init;
 static bool apsd_inst_mescal_exch;
 static bool apsd_inst_mescal_sign;
 static bool apsd_inst_mescal_prime;
+static bool apsd_inst_mescal_sig_req;
 static bool apsd_inst_msess_est_b;
 static bool apsd_inst_msess_est_id;
 static bool apsd_inst_msess_cert;
@@ -102,6 +110,7 @@ static IMP apsd_orig_mescal_init;
 static IMP apsd_orig_mescal_exch;
 static IMP apsd_orig_mescal_sign;
 static IMP apsd_orig_mescal_prime;
+static IMP apsd_orig_mescal_sig_req;
 static IMP apsd_orig_msess_est_b;
 static IMP apsd_orig_msess_est_id;
 static IMP apsd_orig_msess_cert;
@@ -390,6 +399,21 @@ static long apsd_cfdata_len(const void *obj)
     return (long)CFDataGetLength((CFDataRef)obj);
 }
 
+static long apsd_cfstr_or_data_len(const void *obj)
+{
+    if (obj == NULL) {
+        return -1;
+    }
+    CFTypeID tid = CFGetTypeID((CFTypeRef)obj);
+    if (tid == CFStringGetTypeID()) {
+        return (long)CFStringGetLength((CFStringRef)obj);
+    }
+    if (tid == CFDataGetTypeID()) {
+        return (long)CFDataGetLength((CFDataRef)obj);
+    }
+    return -2;
+}
+
 static bool apsd_cfstr_exact(const void *obj, char *out, size_t cap)
 {
     if (out == NULL || cap < 2u) {
@@ -489,43 +513,111 @@ static void apsd_cfurl_host_path(const void *url_obj, char *out, size_t cap)
     }
 }
 
-static void apsd_req_url_raw(id req, char *out, size_t cap)
+static bool apsd_req_url_raw(id req, char *out, size_t cap, bool *oversize_out)
 {
+    if (oversize_out != NULL) {
+        *oversize_out = false;
+    }
     if (out == NULL || cap < 2u) {
-        return;
+        return false;
     }
     out[0] = 0;
     if (req == NULL) {
-        return;
+        return false;
     }
     id url = apsd_objc0(req, "URL");
     if (url == NULL) {
-        return;
+        return false;
     }
     CFTypeID tid = CFGetTypeID((CFTypeRef)url);
+    CFStringRef ustr = NULL;
     if (tid == CFURLGetTypeID()) {
-        (void)apsd_cfstr_exact(CFURLGetString((CFURLRef)url), out, cap);
+        ustr = CFURLGetString((CFURLRef)url);
     } else if (tid == CFStringGetTypeID()) {
-        (void)apsd_cfstr_exact(url, out, cap);
+        ustr = (CFStringRef)url;
+    } else {
+        return false;
+    }
+    if (ustr == NULL) {
+        return false;
+    }
+    if (!apsd_cfstr_exact(ustr, out, cap)) {
+        if (oversize_out != NULL) {
+            *oversize_out = true;
+        }
+        out[0] = 0;
+        return false;
+    }
+    return out[0] != 0;
+}
+
+/* Emits strictly 0/1 presence booleans for sensitive signature/Anisette headers; never reads values */
+static void apsd_req_hdr_flags(id req, unsigned *has_sig, unsigned *has_md, unsigned *has_mdm)
+{
+    *has_sig = 0u;
+    *has_md = 0u;
+    *has_mdm = 0u;
+    if (req == NULL) {
+        return;
+    }
+    id hdrs = apsd_objc0(req, "allHTTPHeaderFields");
+    if (hdrs == NULL || CFGetTypeID((CFTypeRef)hdrs) != CFDictionaryGetTypeID()) {
+        return;
+    }
+    CFIndex cnt = CFDictionaryGetCount((CFDictionaryRef)hdrs);
+    if (cnt <= 0 || cnt > (CFIndex)FUXI_APPSTORE_MAX_HDR_SCAN) {
+        return;
+    }
+    const void *keys[FUXI_APPSTORE_MAX_HDR_SCAN];
+    const void *vals[FUXI_APPSTORE_MAX_HDR_SCAN];
+    char kbufs[FUXI_APPSTORE_MAX_HDR_SCAN][64];
+    struct fuxi_appstore_hdr_entry entries[FUXI_APPSTORE_MAX_HDR_SCAN];
+    CFDictionaryGetKeysAndValues((CFDictionaryRef)hdrs, keys, vals);
+    for (CFIndex i = 0; i < cnt; i++) {
+        kbufs[i][0] = 0;
+        size_t klen = apsd_cfstr(keys[i], kbufs[i], sizeof(kbufs[i]));
+        bool nonempty = false;
+        if (klen > 0u && vals[i] != NULL) {
+            nonempty = true;
+            if (CFGetTypeID((CFTypeRef)vals[i]) == CFStringGetTypeID()) {
+                nonempty = (CFStringGetLength((CFStringRef)vals[i]) > 0);
+            }
+        }
+        entries[i].name = kbufs[i];
+        entries[i].name_len = klen;
+        entries[i].nonempty = nonempty;
+    }
+    struct fuxi_appstore_hdr_flags flags;
+    if (fuxi_appstore_scan_hdr_flags(entries, (size_t)cnt, &flags)) {
+        *has_sig = flags.has_sig;
+        *has_md = flags.has_md;
+        *has_mdm = flags.has_mdm;
     }
 }
 
-static void apsd_task_url_and_status(id task, char *url_out, size_t url_cap, long *status_out)
+static void apsd_task_url_status_hdrs(id task, char *url_out, size_t url_cap, long *status_out,
+    unsigned *has_sig, unsigned *has_md, unsigned *has_mdm)
 {
     *status_out = -1;
+    *has_sig = 0u;
+    *has_md = 0u;
+    *has_mdm = 0u;
     if (task == NULL) {
         snprintf(url_out, url_cap, "(nil-task)");
         return;
     }
-    id req = apsd_objc0(task, "originalRequest");
-    if (req == NULL) {
-        req = apsd_objc0(task, "currentRequest");
-    }
-    if (req == NULL) {
+    id cur_req = apsd_objc0(task, "currentRequest");
+    id orig_req = apsd_objc0(task, "originalRequest");
+    id url_req = orig_req != NULL ? orig_req : cur_req;
+    id hdr_req = cur_req != NULL ? cur_req : orig_req;
+    if (url_req == NULL) {
         snprintf(url_out, url_cap, "(nil-req)");
     } else {
-        id url = apsd_objc0(req, "URL");
+        id url = apsd_objc0(url_req, "URL");
         apsd_cfurl_host_path((const void *)url, url_out, url_cap);
+    }
+    if (hdr_req != NULL) {
+        apsd_req_hdr_flags(hdr_req, has_sig, has_md, has_mdm);
     }
     id resp = apsd_objc0(task, "response");
     if (resp != NULL) {
@@ -537,87 +629,152 @@ static void apsd_task_url_and_status(id task, char *url_out, size_t url_cap, lon
     }
 }
 
-static void apsd_fmt_dict_num(CFDictionaryRef dict, CFStringRef key, char *out, size_t cap)
+static bool apsd_err_dom_code(const void *err_obj, char *dom_out, size_t dom_cap, long *code_out)
 {
-    out[0] = 0;
-    if (dict == NULL || key == NULL) {
-        return;
+    if (dom_out != NULL && dom_cap > 0u) {
+        dom_out[0] = 0;
     }
-    CFTypeRef val = CFDictionaryGetValue(dict, key);
-    if (val != NULL && CFGetTypeID(val) == CFNumberGetTypeID()) {
-        int64_t ival = 0;
-        if (CFNumberGetValue((CFNumberRef)val, kCFNumberSInt64Type, &ival)) {
-            snprintf(out, cap, "%lld", (long long)ival);
-        }
+    if (code_out != NULL) {
+        *code_out = 0L;
     }
-}
-
-static void apsd_fmt_cferr_depth(const void *err_obj, char *out, size_t cap, int depth);
-
-static void apsd_fmt_userinfo(CFDictionaryRef info, char *out, size_t cap, int depth)
-{
-    out[0] = 0;
-    if (info == NULL || CFGetTypeID(info) != CFDictionaryGetTypeID()) {
-        return;
-    }
-    char ams_sc[32];
-    char ams_ec[32];
-    char under[240];
-    ams_sc[0] = 0;
-    ams_ec[0] = 0;
-    under[0] = 0;
-    apsd_fmt_dict_num(info, CFSTR("AMSStatusCode"), ams_sc, sizeof(ams_sc));
-    apsd_fmt_dict_num(info, CFSTR("AMSServerErrorCode"), ams_ec, sizeof(ams_ec));
-    if (depth < 2) {
-        CFTypeRef u = CFDictionaryGetValue(info, CFSTR("NSUnderlyingError"));
-        if (u != NULL && CFGetTypeID(u) == CFErrorGetTypeID()) {
-            apsd_fmt_cferr_depth(u, under, sizeof(under), depth + 1);
-        }
-    }
-    snprintf(out, cap, "%s%s%s%s%s%s",
-        ams_sc[0] ? " http=" : "", ams_sc,
-        ams_ec[0] ? " ams_ec=" : "", ams_ec,
-        under[0] ? " under=[" : "", under[0] ? under : "");
-    if (under[0]) {
-        size_t l = strlen(out);
-        if (l + 2u < cap) {
-            out[l] = ']';
-            out[l + 1u] = 0;
-        }
-    }
-}
-
-/* Strictly emits domain:code, numeric AMS codes, and NSUnderlyingError domain:code only. */
-static void apsd_fmt_cferr_depth(const void *err_obj, char *out, size_t cap, int depth)
-{
-    if (out == NULL || cap < 2u) {
-        return;
-    }
-    if (err_obj == NULL) {
-        snprintf(out, cap, "none");
-        return;
-    }
-    if (CFGetTypeID((CFTypeRef)err_obj) != CFErrorGetTypeID()) {
-        snprintf(out, cap, "<non-err>");
-        return;
+    if (err_obj == NULL || CFGetTypeID((CFTypeRef)err_obj) != CFErrorGetTypeID()) {
+        return false;
     }
     CFErrorRef err = (CFErrorRef)err_obj;
-    char dom[96];
-    char extra[340];
-    dom[0] = 0;
-    extra[0] = 0;
-    apsd_cfstr(CFErrorGetDomain(err), dom, sizeof(dom));
-    CFDictionaryRef info = CFErrorCopyUserInfo(err);
-    if (info != NULL) {
-        apsd_fmt_userinfo(info, extra, sizeof(extra), depth);
-        CFRelease(info);
+    if (dom_out != NULL && dom_cap > 1u) {
+        apsd_cfstr(CFErrorGetDomain(err), dom_out, dom_cap);
     }
-    snprintf(out, cap, "%s:%ld%s", dom[0] ? dom : "?", (long)CFErrorGetCode(err), extra);
+    if (code_out != NULL) {
+        *code_out = (long)CFErrorGetCode(err);
+    }
+    return true;
 }
 
+static bool apsd_cf_is_err(const void *obj)
+{
+    return obj != NULL && CFGetTypeID((CFTypeRef)obj) == CFErrorGetTypeID();
+}
+
+static void apsd_cf_get_dom_code(const void *err_obj, char *dom_out, size_t dom_cap, long *code_out)
+{
+    (void)apsd_err_dom_code(err_obj, dom_out, dom_cap, code_out);
+}
+
+static const void *apsd_cf_copy_userinfo(const void *err_obj)
+{
+    return (const void *)CFErrorCopyUserInfo((CFErrorRef)err_obj);
+}
+
+static void apsd_cf_release_userinfo(const void *info_obj)
+{
+    if (info_obj != NULL) {
+        CFRelease((CFTypeRef)info_obj);
+    }
+}
+
+static bool apsd_cf_for_each_kv(const void *info_obj, fuxi_appstore_kv_cb cb, void *ctx)
+{
+    if (info_obj == NULL || CFGetTypeID((CFTypeRef)info_obj) != CFDictionaryGetTypeID()) {
+        return true;
+    }
+    CFDictionaryRef dict = (CFDictionaryRef)info_obj;
+    CFIndex cnt = CFDictionaryGetCount(dict);
+    if (cnt <= 0) {
+        return true;
+    }
+    if (cnt > (CFIndex)FUXI_APPSTORE_ERR_MAX_SCAN_KEYS) {
+        return false;
+    }
+    const void *keys[FUXI_APPSTORE_ERR_MAX_SCAN_KEYS];
+    const void *vals[FUXI_APPSTORE_ERR_MAX_SCAN_KEYS];
+    CFDictionaryGetKeysAndValues(dict, keys, vals);
+    for (CFIndex i = 0; i < cnt; i++) {
+        char kbuf[64];
+        kbuf[0] = 0;
+        if (apsd_cfstr(keys[i], kbuf, sizeof(kbuf)) > 0u) {
+            cb(kbuf, vals[i], ctx);
+        }
+    }
+    return true;
+}
+
+static bool apsd_cf_lookup_key(const void *info_obj, const char *key, const void **val_out)
+{
+    if (info_obj == NULL || key == NULL || val_out == NULL ||
+        CFGetTypeID((CFTypeRef)info_obj) != CFDictionaryGetTypeID()) {
+        return false;
+    }
+    CFStringRef cf_key = NULL;
+    if (strcmp(key, "AMSStatusCode") == 0) {
+        cf_key = CFSTR("AMSStatusCode");
+    } else if (strcmp(key, "AMSServerErrorCode") == 0) {
+        cf_key = CFSTR("AMSServerErrorCode");
+    } else if (strcmp(key, "AKAnisetteError") == 0) {
+        cf_key = CFSTR("AKAnisetteError");
+    } else if (strcmp(key, "AKUnderlyingADIErrors") == 0) {
+        cf_key = CFSTR("AKUnderlyingADIErrors");
+    } else if (strcmp(key, "NSUnderlyingError") == 0) {
+        cf_key = CFSTR("NSUnderlyingError");
+    } else if (strcmp(key, "NSMultipleUnderlyingErrorsKey") == 0) {
+        cf_key = CFSTR("NSMultipleUnderlyingErrorsKey");
+    }
+    if (cf_key == NULL) {
+        return false;
+    }
+    *val_out = CFDictionaryGetValue((CFDictionaryRef)info_obj, cf_key);
+    return *val_out != NULL;
+}
+
+static bool apsd_cf_read_int64(const void *val_obj, int64_t *out_val)
+{
+    if (val_obj == NULL || out_val == NULL || CFGetTypeID((CFTypeRef)val_obj) != CFNumberGetTypeID()) {
+        return false;
+    }
+    return CFNumberGetValue((CFNumberRef)val_obj, kCFNumberSInt64Type, out_val) != false;
+}
+
+static bool apsd_cf_is_array(const void *val_obj)
+{
+    return val_obj != NULL && CFGetTypeID((CFTypeRef)val_obj) == CFArrayGetTypeID();
+}
+
+static size_t apsd_cf_array_count(const void *arr_obj)
+{
+    if (arr_obj == NULL || CFGetTypeID((CFTypeRef)arr_obj) != CFArrayGetTypeID()) {
+        return 0u;
+    }
+    CFIndex cnt = CFArrayGetCount((CFArrayRef)arr_obj);
+    return cnt > 0 ? (size_t)cnt : 0u;
+}
+
+static const void *apsd_cf_array_item(const void *arr_obj, size_t index)
+{
+    if (arr_obj == NULL || CFGetTypeID((CFTypeRef)arr_obj) != CFArrayGetTypeID()) {
+        return NULL;
+    }
+    CFIndex cnt = CFArrayGetCount((CFArrayRef)arr_obj);
+    if (cnt <= 0 || index >= (size_t)cnt) {
+        return NULL;
+    }
+    return CFArrayGetValueAtIndex((CFArrayRef)arr_obj, (CFIndex)index);
+}
+
+/* Strictly emits domain:code, whitelisted numeric status codes, and recursive CFError chains only. */
 static void apsd_fmt_err(const void *err_obj, char *out, size_t cap)
 {
-    apsd_fmt_cferr_depth(err_obj, out, cap, 0);
+    const struct fuxi_appstore_err_ops ops = {
+        .is_err = apsd_cf_is_err,
+        .get_dom_code = apsd_cf_get_dom_code,
+        .copy_userinfo = apsd_cf_copy_userinfo,
+        .release_userinfo = apsd_cf_release_userinfo,
+        .for_each_kv = apsd_cf_for_each_kv,
+        .lookup_key = apsd_cf_lookup_key,
+        .read_int64 = apsd_cf_read_int64,
+        .is_array = apsd_cf_is_array,
+        .array_count = apsd_cf_array_count,
+        .array_item = apsd_cf_array_item,
+    };
+    fuxi_appstore_format_err_depth(err_obj, &ops, out, cap, 0);
 }
 
 /* ---- Route 2 UI browsing hooks ---- */
@@ -718,8 +875,8 @@ static id apsd_maybe_rewrite_req(id req, bool *owned_out)
     apsd_busy++;
     char orig_url[2048];
     orig_url[0] = 0;
-    apsd_req_url_raw(req, orig_url, sizeof(orig_url));
-    if (orig_url[0] == 0 || strlen(orig_url) >= sizeof(orig_url) - 1u) {
+    bool oversize = false;
+    if (!apsd_req_url_raw(req, orig_url, sizeof(orig_url), &oversize) || oversize) {
         apsd_busy--;
         return req;
     }
@@ -823,11 +980,43 @@ static id apsd_maybe_rewrite_req(id req, bool *owned_out)
     return mreq;
 }
 
+static void apsd_log_nsurl_req(id req)
+{
+    if (req == NULL || apsd_busy ||
+        __atomic_load_n(&apsd_log_mode, __ATOMIC_RELAXED) == 0u ||
+        __atomic_load_n(&apsd_hybrid_mode, __ATOMIC_RELAXED) == 0u) {
+        return;
+    }
+    apsd_busy++;
+    char raw_url[2048];
+    raw_url[0] = 0;
+    bool oversize = false;
+    bool has_raw = apsd_req_url_raw(req, raw_url, sizeof(raw_url), &oversize);
+    if (oversize || (has_raw && fuxi_appstore_is_key_auth_buy_url(raw_url))) {
+        if (__atomic_add_fetch(&apsd_nsurl_req_calls, 1u, __ATOMIC_RELAXED) <= 160u) {
+            char safe_url[512];
+            unsigned has_sig = 0u, has_md = 0u, has_mdm = 0u;
+            if (oversize) {
+                if (!fuxi_appstore_mask_url_host_path_bounded(NULL, true, safe_url, sizeof(safe_url))) {
+                    snprintf(safe_url, sizeof(safe_url), "[url_oversize_redacted]");
+                }
+            } else {
+                apsd_cfurl_host_path((const void *)apsd_objc0(req, "URL"), safe_url, sizeof(safe_url));
+            }
+            apsd_req_hdr_flags(req, &has_sig, &has_md, &has_mdm);
+            apsd_logf("NSURL_REQ", "url=%s has_sig=%u has_md=%u has_mdm=%u",
+                safe_url, has_sig, has_md, has_mdm);
+        }
+    }
+    apsd_busy--;
+}
+
 static id apsd_hook_nsurl_task0(id self, SEL cmd, id req)
 {
     id (*orig)(id, SEL, id) = (id (*)(id, SEL, id))__atomic_load_n(&apsd_orig_nsurl_task[0], __ATOMIC_ACQUIRE);
     bool owned = false;
     id eff_req = apsd_maybe_rewrite_req(req, &owned);
+    apsd_log_nsurl_req(eff_req);
     id task = orig(self, cmd, eff_req);
     if (owned) {
         apsd_busy++;
@@ -842,6 +1031,7 @@ static id apsd_hook_nsurl_task1(id self, SEL cmd, id req)
     id (*orig)(id, SEL, id) = (id (*)(id, SEL, id))__atomic_load_n(&apsd_orig_nsurl_task[1], __ATOMIC_ACQUIRE);
     bool owned = false;
     id eff_req = apsd_maybe_rewrite_req(req, &owned);
+    apsd_log_nsurl_req(eff_req);
     id task = orig(self, cmd, eff_req);
     if (owned) {
         apsd_busy++;
@@ -856,6 +1046,7 @@ static id apsd_hook_nsurl_task_ch0(id self, SEL cmd, id req, id handler)
     id (*orig)(id, SEL, id, id) = (id (*)(id, SEL, id, id))__atomic_load_n(&apsd_orig_nsurl_task_ch[0], __ATOMIC_ACQUIRE);
     bool owned = false;
     id eff_req = apsd_maybe_rewrite_req(req, &owned);
+    apsd_log_nsurl_req(eff_req);
     id task = orig(self, cmd, eff_req, handler);
     if (owned) {
         apsd_busy++;
@@ -870,6 +1061,7 @@ static id apsd_hook_nsurl_task_ch1(id self, SEL cmd, id req, id handler)
     id (*orig)(id, SEL, id, id) = (id (*)(id, SEL, id, id))__atomic_load_n(&apsd_orig_nsurl_task_ch[1], __ATOMIC_ACQUIRE);
     bool owned = false;
     id eff_req = apsd_maybe_rewrite_req(req, &owned);
+    apsd_log_nsurl_req(eff_req);
     id task = orig(self, cmd, eff_req, handler);
     if (owned) {
         apsd_busy++;
@@ -882,25 +1074,36 @@ static id apsd_hook_nsurl_task_ch1(id self, SEL cmd, id req, id handler)
 static void apsd_hook_ams_url_done(id self, SEL cmd, id sess, id task, id err)
 {
     void (*orig)(id, SEL, id, id, id) = (void (*)(id, SEL, id, id, id))__atomic_load_n(&apsd_orig_ams_url_done, __ATOMIC_ACQUIRE);
-    if (__atomic_load_n(&apsd_log_mode, __ATOMIC_RELAXED) != 0u &&
-        __atomic_add_fetch(&apsd_url_done_calls, 1u, __ATOMIC_RELAXED) <= 200u) {
+    if (__atomic_load_n(&apsd_log_mode, __ATOMIC_RELAXED) != 0u) {
         apsd_busy++;
         char url[512];
         long status = -1;
-        apsd_task_url_and_status(task, url, sizeof(url), &status);
-        if (err != NULL) {
-            char eb[460];
-            apsd_fmt_err(err, eb, sizeof(eb));
-            apsd_logf("AMS_DONE", "http=%ld url=%s err=%s", status, url, eb);
+        unsigned has_sig = 0u, has_md = 0u, has_mdm = 0u;
+        apsd_task_url_status_hdrs(task, url, sizeof(url), &status, &has_sig, &has_md, &has_mdm);
+        const bool is_key_or_err = (err != NULL || status != 200L || fuxi_appstore_is_key_auth_buy_url(url));
+        bool should_log = false;
+        if (is_key_or_err) {
+            should_log = (__atomic_add_fetch(&apsd_url_key_done_calls, 1u, __ATOMIC_RELAXED) <= 160u);
         } else {
-            apsd_logf("AMS_DONE", "http=%ld url=%s ok", status, url);
+            should_log = (__atomic_add_fetch(&apsd_url_done_calls, 1u, __ATOMIC_RELAXED) <= 200u);
+        }
+        if (should_log) {
+            if (err != NULL) {
+                char eb[460];
+                apsd_fmt_err(err, eb, sizeof(eb));
+                apsd_logf("AMS_DONE", "http=%ld has_sig=%u has_md=%u has_mdm=%u url=%s err=%s",
+                    status, has_sig, has_md, has_mdm, url, eb);
+            } else {
+                apsd_logf("AMS_DONE", "http=%ld has_sig=%u has_md=%u has_mdm=%u url=%s ok",
+                    status, has_sig, has_md, has_mdm, url);
+            }
         }
         apsd_busy--;
     }
     orig(self, cmd, sess, task, err);
 }
 
-/* ---- T5 Read-only diagnostic probes (non-blocking, privacy-safe) ---- */
+/* ---- T6 Read-only diagnostic probes (non-blocking, non-ARC *ep safe, privacy-safe) ---- */
 
 static id apsd_hook_sap_exch(id self, SEL cmd, id data, id *err_out)
 {
@@ -910,10 +1113,11 @@ static id apsd_hook_sap_exch(id self, SEL cmd, id data, id *err_out)
     id res = orig(self, cmd, data, ep);
     if (__atomic_add_fetch(&apsd_sap_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("SAP", "stage=exchangeData in_len=%ld out_len=%ld ok=%u err=%s",
-            apsd_cfdata_len(data), apsd_cfdata_len(res), (res != NULL && *ep == NULL) ? 1u : 0u, eb);
+            apsd_cfdata_len(data), apsd_cfdata_len(res), res != NULL ? 1u : 0u, eb);
         apsd_busy--;
     }
     return res;
@@ -927,13 +1131,26 @@ static id apsd_hook_sap_sign(id self, SEL cmd, id data, id *err_out)
     id res = orig(self, cmd, data, ep);
     if (__atomic_add_fetch(&apsd_sap_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("SAP", "stage=signData in_len=%ld out_len=%ld ok=%u err=%s",
-            apsd_cfdata_len(data), apsd_cfdata_len(res), (res != NULL && *ep == NULL) ? 1u : 0u, eb);
+            apsd_cfdata_len(data), apsd_cfdata_len(res), res != NULL ? 1u : 0u, eb);
         apsd_busy--;
     }
     return res;
+}
+
+static bool apsd_mescal_admit_other(void)
+{
+    pthread_mutex_lock(&apsd_lock);
+    unsigned total = __atomic_load_n(&apsd_mescal_calls, __ATOMIC_RELAXED);
+    bool admit = (total < FUXI_APPSTORE_MESCAL_CAP);
+    if (admit) {
+        __atomic_store_n(&apsd_mescal_calls, total + 1u, __ATOMIC_RELAXED);
+    }
+    pthread_mutex_unlock(&apsd_lock);
+    return admit;
 }
 
 static id apsd_hook_mescal_init(id self, SEL cmd, intptr_t mtype, id *err_out)
@@ -942,12 +1159,13 @@ static id apsd_hook_mescal_init(id self, SEL cmd, intptr_t mtype, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     id res = orig(self, cmd, mtype, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
+    if (apsd_mescal_admit_other()) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("MESCAL", "stage=initWithMescalType mescalType=%ld ok=%u err=%s",
-            (long)mtype, (res != NULL && *ep == NULL) ? 1u : 0u, eb);
+            (long)mtype, res != NULL ? 1u : 0u, eb);
         apsd_busy--;
     }
     return res;
@@ -959,15 +1177,45 @@ static id apsd_hook_mescal_exch(id self, SEL cmd, id data, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     id res = orig(self, cmd, data, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
+    if (apsd_mescal_admit_other()) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("MESCAL", "stage=fairplay.exchangeData in_len=%ld out_len=%ld ok=%u err=%s",
-            apsd_cfdata_len(data), apsd_cfdata_len(res), (res != NULL && *ep == NULL) ? 1u : 0u, eb);
+            apsd_cfdata_len(data), apsd_cfdata_len(res), res != NULL ? 1u : 0u, eb);
         apsd_busy--;
     }
     return res;
+}
+
+static void apsd_log_mescal_sign_event(
+    const char *stage, struct fuxi_appstore_mescal_sign_state *sign_state,
+    id data, id res, const void *err_obj)
+{
+    apsd_busy++;
+    char dom[96];
+    long code = 0L;
+    (void)apsd_err_dom_code(err_obj, dom, sizeof(dom), &code);
+
+    pthread_mutex_lock(&apsd_lock);
+    unsigned total = __atomic_load_n(&apsd_mescal_calls, __ATOMIC_RELAXED);
+    bool admit = fuxi_appstore_should_log_mescal_sign_state(
+        res != NULL, dom, code, total, sign_state);
+    unsigned repeat_n = sign_state->repeat_304;
+    if (admit) {
+        __atomic_store_n(&apsd_mescal_calls, total + 1u, __ATOMIC_RELAXED);
+    }
+    pthread_mutex_unlock(&apsd_lock);
+
+    if (admit) {
+        char eb[460];
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
+        apsd_logf("MESCAL", "stage=%s in_len=%ld out_len=%ld ok=%u r304=%u err=%s",
+            stage, apsd_cfdata_len(data), apsd_cfdata_len(res),
+            res != NULL ? 1u : 0u, repeat_n, eb);
+    }
+    apsd_busy--;
 }
 
 static id apsd_hook_mescal_sign(id self, SEL cmd, id data, id *err_out)
@@ -976,14 +1224,8 @@ static id apsd_hook_mescal_sign(id self, SEL cmd, id data, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     id res = orig(self, cmd, data, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
-        apsd_busy++;
-        char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
-        apsd_logf("MESCAL", "stage=fairplay.signData in_len=%ld out_len=%ld ok=%u err=%s",
-            apsd_cfdata_len(data), apsd_cfdata_len(res), (res != NULL && *ep == NULL) ? 1u : 0u, eb);
-        apsd_busy--;
-    }
+    const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
+    apsd_log_mescal_sign_event("fairplay.signData", &apsd_mescal_fp_sign_state, data, res, err_obj);
     return res;
 }
 
@@ -993,12 +1235,48 @@ static id apsd_hook_mescal_prime(id self, SEL cmd, id data, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     id res = orig(self, cmd, data, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
+    if (apsd_mescal_admit_other()) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("MESCAL", "stage=fairplay.primingSignature in_len=%ld out_len=%ld ok=%u err=%s",
-            apsd_cfdata_len(data), apsd_cfdata_len(res), (res != NULL && *ep == NULL) ? 1u : 0u, eb);
+            apsd_cfdata_len(data), apsd_cfdata_len(res), res != NULL ? 1u : 0u, eb);
+        apsd_busy--;
+    }
+    return res;
+}
+
+/* AMSMescalType is NSInteger ('q' on arm64 LP64); long matches 64-bit signed 'q' and %ld */
+static id apsd_hook_mescal_sig_req(id self, SEL cmd, id req, long mtype, id bag, id *err_out)
+{
+    id (*orig)(id, SEL, id, long, id, id *) =
+        (id (*)(id, SEL, id, long, id, id *))__atomic_load_n(&apsd_orig_mescal_sig_req, __ATOMIC_ACQUIRE);
+    char url[512];
+    unsigned has_sig_pre = 0u, has_md = 0u, has_mdm = 0u;
+    url[0] = 0;
+    if (!apsd_busy) {
+        apsd_busy++;
+        if (req != NULL) {
+            apsd_cfurl_host_path((const void *)apsd_objc0(req, "URL"), url, sizeof(url));
+            apsd_req_hdr_flags(req, &has_sig_pre, &has_md, &has_mdm);
+        } else {
+            snprintf(url, sizeof(url), "(nil-req)");
+        }
+        apsd_busy--;
+    }
+    id local_err = NULL;
+    id *ep = err_out ? err_out : &local_err;
+    id res = orig(self, cmd, req, mtype, bag, ep);
+    if (!apsd_busy && __atomic_add_fetch(&apsd_mescal_req_calls, 1u, __ATOMIC_RELAXED) <= 160u) {
+        apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
+        char eb[460];
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
+        apsd_logf("MESCAL_REQ",
+            "type=%ld url=%s has_md=%u has_mdm=%u pre_sig=%u ok=%u sig_len=%ld err=%s",
+            mtype, url[0] ? url : "(unknown)", has_md, has_mdm, has_sig_pre,
+            res != NULL ? 1u : 0u, apsd_cfstr_or_data_len(res), eb);
         apsd_busy--;
     }
     return res;
@@ -1010,10 +1288,11 @@ static bool apsd_hook_msess_est_b(id self, SEL cmd, id bag, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     bool ok = orig(self, cmd, bag, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
+    if (apsd_mescal_admit_other()) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(ok, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("MESCAL", "stage=session._establishContext ok=%u err=%s", ok ? 1u : 0u, eb);
         apsd_busy--;
     }
@@ -1026,12 +1305,13 @@ static id apsd_hook_msess_est_id(id self, SEL cmd, id bag, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     id res = orig(self, cmd, bag, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
+    if (apsd_mescal_admit_other()) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("MESCAL", "stage=session._establishContext ok=%u err=%s",
-            (res != NULL && *ep == NULL) ? 1u : 0u, eb);
+            res != NULL ? 1u : 0u, eb);
         apsd_busy--;
     }
     return res;
@@ -1043,12 +1323,13 @@ static id apsd_hook_msess_cert(id self, SEL cmd, id bag, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     id res = orig(self, cmd, bag, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
+    if (apsd_mescal_admit_other()) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("MESCAL", "stage=session._loadCertificateData out_len=%ld ok=%u err=%s",
-            apsd_cfdata_len(res), (res != NULL && *ep == NULL) ? 1u : 0u, eb);
+            apsd_cfdata_len(res), res != NULL ? 1u : 0u, eb);
         apsd_busy--;
     }
     return res;
@@ -1060,12 +1341,13 @@ static id apsd_hook_msess_post(id self, SEL cmd, id data, id bag, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     id res = orig(self, cmd, data, bag, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
+    if (apsd_mescal_admit_other()) {
         apsd_busy++;
+        const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
         char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
+        apsd_fmt_err(err_obj, eb, sizeof(eb));
         apsd_logf("MESCAL", "stage=session._postExchangeData in_len=%ld out_len=%ld ok=%u err=%s",
-            apsd_cfdata_len(data), apsd_cfdata_len(res), (res != NULL && *ep == NULL) ? 1u : 0u, eb);
+            apsd_cfdata_len(data), apsd_cfdata_len(res), res != NULL ? 1u : 0u, eb);
         apsd_busy--;
     }
     return res;
@@ -1077,14 +1359,8 @@ static id apsd_hook_msess_sign(id self, SEL cmd, id data, id bag, id *err_out)
     id local_err = NULL;
     id *ep = err_out ? err_out : &local_err;
     id res = orig(self, cmd, data, bag, ep);
-    if (__atomic_add_fetch(&apsd_mescal_calls, 1u, __ATOMIC_RELAXED) <= 80u) {
-        apsd_busy++;
-        char eb[460];
-        apsd_fmt_err(*ep, eb, sizeof(eb));
-        apsd_logf("MESCAL", "stage=session.signData in_len=%ld out_len=%ld ok=%u err=%s",
-            apsd_cfdata_len(data), apsd_cfdata_len(res), (res != NULL && *ep == NULL) ? 1u : 0u, eb);
-        apsd_busy--;
-    }
+    const void *err_obj = FUXI_APPSTORE_ERR_OUT(res != NULL, ep);
+    apsd_log_mescal_sign_event("session.signData", &apsd_mescal_sess_sign_state, data, res, err_obj);
     return res;
 }
 
@@ -1139,13 +1415,22 @@ static void apsd_log_promise_err(id err)
     if (err == NULL || apsd_busy) {
         return;
     }
-    if (__atomic_add_fetch(&apsd_promise_calls, 1u, __ATOMIC_RELAXED) > 150u) {
-        return;
-    }
     apsd_busy++;
-    char eb[480];
-    apsd_fmt_err(err, eb, sizeof(eb));
-    apsd_logf("PROMISE_ERR", "err=%s", eb);
+    char dom[96];
+    long code = 0L;
+    bool is_204 = false;
+    if (apsd_err_dom_code(err, dom, sizeof(dom), &code)) {
+        is_204 = fuxi_appstore_err_is_bag_missing(dom, code);
+    }
+    pthread_mutex_lock(&apsd_lock);
+    bool should_log = fuxi_appstore_promise_should_log(
+        is_204, &apsd_promise_204_calls, &apsd_promise_calls);
+    pthread_mutex_unlock(&apsd_lock);
+    if (should_log) {
+        char eb[640];
+        apsd_fmt_err(err, eb, sizeof(eb));
+        apsd_logf("PROMISE_ERR", "err=%s", eb);
+    }
     apsd_busy--;
 }
 
@@ -1219,9 +1504,9 @@ static id apsd_hook_purchase_perform(id self, SEL cmd)
 
 /* ---- Safe method swizzling (objc_lookUpClass + add_image) ---- */
 
-static bool apsd_try_install_one(const char *cls_name, const char *sel_name,
-    unsigned nargs, char ret_exp, char a2_exp, char a3_exp, char a4_exp,
-    IMP replacement, IMP *orig_slot, bool *done_flag)
+static bool apsd_try_install_one_ex(const char *cls_name, const char *sel_name,
+    unsigned nargs, char ret_exp, char a2_exp, char a3_exp, char a4_exp, char a5_exp,
+    bool is_class_method, IMP replacement, IMP *orig_slot, bool *done_flag)
 {
     if (*done_flag) {
         return false;
@@ -1231,7 +1516,7 @@ static bool apsd_try_install_one(const char *cls_name, const char *sel_name,
         return false;
     }
     SEL sel = sel_registerName(sel_name);
-    Method m = class_getInstanceMethod(cls, sel);
+    Method m = is_class_method ? class_getClassMethod(cls, sel) : class_getInstanceMethod(cls, sel);
     if (m == NULL) {
         return false;
     }
@@ -1243,8 +1528,8 @@ static bool apsd_try_install_one(const char *cls_name, const char *sel_name,
     if (!apsd_type_matches(rtype, ret_exp)) {
         return false;
     }
-    const char exps[3] = { a2_exp, a3_exp, a4_exp };
-    for (unsigned idx = 2; idx < nargs && idx < 5u; idx++) {
+    const char exps[4] = { a2_exp, a3_exp, a4_exp, a5_exp };
+    for (unsigned idx = 2; idx < nargs && idx < 6u; idx++) {
         char atype[32];
         method_getArgumentType(m, idx, atype, sizeof(atype));
         if (!apsd_type_matches(atype, exps[idx - 2u])) {
@@ -1259,8 +1544,16 @@ static bool apsd_try_install_one(const char *cls_name, const char *sel_name,
     __atomic_store_n(orig_slot, cur, __ATOMIC_RELEASE);
     (void)method_setImplementation(m, replacement);
     *done_flag = true;
-    apsd_logf("INST", "%s.%s ret=%s", cls_name, sel_name, rtype);
+    apsd_logf("INST", "%s%s.%s ret=%s", is_class_method ? "+" : "-", cls_name, sel_name, rtype);
     return true;
+}
+
+static bool apsd_try_install_one(const char *cls_name, const char *sel_name,
+    unsigned nargs, char ret_exp, char a2_exp, char a3_exp, char a4_exp,
+    IMP replacement, IMP *orig_slot, bool *done_flag)
+{
+    return apsd_try_install_one_ex(cls_name, sel_name, nargs, ret_exp, a2_exp, a3_exp, a4_exp, 0,
+        false, replacement, orig_slot, done_flag);
 }
 
 static void apsd_install_all(void)
@@ -1275,7 +1568,9 @@ static void apsd_install_all(void)
             (IMP)apsd_hook_token_fetch, &apsd_orig_token_fetch, &apsd_inst_token_fetch);
         (void)apsd_try_install_one("AMSMediaTokenService", "cachedMediaToken", 2u, '@', 0, 0, 0,
             (IMP)apsd_hook_token_cached, &apsd_orig_token_cached, &apsd_inst_token_cached);
+    }
 
+    if (fix_media || log_mode != 0u) {
         static const char *const url_classes[2] = { "__NSURLSessionLocal", "NSURLSession" };
         const IMP task_hooks[2] = { (IMP)apsd_hook_nsurl_task0, (IMP)apsd_hook_nsurl_task1 };
         const IMP task_ch_hooks[2] = { (IMP)apsd_hook_nsurl_task_ch0, (IMP)apsd_hook_nsurl_task_ch1 };
@@ -1296,7 +1591,7 @@ static void apsd_install_all(void)
         return;
     }
 
-    /* T5 hybrid read-only diagnostic probes */
+    /* T6 hybrid read-only diagnostic probes */
     (void)apsd_try_install_one("SSVFairPlaySAPContext", "exchangeData:error:", 4u, '@', '@', 'p', 0,
         (IMP)apsd_hook_sap_exch, &apsd_orig_sap_exch, &apsd_inst_sap_exch);
     (void)apsd_try_install_one("SSVFairPlaySAPContext", "signData:error:", 4u, '@', '@', 'p', 0,
@@ -1310,6 +1605,8 @@ static void apsd_install_all(void)
         (IMP)apsd_hook_mescal_sign, &apsd_orig_mescal_sign, &apsd_inst_mescal_sign);
     (void)apsd_try_install_one("AMSMescalFairPlay", "primingSignatureForData:error:", 4u, '@', '@', 'p', 0,
         (IMP)apsd_hook_mescal_prime, &apsd_orig_mescal_prime, &apsd_inst_mescal_prime);
+    (void)apsd_try_install_one_ex("AMSMescal", "signatureUsingRequest:type:bag:error:", 6u, '@', '@', 'q', '@', 'p',
+        true, (IMP)apsd_hook_mescal_sig_req, &apsd_orig_mescal_sig_req, &apsd_inst_mescal_sig_req);
 
     if (!apsd_inst_msess_est_b && !apsd_inst_msess_est_id) {
         if (!apsd_try_install_one("AMSMescalSession", "_establishContextWithBag:error:", 4u, 'b', '@', 'p', 0,

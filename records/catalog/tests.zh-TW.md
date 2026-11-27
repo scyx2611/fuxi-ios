@@ -208,7 +208,7 @@
 | `harness:tests/test-perf-governor.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `harness:tests/test-surface-plane-result.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml、kernel-surface-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
 | `harness:tests/test-surfrow-mode2.py` | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
-| `harness:tools/test-appstore-proxy.c` |  | [U-033](../items/U-userland.zh-TW.md#u-033-b-023-appstore-t5-混合探針建置補丁整合與共存實機驗證boot-474fxinj1406-與-fairplaydh2store-daemon-300s-共存) |
+| `harness:tools/test-appstore-proxy.c` |  | [U-033](../items/U-userland.zh-TW.md#u-033-b-023-appstore-t5-混合探針建置補丁整合與共存實機驗證boot-474fxinj1406-與-fairplaydh2store-daemon-300s-共存)、[U-035](../items/U-userland.zh-TW.md#u-035-task-a-7t5-post-2fa-amserrordomain304-深度-rcat6-diag-補丁合入-harness-與-libfuxi-appstoredylib-離線建置驗簽實機-t6-diag-並行測試中) |
 | `harness:tools/test-atx-fix.c` | sb-shape.yml | [U-026](../items/U-userland.zh-TW.md#u-026-springboardpreferences-偽-pre-twiddled-astc-atx-cpu-解碼改走線性解碼修復系統模糊背景區域發紫fuxiatx-fix) |
 | `harness:tools/test-audio-mic-dsp.c` | sb-shape.yml | [U-027](../items/U-userland.zh-TW.md#u-027-麥克風錄音品質與鍵盤聽寫修復fuxiaudio-mic-dsp-旁路fuxiaudio-啟動預緩衝4-hz-hpf0x0c08-增益與-fuxibluetoothlog-防崩潰) |
 | `harness:tools/test-bluetooth-patch.c` | sb-shape.yml | [U-023](../items/U-userland.zh-TW.md#u-023-bluetoothd-相容修補關藍牙閃退與單實例-ble-廣播fuxibt-fix) |

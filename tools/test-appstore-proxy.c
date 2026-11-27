@@ -340,7 +340,7 @@ int main(void)
     assert(!fuxi_appstore_should_unset_dyld_insert(NULL, FUXI_APPSTORE_SELF_DYLIB_PATH));
     assert(!fuxi_appstore_should_unset_dyld_insert("", FUXI_APPSTORE_SELF_DYLIB_PATH));
 
-    /* Process / ADT gate decision matrix (Route 2 vs T5 hybrid vs disabled) */
+    /* Process / ADT gate decision matrix (Route 2 vs T5/T6 hybrid vs disabled) */
     {
         struct fuxi_appstore_gate_decision g;
         g = fuxi_appstore_eval_gate("AppStore", 1u, 0u);
@@ -366,6 +366,377 @@ int main(void)
 
         g = fuxi_appstore_eval_gate(NULL, 1u, 1u);
         assert(!g.enabled && !g.proxy_mode && !g.hybrid_diag);
+    }
+
+    /* T6: PROMISE_ERR 204 bucketing ensures 500x Bag Missing never starves 6/100/304/AKAnisetteError */
+    {
+        assert(fuxi_appstore_err_is_bag_missing("AMSErrorDomain", 204L));
+        assert(!fuxi_appstore_err_is_bag_missing("AMSErrorDomain", 100L));
+        assert(!fuxi_appstore_err_is_bag_missing("AMSErrorDomain", 6L));
+        assert(!fuxi_appstore_err_is_bag_missing("AMSErrorDomain", 304L));
+        assert(!fuxi_appstore_err_is_bag_missing("AKAnisetteError", 204L));
+        assert(!fuxi_appstore_err_is_bag_missing(NULL, 204L));
+
+        unsigned bag_cnt = 0u;
+        unsigned other_cnt = 0u;
+        unsigned bag_logged = 0u;
+        unsigned other_logged = 0u;
+        for (unsigned i = 0; i < 500u; i++) {
+            if (fuxi_appstore_promise_should_log(true, &bag_cnt, &other_cnt)) {
+                bag_logged++;
+            }
+        }
+        assert(bag_logged == FUXI_APPSTORE_PROMISE_204_CAP);
+        assert(other_cnt == 0u);
+
+        for (unsigned i = 0; i < 10u; i++) {
+            assert(fuxi_appstore_promise_should_log(false, &bag_cnt, &other_cnt));
+            other_logged++;
+        }
+        assert(other_logged == 10u);
+        assert(other_cnt == 10u);
+        assert(!fuxi_appstore_promise_should_log(false, NULL, &other_cnt));
+        assert(!fuxi_appstore_promise_should_log(false, &bag_cnt, NULL));
+
+        /* Saturation boundary: 240th other error is admitted, 241st is rejected */
+        for (unsigned i = 10u; i < FUXI_APPSTORE_PROMISE_CAP; i++) {
+            assert(fuxi_appstore_promise_should_log(false, &bag_cnt, &other_cnt));
+            other_logged++;
+        }
+        assert(other_logged == FUXI_APPSTORE_PROMISE_CAP);
+        assert(other_cnt == FUXI_APPSTORE_PROMISE_CAP);
+        assert(!fuxi_appstore_promise_should_log(false, &bag_cnt, &other_cnt));
+        assert(other_cnt == FUXI_APPSTORE_PROMISE_CAP);
+    }
+
+    /* T6: Whitelist-only error userInfo key classification (rejects all string/sensitive keys) */
+    {
+        assert(fuxi_appstore_classify_err_key("AMSStatusCode") == FUXI_ERR_KEY_NUM_HTTP);
+        assert(fuxi_appstore_classify_err_key("AMSServerErrorCode") == FUXI_ERR_KEY_NUM_AMS_EC);
+        assert(fuxi_appstore_classify_err_key("AKAnisetteError") == FUXI_ERR_KEY_NUM_AK_ANISETTE);
+        assert(fuxi_appstore_classify_err_key("AKUnderlyingADIErrors") == FUXI_ERR_KEY_NUM_OR_ARR_ADI);
+        assert(fuxi_appstore_classify_err_key("NSUnderlyingError") == FUXI_ERR_KEY_UNDERLYING);
+        assert(fuxi_appstore_classify_err_key("NSMultipleUnderlyingErrorsKey") == FUXI_ERR_KEY_MULTI_UNDERLYING);
+
+        assert(fuxi_appstore_classify_err_key(NULL) == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("NSLocalizedDescription") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("NSDebugDescription") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("NSErrorFailingURLStringKey") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("AMSServerErrorMessage") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("AKAppleID") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("Authorization") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("Cookie") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("X-Token") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("X-Dsid") == FUXI_ERR_KEY_REJECT);
+        assert(fuxi_appstore_classify_err_key("password") == FUXI_ERR_KEY_REJECT);
+    }
+
+    /* T6: Shared 4-layer error tree formatting, array truncation, small buffer safety, and privacy enforcement */
+    {
+        char out[1024];
+        fuxi_appstore_format_err_tree(NULL, out, sizeof(out));
+        assert(strcmp(out, "none") == 0);
+
+        const FuxiAppStoreErrNode str_node = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC,
+            .kind = FUXI_ERR_VAL_STR,
+            .str_val = "SECRET_SHOULD_NEVER_PRINT",
+        };
+        fuxi_appstore_format_err_tree(&str_node, out, sizeof(out));
+        assert(strcmp(out, "<non-err>") == 0);
+        assert(strstr(out, "SECRET_SHOULD_NEVER_PRINT") == NULL);
+
+        const FuxiAppStoreErrNode v_http = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_INT64, .int_val = 403 };
+        const FuxiAppStoreErrNode v_ec = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_INT64, .int_val = 5001 };
+        const FuxiAppStoreErrNode v_an = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_INT64, .int_val = -8004 };
+        const FuxiAppStoreErrNode v_adi_scalar = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_INT64, .int_val = -45061 };
+        const FuxiAppStoreErrNode v_sec_cookie = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_STR, .str_val = "SECRET_COOKIE_VAL" };
+        const FuxiAppStoreErrNode v_sec_tok = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_STR, .str_val = "SECRET_TOKEN_VAL" };
+        const FuxiAppStoreErrNode v_sec_pw = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_STR, .str_val = "SECRET_PASSWORD_VAL" };
+        const FuxiAppStoreErrNode v_sec_desc = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_STR, .str_val = "SECRET_LOCALIZED_DESC" };
+
+        /* 5-layer nested NSUnderlyingError: L0 -> L1 -> L2 -> L3 -> L4 -> L5 (L5 must be truncated at depth 4) */
+        const FuxiAppStoreErrNode l5 = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "Layer5Domain", .code = 555,
+        };
+        const struct fuxi_appstore_err_kv l4_kvs[] = {
+            { "AMSStatusCode", &v_http },
+            { "AKUnderlyingADIErrors", &v_adi_scalar }, /* depth==4 must NOT expand adi */
+            { "NSUnderlyingError", &l5 },              /* depth==4 must NOT expand L5 */
+            { "NSLocalizedDescription", &v_sec_desc },
+        };
+        const FuxiAppStoreErrNode l4 = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "Layer4Domain", .code = 444, .kvs = l4_kvs, .kv_count = 4u,
+        };
+        const struct fuxi_appstore_err_kv l3_kvs[] = {
+            { "NSUnderlyingError", &l4 },
+            { "Cookie", &v_sec_cookie },
+        };
+        const FuxiAppStoreErrNode l3 = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "Layer3Domain", .code = 333, .kvs = l3_kvs, .kv_count = 2u,
+        };
+        const struct fuxi_appstore_err_kv l2_kvs[] = {
+            { "NSUnderlyingError", &l3 },
+            { "X-Token", &v_sec_tok },
+        };
+        const FuxiAppStoreErrNode l2 = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "Layer2Domain", .code = 222, .kvs = l2_kvs, .kv_count = 2u,
+        };
+        const struct fuxi_appstore_err_kv l1_kvs[] = {
+            { "AKAnisetteError", &v_an },
+            { "NSUnderlyingError", &l2 },
+            { "password", &v_sec_pw },
+        };
+        const FuxiAppStoreErrNode l1 = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "Layer1Domain", .code = 111, .kvs = l1_kvs, .kv_count = 3u,
+        };
+        const struct fuxi_appstore_err_kv l0_kvs[] = {
+            { "AMSStatusCode", &v_http },
+            { "AMSServerErrorCode", &v_ec },
+            { "Cookie", &v_sec_cookie },
+            { "X-Token", &v_sec_tok },
+            { "password", &v_sec_pw },
+            { "NSLocalizedDescription", &v_sec_desc },
+            { "NSUnderlyingError", &l1 },
+        };
+        const FuxiAppStoreErrNode l0 = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "AMSErrorDomain", .code = 100, .kvs = l0_kvs, .kv_count = 7u,
+        };
+        fuxi_appstore_format_err_tree(&l0, out, sizeof(out));
+        assert(strstr(out, "AMSErrorDomain:100 http=403 ams_ec=5001") != NULL);
+        assert(strstr(out, "Layer1Domain:111 ak_an=-8004") != NULL);
+        assert(strstr(out, "Layer2Domain:222") != NULL);
+        assert(strstr(out, "Layer3Domain:333") != NULL);
+        assert(strstr(out, "Layer4Domain:444 http=403") != NULL);
+        assert(strstr(out, "adi=[") == NULL); /* L4 is at depth==4 so ADI is truncated */
+        assert(strstr(out, "Layer5Domain") == NULL); /* L5 is beyond max depth 4 */
+        assert(strstr(out, "SECRET_COOKIE_VAL") == NULL);
+        assert(strstr(out, "SECRET_TOKEN_VAL") == NULL);
+        assert(strstr(out, "SECRET_PASSWORD_VAL") == NULL);
+        assert(strstr(out, "SECRET_LOCALIZED_DESC") == NULL);
+        assert(strstr(out, "Cookie") == NULL);
+        assert(strstr(out, "X-Token") == NULL);
+        assert(strstr(out, "password") == NULL);
+        assert(strstr(out, "NSLocalizedDescription") == NULL);
+
+        /* NSMultipleUnderlyingErrorsKey (5 elements -> only first 4 emitted) + AKUnderlyingADIErrors scalar & mixed array */
+        const FuxiAppStoreErrNode m0 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR, .domain = "M0", .code = 10 };
+        const FuxiAppStoreErrNode m1 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR, .domain = "M1", .code = 20 };
+        const FuxiAppStoreErrNode m2 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR, .domain = "M2", .code = 30 };
+        const FuxiAppStoreErrNode m3 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR, .domain = "M3", .code = 40 };
+        const FuxiAppStoreErrNode m4 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR, .domain = "M4_TRUNC", .code = 50 };
+        const FuxiAppStoreErrNode *const multi_items[] = { &m0, &m1, &m2, &m3, &m4 };
+        const FuxiAppStoreErrNode multi_arr = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ARR,
+            .arr_items = multi_items, .arr_count = 5u,
+        };
+
+        const FuxiAppStoreErrNode adi_n1 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_INT64, .int_val = -1 };
+        const FuxiAppStoreErrNode adi_e1 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR, .domain = "ADErr", .code = -42 };
+        const FuxiAppStoreErrNode adi_n2 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_INT64, .int_val = 2 };
+        const FuxiAppStoreErrNode adi_n3 = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_INT64, .int_val = -3 };
+        const FuxiAppStoreErrNode adi_n4_trunc = { .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_INT64, .int_val = 9999 };
+        const FuxiAppStoreErrNode *const adi_items[] = { &adi_n1, &adi_e1, &adi_n2, &adi_n3, &adi_n4_trunc, &str_node };
+        const FuxiAppStoreErrNode adi_arr = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ARR,
+            .arr_items = adi_items, .arr_count = 6u,
+        };
+
+        const struct fuxi_appstore_err_kv mix_kvs[] = {
+            { "AKAnisetteError", &v_an },
+            { "AKUnderlyingADIErrors", &adi_arr },
+            { "NSMultipleUnderlyingErrorsKey", &multi_arr },
+            { "Cookie", &v_sec_cookie },
+            { "X-Token", &v_sec_tok },
+        };
+        const FuxiAppStoreErrNode mix_root = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "AMSErrorDomain", .code = 100, .kvs = mix_kvs, .kv_count = 5u,
+        };
+        fuxi_appstore_format_err_tree(&mix_root, out, sizeof(out));
+        assert(strstr(out, "ak_an=-8004") != NULL);
+        assert(strstr(out, "adi=[-1,ADErr:-42,2,-3]") != NULL);
+        assert(strstr(out, "9999") == NULL);
+        assert(strstr(out, "multi=[M0:10; M1:20; M2:30; M3:40]") != NULL);
+        assert(strstr(out, "M4_TRUNC") == NULL);
+        assert(strstr(out, "SECRET_COOKIE_VAL") == NULL);
+        assert(strstr(out, "SECRET_TOKEN_VAL") == NULL);
+
+        /* Scalar AKUnderlyingADIErrors at depth 0 */
+        const struct fuxi_appstore_err_kv scalar_adi_kvs[] = {
+            { "AKUnderlyingADIErrors", &v_adi_scalar },
+            { "NSLocalizedDescription", &v_sec_desc },
+        };
+        const FuxiAppStoreErrNode scalar_adi_root = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "AKAuthenticationErrorDomain", .code = -7001, .kvs = scalar_adi_kvs, .kv_count = 2u,
+        };
+        fuxi_appstore_format_err_tree(&scalar_adi_root, out, sizeof(out));
+        assert(strcmp(out, "AKAuthenticationErrorDomain:-7001 adi=[-45061]") == 0);
+
+        /* >64 KVs triggers lookup_key fallback path and still filters out sensitive keys */
+        struct fuxi_appstore_err_kv many_kvs[70];
+        for (size_t i = 0u; i < 68u; i++) {
+            many_kvs[i].key = "X-Token";
+            many_kvs[i].val = &v_sec_tok;
+        }
+        many_kvs[68].key = "AMSStatusCode";
+        many_kvs[68].val = &v_http;
+        many_kvs[69].key = "AKAnisetteError";
+        many_kvs[69].val = &v_an;
+        const FuxiAppStoreErrNode many_root = {
+            .magic = FUXI_APPSTORE_ERR_NODE_MAGIC, .kind = FUXI_ERR_VAL_ERR,
+            .domain = "AMSErrorDomain", .code = 6, .kvs = many_kvs, .kv_count = 70u,
+        };
+        fuxi_appstore_format_err_tree(&many_root, out, sizeof(out));
+        assert(strcmp(out, "AMSErrorDomain:6 http=403 ak_an=-8004") == 0);
+
+        /* Small buffer boundary truncation without out-of-bounds write */
+        char canary[32];
+        memset(canary, 0x5a, sizeof(canary));
+        fuxi_appstore_format_err_tree(&mix_root, canary, 0u);
+        assert(canary[0] == 0x5a);
+        fuxi_appstore_format_err_tree(&mix_root, canary, 1u);
+        assert(canary[0] == '\0' && (unsigned char)canary[1] == 0x5a);
+        fuxi_appstore_format_err_tree(&mix_root, canary, 16u);
+        assert(strlen(canary) == 15u);
+        assert(strncmp(canary, "AMSErrorDomain:", 15u) == 0);
+        assert((unsigned char)canary[16] == 0x5a);
+    }
+
+    /* T6: Header presence flag classification & scanning (case-insensitive, empty filter, cnt > 64 guard) */
+    {
+        assert(fuxi_appstore_classify_diag_hdr(NULL, 0u) == FUXI_DIAG_HDR_NONE);
+        assert(fuxi_appstore_classify_diag_hdr("", 0u) == FUXI_DIAG_HDR_NONE);
+        assert(fuxi_appstore_classify_diag_hdr("X-Apple-ActionSignature", 23u) == FUXI_DIAG_HDR_ACTION_SIG);
+        assert(fuxi_appstore_classify_diag_hdr("x-apple-actionsignature", 23u) == FUXI_DIAG_HDR_ACTION_SIG);
+        assert(fuxi_appstore_classify_diag_hdr("X-APPLE-I-MD", 12u) == FUXI_DIAG_HDR_I_MD);
+        assert(fuxi_appstore_classify_diag_hdr("x-apple-i-md-m", 14u) == FUXI_DIAG_HDR_I_MD_M);
+        assert(fuxi_appstore_classify_diag_hdr("X-Apple-I-MD-LU", 15u) == FUXI_DIAG_HDR_NONE);
+        assert(fuxi_appstore_classify_diag_hdr("Cookie", 6u) == FUXI_DIAG_HDR_NONE);
+        assert(fuxi_appstore_classify_diag_hdr("X-Token", 7u) == FUXI_DIAG_HDR_NONE);
+        assert(fuxi_appstore_classify_diag_hdr("Authorization", 13u) == FUXI_DIAG_HDR_NONE);
+
+        struct fuxi_appstore_hdr_flags fl;
+        const struct fuxi_appstore_hdr_entry mixed_entries[] = {
+            { "Cookie", 6u, true },
+            { "x-apple-actionsignature", 23u, false }, /* empty value must NOT trigger has_sig */
+            { "X-APPLE-I-MD", 12u, true },
+            { "x-Apple-i-Md-M", 14u, true },
+            { "X-Token", 7u, true },
+        };
+        assert(fuxi_appstore_scan_hdr_flags(mixed_entries, 5u, &fl));
+        assert(fl.has_sig == 0u && fl.has_md == 1u && fl.has_mdm == 1u);
+
+        assert(!fuxi_appstore_scan_hdr_flags(mixed_entries, 0u, &fl));
+        assert(fl.has_sig == 0u && fl.has_md == 0u && fl.has_mdm == 0u);
+        assert(!fuxi_appstore_scan_hdr_flags(NULL, 1u, &fl));
+        assert(!fuxi_appstore_scan_hdr_flags(mixed_entries, 1u, NULL));
+
+        /* cnt == 64 succeeds (64th slot detected); cnt == 65 trips >64 guard */
+        struct fuxi_appstore_hdr_entry arr65[65];
+        for (size_t i = 0u; i < 65u; i++) {
+            arr65[i].name = "User-Agent";
+            arr65[i].name_len = 10u;
+            arr65[i].nonempty = true;
+        }
+        arr65[0].name = "X-Apple-ActionSignature";
+        arr65[0].name_len = 23u;
+        arr65[63].name = "x-apple-i-md-m";
+        arr65[63].name_len = 14u;
+        assert(fuxi_appstore_scan_hdr_flags(arr65, 64u, &fl));
+        assert(fl.has_sig == 1u && fl.has_md == 0u && fl.has_mdm == 1u);
+
+        assert(!fuxi_appstore_scan_hdr_flags(arr65, 65u, &fl));
+        assert(fl.has_sig == 0u && fl.has_md == 0u && fl.has_mdm == 0u);
+    }
+
+    /* T6: non-ARC *err_out guard (when succeeded=true, uninitialized/invalid *ep MUST NOT be dereferenced) */
+    {
+        int sentinel = 0x1234;
+        const void *err_ptr = &sentinel;
+        const void *const *ep_valid = &err_ptr;
+        const void *const *ep_unmapped = (const void *const *)(uintptr_t)0x10;
+        assert(FUXI_APPSTORE_ERR_OUT(true, ep_unmapped) == NULL);
+        assert(FUXI_APPSTORE_ERR_OUT(true, ep_valid) == NULL);
+        assert(FUXI_APPSTORE_ERR_OUT(false, ep_valid) == err_ptr);
+        assert(FUXI_APPSTORE_ERR_OUT(false, (const void *const *)NULL) == NULL);
+        assert(fuxi_appstore_select_err_ptr(true, err_ptr) == NULL);
+        assert(fuxi_appstore_select_err_ptr(false, err_ptr) == err_ptr);
+        assert(fuxi_appstore_select_err_ptr(false, NULL) == NULL);
+    }
+
+    /* T6: MESCAL signData independent per-stage 304 sampling (paired calls must NOT starve fairplay.signData) */
+    {
+        struct fuxi_appstore_mescal_sign_state fp_state = { 0u };
+        struct fuxi_appstore_mescal_sign_state sess_state = { 0u };
+        unsigned fp_logged = 0u;
+        unsigned sess_logged = 0u;
+        unsigned total_logged = 0u;
+        for (unsigned pair = 1u; pair <= 50u; pair++) {
+            bool fp_admit = fuxi_appstore_should_log_mescal_sign_state(
+                false, "AMSErrorDomain", 304L, total_logged, &fp_state);
+            if (fp_admit) {
+                fp_logged++;
+                total_logged++;
+            }
+            bool sess_admit = fuxi_appstore_should_log_mescal_sign_state(
+                false, "AMSErrorDomain", 304L, total_logged, &sess_state);
+            if (sess_admit) {
+                sess_logged++;
+                total_logged++;
+            }
+            bool expected_pair_admit = (pair <= FUXI_APPSTORE_MESCAL_SIGN_REPEAT_BURST) ||
+                ((pair % FUXI_APPSTORE_MESCAL_SIGN_STRIDE) == 0u);
+            assert(fp_admit == expected_pair_admit);
+            assert(sess_admit == expected_pair_admit);
+        }
+        assert(fp_state.repeat_304 == 50u);
+        assert(sess_state.repeat_304 == 50u);
+        assert(fp_logged == 27u);   /* 24 + {32, 40, 48} */
+        assert(sess_logged == 27u); /* 24 + {32, 40, 48} */
+        assert(total_logged == 54u);
+
+        /* Non-304 or ok=true resets only that stage's compression counter and logs immediately */
+        assert(fuxi_appstore_should_log_mescal_sign_state(false, "AMSErrorDomain", 302L, total_logged, &fp_state));
+        assert(fp_state.repeat_304 == 0u);
+        assert(sess_state.repeat_304 == 50u);
+        assert(fuxi_appstore_should_log_mescal_sign_state(false, "AMSErrorDomain", 304L, total_logged, &fp_state));
+        assert(fp_state.repeat_304 == 1u);
+        assert(fuxi_appstore_should_log_mescal_sign_state(true, NULL, 0L, total_logged, &sess_state));
+        assert(sess_state.repeat_304 == 0u);
+        assert(!fuxi_appstore_should_log_mescal_sign_state(true, NULL, 0L, FUXI_APPSTORE_MESCAL_CAP, &fp_state));
+    }
+
+    /* T6: Key auth/buy/store endpoint detection */
+    {
+        assert(fuxi_appstore_is_key_auth_buy_url("https://se-edge.itunes.apple.com/WebObjects/MZStoreElements.woa/wa/buyButtonMetaData"));
+        assert(fuxi_appstore_is_key_auth_buy_url("https://auth.itunes.apple.com/auth/v1/authenticate"));
+        assert(fuxi_appstore_is_key_auth_buy_url("https://buy.itunes.apple.com/WebObjects/MZBuy.woa/wa/buyProduct"));
+        assert(fuxi_appstore_is_key_auth_buy_url("HTTPS://P25-BUY.ITUNES.APPLE.COM:443/WebObjects/MZBuy.woa/wa/buyProduct"));
+        assert(fuxi_appstore_is_key_auth_buy_url("https://idmsa.apple.com/appleauth/auth/signin"));
+        assert(fuxi_appstore_is_key_auth_buy_url("https://gsa.apple.com/grandslam/GsService2"));
+        assert(fuxi_appstore_is_key_auth_buy_url("https://fpinit.itunes.apple.com/v1/signSapSetup/legacy"));
+        assert(fuxi_appstore_is_key_auth_buy_url("https://sf-api-token-service.itunes.apple.com/apiToken"));
+        assert(fuxi_appstore_is_key_auth_buy_url("https://bag.itunes.apple.com/bag.xml"));
+
+        assert(!fuxi_appstore_is_key_auth_buy_url(NULL));
+        assert(!fuxi_appstore_is_key_auth_buy_url(""));
+        assert(!fuxi_appstore_is_key_auth_buy_url("http://gsa.apple.com/grandslam/GsService2"));
+        assert(!fuxi_appstore_is_key_auth_buy_url("https://user@gsa.apple.com/grandslam/GsService2"));
+        assert(!fuxi_appstore_is_key_auth_buy_url("https://evil-gsa.apple.com/grandslam/GsService2"));
+        assert(!fuxi_appstore_is_key_auth_buy_url("https://gsa.apple.com.evil.com/grandslam/GsService2"));
+        assert(!fuxi_appstore_is_key_auth_buy_url("https://p-buy.itunes.apple.com/WebObjects/MZBuy.woa"));
+        assert(!fuxi_appstore_is_key_auth_buy_url("https://px-buy.itunes.apple.com/WebObjects/MZBuy.woa"));
+        assert(!fuxi_appstore_is_key_auth_buy_url("https://amp-api.apps.apple.com/v1/editorial/tw/today"));
+        assert(!fuxi_appstore_is_key_auth_buy_url("https://is1-ssl.mzstatic.com/image/thumb/a.webp"));
     }
 
     printf("test-appstore-proxy PASS\n");
